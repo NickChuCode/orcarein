@@ -1,0 +1,16 @@
+[package]
+name = "deeprig"
+description = "DeepRig CLI — an open-source agent harness for DeepSeek V4 and OpenAI-compatible models"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "deeprig"
+path = "src/main.rs"
+
+[dependencies]
+deeprig-core = { path = "../deeprig-core" }
