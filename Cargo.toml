@@ -12,11 +12,14 @@ repository = "https://github.com/<user>/deeprig"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Pinned in Cargo.toml of each member when first introduced (see spec §5.5).
-# Workspace-level only for crates used by both members.
+# Pinned here when first introduced (see spec §5.5).
+# Each member crate opts in with `<dep>.workspace = true`.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+# Ch05: HTTP client. "json" feature for serialize/deserialize bodies.
+# The "stream" feature is added in Ch07 when we do streaming SSE.
+reqwest = { version = "0.12", features = ["json"] }

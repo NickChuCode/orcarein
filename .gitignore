@@ -1,10 +1,6 @@
 target/
 **/*.rs.bk
 
-# Lock file: ignore pre-MVP for course pacing; Ch5 will un-ignore and commit it.
-# (Binary crates should commit Cargo.lock per Rust convention.)
-Cargo.lock
-
 # Secrets and session state
 .env
 *.session.json

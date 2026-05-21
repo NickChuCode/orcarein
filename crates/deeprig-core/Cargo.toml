@@ -9,4 +9,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# 章节中按需启用
+# Ch05: serde derive for message (de)serialization.
+serde = { workspace = true }
+
+[dev-dependencies]
+# Ch05: used only by unit tests (serde round-trip checks).
+serde_json = { workspace = true }
