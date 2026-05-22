@@ -5,7 +5,7 @@ members = ["crates/deeprig-core", "crates/deeprig"]
 [workspace.package]
 version = "0.0.0"
 # TODO(Ch17): replace placeholder before pushing to crates.io in Ch21
-authors = ["Your Name <your@email>"]
+authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/<user>/deeprig"
@@ -23,3 +23,5 @@ async-trait = "0.1"
 # Ch05: HTTP client. "json" feature for serialize/deserialize bodies.
 # The "stream" feature is added in Ch07 when we do streaming SSE.
 reqwest = { version = "0.12", features = ["json"] }
+# Ch06: line editor for the REPL (history, arrow keys, Ctrl+C/D handling).
+rustyline = "14"

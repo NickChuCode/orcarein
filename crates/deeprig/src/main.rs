@@ -1,108 +1,87 @@
-//! DeepRig CLI — entry point.
+//! DeepRig CLI — interactive chat REPL.
 //!
-//! Chapter 5 milestone: send one chat request to DeepSeek V4 and print the
-//! reply. No streaming, no multi-turn, no tools yet — those arrive in later
-//! chapters. The goal here is simply: prove the round trip works.
+//! Chapter 6 milestone: a multi-turn conversation loop. The binary reads a
+//! line, sends the whole conversation to DeepSeek, prints the reply, and
+//! repeats. A failed request prints an error and keeps the loop alive.
+//!
+//! Still missing (later chapters): streaming output (Ch07), tools (Ch09+).
 
-use anyhow::{bail, Context, Result};
+mod deepseek;
+
+use anyhow::{Context, Result};
 use deeprig_core::Message;
-use serde::Deserialize;
-use serde_json::json;
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 /// Model used when none is given on the command line.
-///
-/// DeepSeek V4 exposes `deepseek-v4-flash` (fast, cheap) and `deepseek-v4-pro`.
-/// We never hard-code this at the call site — it stays configurable so a
-/// future config file (Ch14) can override it.
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
-/// DeepSeek's OpenAI-compatible chat completions endpoint.
-const API_URL: &str = "https://api.deepseek.com/v1/chat/completions";
-
-/// The slice of DeepSeek's response we care about this chapter.
-///
-/// DeepSeek returns far more fields (`id`, `usage`, `system_fingerprint`, ...).
-/// `serde` ignores any field we don't declare, so we only model what we use.
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
-    content: String,
-    /// DeepSeek V4 is a reasoning model: it may return its chain of thought
-    /// here, separate from the final `content`.
-    ///
-    /// `#[serde(default)]` means "if this field is absent, use `Option`'s
-    /// default — `None`". Without it, a response lacking `reasoning_content`
-    /// would fail to deserialize.
-    #[serde(default)]
-    reasoning_content: Option<String>,
-}
+/// The system message that steers every conversation.
+const SYSTEM_PROMPT: &str = "You are DeepRig, a concise and helpful CLI assistant.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The API key comes from the environment. It is never written to a file
-    // or hard-coded. `.context()` turns the raw VarError into a message that
-    // tells the user exactly what to do.
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .context("DEEPSEEK_API_KEY not set. In PowerShell: $env:DEEPSEEK_API_KEY = '<your-key>'")?;
-
-    // Model name: first CLI argument, or the default. Run a different model
-    // with: `cargo run -- deepseek-v4-pro`
     let model = std::env::args()
         .nth(1)
         .unwrap_or_else(|| DEFAULT_MODEL.into());
 
-    // The conversation. For now it is a single user message; Ch06 makes this
-    // an interactive, growing list.
-    let messages = vec![Message::user("用一句话介绍你自己。")];
-
     let client = reqwest::Client::new();
-    let response = client
-        .post(API_URL)
-        .bearer_auth(&api_key)
-        .json(&json!({
-            "model": model,
-            "messages": messages,
-            "stream": false,
-        }))
-        .send()
-        .await
-        .context("HTTP request to DeepSeek failed")?;
 
-    // Read status and body separately so we can show DeepSeek's own error
-    // explanation on a 4xx/5xx — `reqwest`'s `error_for_status()` would
-    // discard the body, which is exactly where the useful detail lives.
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read the response body")?;
-    if !status.is_success() {
-        bail!("DeepSeek returned {status}:\n{body}");
-    }
+    // The running conversation. The system message goes first; user and
+    // assistant messages accumulate so the model sees full context each turn.
+    let mut messages = vec![Message::system(SYSTEM_PROMPT)];
 
-    let parsed: ChatResponse =
-        serde_json::from_str(&body).context("response JSON did not match the expected shape")?;
-    let reply = parsed
-        .choices
-        .first()
-        .context("DeepSeek returned an empty `choices` array")?;
+    let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
 
-    // V4 may "think" before answering. Show the reasoning if it sent any.
-    if let Some(reasoning) = &reply.message.reasoning_content {
-        if !reasoning.is_empty() {
-            println!("[思考]\n{reasoning}\n");
+    println!("DeepRig — chat with {model}. Ctrl+D or /exit to quit.\n");
+
+    loop {
+        // `readline` blocks until the user presses Enter. Blocking inside an
+        // async fn is fine here: there is nothing else to do while we wait.
+        let line = match editor.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue, // Ctrl+C: discard input
+            Err(ReadlineError::Eof) => break,            // Ctrl+D: quit
+            Err(e) => return Err(e).context("line editor failed"),
+        };
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input == "/exit" || input == "/quit" {
+            break;
+        }
+        let _ = editor.add_history_entry(input);
+
+        messages.push(Message::user(input));
+
+        // A failed request must NOT crash the REPL. We `match` the `Result`
+        // instead of using `?`: `?` would propagate the error out of `main`
+        // and end the program. In a loop, we want to recover and continue.
+        match deepseek::chat(&client, &api_key, &model, &messages).await {
+            Ok(reply) => {
+                if let Some(reasoning) = &reply.reasoning {
+                    if !reasoning.is_empty() {
+                        println!("[思考]\n{reasoning}\n");
+                    }
+                }
+                println!("[回复]\n{}\n", reply.message.content);
+                messages.push(reply.message);
+            }
+            Err(e) => {
+                // `{e:#}` prints the whole error chain — every `.context()`
+                // layer, joined with ": ".
+                eprintln!("[错误] {e:#}\n");
+                // The user's turn got no reply. Drop it so the next request
+                // is not two `user` messages in a row.
+                messages.pop();
+            }
         }
     }
-    println!("[回复]\n{}", reply.message.content);
 
+    println!("再见。");
     Ok(())
 }
