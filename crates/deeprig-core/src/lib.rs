@@ -4,8 +4,10 @@
 //! shared between the binary and external embedders.
 
 pub mod message;
+pub mod session;
 
 pub use message::Message;
+pub use session::{Session, TokenUsage};
 
 /// Returns the crate version (semver string).
 pub fn version() -> &'static str {

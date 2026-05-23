@@ -1,14 +1,17 @@
-//! DeepSeek V4 chat client — streaming SSE (Ch07 supersedes Ch06's `chat`).
+//! DeepSeek V4 chat client — streaming SSE with usage reporting.
 //!
-//! Why streaming: long replies feel frozen if we wait for the whole body.
-//! V4 is a reasoning model — it can spend hundreds of ms "thinking" before
-//! emitting the first content token. The user needs to *see* something
-//! happening, both for UX and for the option to cancel mid-stream.
+//! Ch08 additions on top of Ch07:
+//! - opt into `stream_options: { include_usage: true }` so DeepSeek tells us
+//!   how many tokens each turn cost
+//! - parse the `usage` field from whichever SSE chunk carries it (typically
+//!   the last one before `[DONE]`, with an empty `choices` array)
+//! - return both the assistant message AND the usage in a [`ChatOutcome`]
 //!
-//! Chapter 13 will move this into `deeprig-core` behind the `Provider` trait.
+//! Chapter 13 will move this whole module into `deeprig-core` behind the
+//! `Provider` trait.
 
 use anyhow::{bail, Context, Result};
-use deeprig_core::Message;
+use deeprig_core::{Message, TokenUsage};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -20,20 +23,30 @@ const API_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 const SSE_EVENT_SEP: &[u8] = b"\n\n";
 
 /// A single delta emitted while [`chat_stream`] is running.
-///
-/// The caller renders these as they arrive — that is the typewriter effect.
 pub enum StreamEvent {
     /// A chunk of the model's reasoning ("thinking" phase, V4 only).
     Reasoning(String),
-    /// A chunk of the model's final answer (what gets sent back next turn).
+    /// A chunk of the model's final answer.
     Content(String),
 }
 
-/// One SSE chunk's JSON shape, e.g.
-/// `{"choices":[{"delta":{"content":"hi"}}]}`.
+/// Everything [`chat_stream`] hands back to the caller after the stream ends.
+pub struct ChatOutcome {
+    /// The accumulated assistant message (append to the conversation).
+    pub message: Message,
+    /// Token usage for this turn — `None` if DeepSeek did not report it.
+    pub usage: Option<TokenUsage>,
+}
+
+/// One SSE chunk's JSON shape. `choices` and `usage` are both optional:
+/// content chunks have `choices` but no `usage`; the final chunk usually has
+/// empty `choices` but carries the `usage` object.
 #[derive(Deserialize)]
 struct StreamChunk {
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Deserialize)]
@@ -53,17 +66,14 @@ struct Delta {
 /// Streams a chat completion from DeepSeek.
 ///
 /// `on_event` is called once per delta (reasoning or content) as it arrives.
-/// Returns the accumulated assistant [`Message`] — append it to the
-/// conversation for the next turn. Reasoning is *not* accumulated in the
-/// return value; the caller already saw every chunk via `on_event` and the
-/// reasoning text is not part of the conversation context anyway.
+/// Returns the accumulated assistant [`Message`] and the per-turn usage.
 pub async fn chat_stream(
     client: &reqwest::Client,
     api_key: &str,
     model: &str,
     messages: &[Message],
     mut on_event: impl FnMut(StreamEvent),
-) -> Result<Message> {
+) -> Result<ChatOutcome> {
     let response = client
         .post(API_URL)
         .bearer_auth(api_key)
@@ -71,6 +81,8 @@ pub async fn chat_stream(
             "model": model,
             "messages": messages,
             "stream": true,
+            // Ch08: opt in to usage reporting on the final stream chunk.
+            "stream_options": { "include_usage": true },
         }))
         .send()
         .await
@@ -78,7 +90,6 @@ pub async fn chat_stream(
 
     let status = response.status();
     if !status.is_success() {
-        // Error responses are short — read the whole body, no need to stream.
         let body = response.text().await.unwrap_or_default();
         bail!("DeepSeek returned {status}:\n{body}");
     }
@@ -86,39 +97,49 @@ pub async fn chat_stream(
     let mut stream = response.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut content_acc = String::new();
+    let mut last_usage: Option<TokenUsage> = None;
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.context("error reading SSE stream")?;
         buf.extend_from_slice(&bytes);
 
-        // Process every complete event currently in the buffer. An event is
-        // bytes up to and including the next `\n\n` separator.
         while let Some(idx) = find_separator(&buf) {
             let event: Vec<u8> = buf.drain(..idx + SSE_EVENT_SEP.len()).collect();
             let text = String::from_utf8_lossy(&event);
 
             for line in text.lines() {
                 let Some(payload) = line.strip_prefix("data: ") else {
-                    continue; // skip comments, empty lines, `event:` lines
+                    continue;
                 };
                 if payload.trim() == "[DONE]" {
-                    return Ok(Message::assistant(content_acc));
+                    return Ok(ChatOutcome {
+                        message: Message::assistant(content_acc),
+                        usage: last_usage,
+                    });
                 }
 
-                let delta = parse_delta(payload)?;
-                if let Some(text) = delta.reasoning_content {
-                    on_event(StreamEvent::Reasoning(text));
+                let parsed = parse_chunk(payload)?;
+                if let Some(u) = parsed.usage {
+                    last_usage = Some(u);
                 }
-                if let Some(text) = delta.content {
-                    content_acc.push_str(&text);
-                    on_event(StreamEvent::Content(text));
+                for choice in parsed.choices {
+                    if let Some(text) = choice.delta.reasoning_content {
+                        on_event(StreamEvent::Reasoning(text));
+                    }
+                    if let Some(text) = choice.delta.content {
+                        content_acc.push_str(&text);
+                        on_event(StreamEvent::Content(text));
+                    }
                 }
             }
         }
     }
 
-    // Stream ended without an explicit `[DONE]` marker — treat as if it had.
-    Ok(Message::assistant(content_acc))
+    // Stream ended without an explicit `[DONE]` — return what we have.
+    Ok(ChatOutcome {
+        message: Message::assistant(content_acc),
+        usage: last_usage,
+    })
 }
 
 /// Locates the first SSE event separator (`\n\n`) in `buf`.
@@ -127,16 +148,9 @@ fn find_separator(buf: &[u8]) -> Option<usize> {
         .position(|w| w == SSE_EVENT_SEP)
 }
 
-/// Parses the JSON payload of one `data: …` SSE line into a [`Delta`].
-fn parse_delta(payload: &str) -> Result<Delta> {
-    let chunk: StreamChunk =
-        serde_json::from_str(payload).context("SSE chunk JSON did not match the expected shape")?;
-    Ok(chunk
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.delta)
-        .unwrap_or_default())
+/// Parses one `data: …` payload (the JSON, without the prefix) into a chunk.
+fn parse_chunk(payload: &str) -> Result<StreamChunk> {
+    serde_json::from_str(payload).context("SSE chunk JSON did not match the expected shape")
 }
 
 #[cfg(test)]
@@ -151,39 +165,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_content_delta() {
+    fn parses_a_content_chunk() {
         let payload = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
-        let delta = parse_delta(payload).expect("should parse");
-        assert_eq!(delta.content.as_deref(), Some("hi"));
-        assert!(delta.reasoning_content.is_none());
+        let chunk = parse_chunk(payload).expect("should parse");
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        assert!(chunk.usage.is_none());
     }
 
     #[test]
-    fn parses_a_reasoning_delta() {
+    fn parses_a_reasoning_chunk() {
         let payload = r#"{"choices":[{"delta":{"reasoning_content":"first..."}}]}"#;
-        let delta = parse_delta(payload).expect("should parse");
-        assert_eq!(delta.reasoning_content.as_deref(), Some("first..."));
-        assert!(delta.content.is_none());
+        let chunk = parse_chunk(payload).expect("should parse");
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("first...")
+        );
     }
 
     #[test]
-    fn parses_a_delta_with_both_fields() {
-        let payload = r#"{"choices":[{"delta":{"content":"yes","reasoning_content":"because"}}]}"#;
-        let delta = parse_delta(payload).expect("should parse");
-        assert_eq!(delta.content.as_deref(), Some("yes"));
-        assert_eq!(delta.reasoning_content.as_deref(), Some("because"));
+    fn parses_a_usage_only_chunk() {
+        let payload = r#"{"choices":[],"usage":{"prompt_tokens":15,"completion_tokens":20,"total_tokens":35}}"#;
+        let chunk = parse_chunk(payload).expect("should parse");
+        assert!(chunk.choices.is_empty());
+        let u = chunk.usage.expect("usage present");
+        assert_eq!(u.prompt_tokens, 15);
+        assert_eq!(u.completion_tokens, 20);
+        assert_eq!(u.total_tokens, 35);
     }
 
     #[test]
-    fn parses_empty_delta_as_default() {
-        let payload = r#"{"choices":[{"delta":{}}]}"#;
-        let delta = parse_delta(payload).expect("should parse");
-        assert!(delta.content.is_none());
-        assert!(delta.reasoning_content.is_none());
+    fn parses_empty_choices_without_usage() {
+        let payload = r#"{"choices":[]}"#;
+        let chunk = parse_chunk(payload).expect("should parse");
+        assert!(chunk.choices.is_empty());
+        assert!(chunk.usage.is_none());
     }
 
     #[test]
     fn malformed_payload_is_an_error() {
-        assert!(parse_delta("not json").is_err());
+        assert!(parse_chunk("not json").is_err());
     }
 }
