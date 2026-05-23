@@ -1,10 +1,8 @@
-//! DeepRig CLI — interactive chat REPL.
+//! DeepRig CLI — interactive chat REPL with streaming output.
 //!
-//! Chapter 6 milestone: a multi-turn conversation loop. The binary reads a
-//! line, sends the whole conversation to DeepSeek, prints the reply, and
-//! repeats. A failed request prints an error and keeps the loop alive.
-//!
-//! Still missing (later chapters): streaming output (Ch07), tools (Ch09+).
+//! Chapter 7 milestone: deltas arrive incrementally; the REPL renders the
+//! "thinking" phase and the final "reply" as they come in, instead of
+//! freezing until the whole response is done.
 
 mod deepseek;
 
@@ -12,6 +10,9 @@ use anyhow::{Context, Result};
 use deeprig_core::Message;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::io::Write;
+
+use crate::deepseek::StreamEvent;
 
 /// Model used when none is given on the command line.
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
@@ -28,9 +29,6 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| DEFAULT_MODEL.into());
 
     let client = reqwest::Client::new();
-
-    // The running conversation. The system message goes first; user and
-    // assistant messages accumulate so the model sees full context each turn.
     let mut messages = vec![Message::system(SYSTEM_PROMPT)];
 
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
@@ -38,12 +36,10 @@ async fn main() -> Result<()> {
     println!("DeepRig — chat with {model}. Ctrl+D or /exit to quit.\n");
 
     loop {
-        // `readline` blocks until the user presses Enter. Blocking inside an
-        // async fn is fine here: there is nothing else to do while we wait.
         let line = match editor.readline("> ") {
             Ok(line) => line,
-            Err(ReadlineError::Interrupted) => continue, // Ctrl+C: discard input
-            Err(ReadlineError::Eof) => break,            // Ctrl+D: quit
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
             Err(e) => return Err(e).context("line editor failed"),
         };
 
@@ -58,25 +54,41 @@ async fn main() -> Result<()> {
 
         messages.push(Message::user(input));
 
-        // A failed request must NOT crash the REPL. We `match` the `Result`
-        // instead of using `?`: `?` would propagate the error out of `main`
-        // and end the program. In a loop, we want to recover and continue.
-        match deepseek::chat(&client, &api_key, &model, &messages).await {
-            Ok(reply) => {
-                if let Some(reasoning) = &reply.reasoning {
-                    if !reasoning.is_empty() {
-                        println!("[思考]\n{reasoning}\n");
+        // Phase tracking for typewriter output. The closure captures these
+        // `&mut`; they live only for this turn.
+        let mut started_reasoning = false;
+        let mut started_content = false;
+        let emit = |event: StreamEvent| {
+            match event {
+                StreamEvent::Reasoning(text) => {
+                    if !started_reasoning {
+                        println!("[思考]");
+                        started_reasoning = true;
                     }
+                    print!("{text}");
                 }
-                println!("[回复]\n{}\n", reply.message.content);
-                messages.push(reply.message);
+                StreamEvent::Content(text) => {
+                    if !started_content {
+                        if started_reasoning {
+                            println!("\n");
+                        }
+                        println!("[回复]");
+                        started_content = true;
+                    }
+                    print!("{text}");
+                }
+            }
+            // Force the token onto the screen — print! is line-buffered.
+            let _ = std::io::stdout().flush();
+        };
+
+        match deepseek::chat_stream(&client, &api_key, &model, &messages, emit).await {
+            Ok(assistant) => {
+                println!("\n"); // trailing newline after the stream ends
+                messages.push(assistant);
             }
             Err(e) => {
-                // `{e:#}` prints the whole error chain — every `.context()`
-                // layer, joined with ": ".
-                eprintln!("[错误] {e:#}\n");
-                // The user's turn got no reply. Drop it so the next request
-                // is not two `user` messages in a row.
+                eprintln!("\n[错误] {e:#}\n");
                 messages.pop();
             }
         }

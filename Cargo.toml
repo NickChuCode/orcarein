@@ -20,8 +20,9 @@ anyhow = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
-# Ch05: HTTP client. "json" feature for serialize/deserialize bodies.
-# The "stream" feature is added in Ch07 when we do streaming SSE.
-reqwest = { version = "0.12", features = ["json"] }
+# Ch05+Ch07: HTTP client. "json" + "stream" features.
+reqwest = { version = "0.12", features = ["json", "stream"] }
 # Ch06: line editor for the REPL (history, arrow keys, Ctrl+C/D handling).
 rustyline = "14"
+# Ch07: `StreamExt::next().await` for iterating a `Stream` of bytes.
+futures-util = "0.3"
