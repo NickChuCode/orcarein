@@ -6,11 +6,18 @@
 //! - accumulate them into complete `ToolCall`s by the time the stream ends
 //! - return them on [`ChatOutcome`]
 //!
-//! Ch09 does NOT execute tools — that arrives in Ch10 alongside
-//! `trait Tool`. The REPL just notes when the model wanted to call something.
+//! Ch10 additions:
+//! - `chat_stream` accepts a `tools: &[ToolDefinition]` slice and includes
+//!   it (plus `"tool_choice": "auto"`) in the request body. When the
+//!   slice is empty the body is byte-identical to Ch09's so existing
+//!   no-tools behaviour is preserved.
+//!
+//! Execution of the returned `tool_calls` lives in the REPL
+//! (`main.rs::run_turn`), not here — this module stays a thin provider
+//! shim.
 
 use anyhow::{bail, Context, Result};
-use deeprig_core::{FunctionCall, Message, TokenUsage, ToolCall};
+use deeprig_core::{FunctionCall, Message, TokenUsage, ToolCall, ToolDefinition};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -85,22 +92,34 @@ struct FunctionCallDelta {
 }
 
 /// Streams a chat completion from DeepSeek.
+///
+/// `tools` is included in the request body only when non-empty — keeping
+/// the no-tools wire shape identical to Ch09.
 pub async fn chat_stream(
     client: &reqwest::Client,
     api_key: &str,
     model: &str,
     messages: &[Message],
+    tools: &[ToolDefinition],
     mut on_event: impl FnMut(StreamEvent),
 ) -> Result<ChatOutcome> {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+    });
+    if !tools.is_empty() {
+        // serde_json::to_value cannot fail for a Vec<ToolDefinition> — all
+        // fields are JSON-friendly types — so .expect is fine here.
+        body["tools"] = serde_json::to_value(tools).expect("tools serialize");
+        body["tool_choice"] = json!("auto");
+    }
+
     let response = client
         .post(API_URL)
         .bearer_auth(api_key)
-        .json(&json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        }))
+        .json(&body)
         .send()
         .await
         .context("HTTP request to DeepSeek failed")?;

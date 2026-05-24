@@ -14,3 +14,13 @@ serde = { workspace = true }
 # Ch09: tool::ToolSchema is `serde_json::Value` and FunctionCall::parse_arguments
 # returns `serde_json::Error` — both in the public API.
 serde_json = { workspace = true }
+# Ch10: `trait Tool::execute` is async — async_trait erases the future.
+async-trait = { workspace = true }
+# Ch10: `ToolError` is thiserror-derived so callers can match on variants.
+thiserror = { workspace = true }
+# Ch10: `ReadFileTool::execute` uses `tokio::fs::read_to_string`.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Ch10: integration test for ReadFileTool needs scratch files.
+tempfile = { workspace = true }

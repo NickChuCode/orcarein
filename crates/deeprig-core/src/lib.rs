@@ -9,7 +9,21 @@ pub mod tool;
 
 pub use message::Message;
 pub use session::{Session, TokenUsage};
-pub use tool::{FunctionCall, FunctionDefinition, ToolCall, ToolDefinition, ToolSchema};
+pub use tool::{
+    // Ch09 protocol types
+    FunctionCall,
+    FunctionDefinition,
+    // Ch10 abstraction layer + first tool
+    ReadFileTool,
+    RiskLevel,
+    Tool,
+    ToolCall,
+    ToolDefinition,
+    ToolError,
+    ToolOutput,
+    ToolRegistry,
+    ToolSchema,
+};
 
 /// Returns the crate version (semver string).
 pub fn version() -> &'static str {
