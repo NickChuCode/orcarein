@@ -11,7 +11,6 @@ rust-version.workspace = true
 [dependencies]
 # Ch05: serde derive for message (de)serialization.
 serde = { workspace = true }
-
-[dev-dependencies]
-# Ch05: used only by unit tests (serde round-trip checks).
+# Ch09: tool::ToolSchema is `serde_json::Value` and FunctionCall::parse_arguments
+# returns `serde_json::Error` — both in the public API.
 serde_json = { workspace = true }

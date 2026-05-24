@@ -5,9 +5,11 @@
 
 pub mod message;
 pub mod session;
+pub mod tool;
 
 pub use message::Message;
 pub use session::{Session, TokenUsage};
+pub use tool::{FunctionCall, FunctionDefinition, ToolCall, ToolDefinition, ToolSchema};
 
 /// Returns the crate version (semver string).
 pub fn version() -> &'static str {
