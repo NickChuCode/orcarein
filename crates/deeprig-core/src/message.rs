@@ -7,6 +7,13 @@
 //! Chapter 9 extended `Message` with optional `tool_calls` (used on
 //! `assistant` messages that ask for a tool) and `tool_call_id` (used on
 //! `tool` role messages carrying a result).
+//!
+//! Chapter 10 (live-API patch) added `reasoning_content` — DeepSeek V4's
+//! "thinking" trace. The API requires the assistant's `reasoning_content`
+//! to be **passed back** on the next call when the assistant message had
+//! one; dropping it crashes the second call of a tool loop with HTTP 400
+//! "The `reasoning_content` in the thinking mode must be passed back to
+//! the API."
 
 use crate::tool::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -21,6 +28,11 @@ pub struct Message {
     /// The message text. Can be empty when an assistant message carries only
     /// tool calls.
     pub content: String,
+    /// DeepSeek V4 "thinking" trace (`assistant` role only). MUST be
+    /// echoed back to the API on the next call when present, otherwise V4
+    /// rejects the request with HTTP 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Tool calls the model wants to make (`assistant` role only). Empty
     /// vectors are omitted from the JSON wire format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -36,6 +48,7 @@ impl Message {
         Message {
             role: "system".into(),
             content: content.into(),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -46,6 +59,7 @@ impl Message {
         Message {
             role: "user".into(),
             content: content.into(),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -56,6 +70,7 @@ impl Message {
         Message {
             role: "assistant".into(),
             content: content.into(),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -70,9 +85,21 @@ impl Message {
         Message {
             role: "assistant".into(),
             content: content.into(),
+            reasoning_content: None,
             tool_calls,
             tool_call_id: None,
         }
+    }
+
+    /// Sets the V4 reasoning trace on an `assistant` message. Mandatory
+    /// when the model produced thinking output — V4 rejects the next
+    /// request otherwise.
+    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        let text = reasoning.into();
+        if !text.is_empty() {
+            self.reasoning_content = Some(text);
+        }
+        self
     }
 
     /// Creates a `"tool"` result message — sent back to the model after we
@@ -81,6 +108,7 @@ impl Message {
         Message {
             role: "tool".into(),
             content: content.into(),
+            reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
         }
@@ -141,5 +169,37 @@ mod tests {
         assert_eq!(v["content"], "It's 22°C in Tokyo");
         assert_eq!(v["tool_call_id"], "call_1");
         assert!(v.get("tool_calls").is_none()); // omitted when empty
+        assert!(v.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn with_reasoning_attaches_thinking_trace() {
+        let m = Message::assistant("the answer is 42").with_reasoning("let me think... it's 42");
+        assert_eq!(
+            m.reasoning_content.as_deref(),
+            Some("let me think... it's 42")
+        );
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["reasoning_content"], "let me think... it's 42");
+        assert_eq!(v["content"], "the answer is 42");
+    }
+
+    #[test]
+    fn with_reasoning_skips_empty_string() {
+        // Empty thinking → field stays None and is skipped on the wire.
+        let m = Message::assistant("hi").with_reasoning("");
+        assert!(m.reasoning_content.is_none());
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn reasoning_round_trips_through_json() {
+        // Critical for tool-loop replay: thinking that arrives in a
+        // response must survive a round-trip back through the request body.
+        let original = Message::assistant("done").with_reasoning("step 1; step 2");
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reasoning_content.as_deref(), Some("step 1; step 2"));
     }
 }

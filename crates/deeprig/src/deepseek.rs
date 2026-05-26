@@ -133,6 +133,7 @@ pub async fn chat_stream(
     let mut stream = response.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut content_acc = String::new();
+    let mut reasoning_acc = String::new();
     let mut tool_acc = ToolCallAcc::new();
     let mut last_usage: Option<TokenUsage> = None;
 
@@ -149,7 +150,7 @@ pub async fn chat_stream(
                     continue;
                 };
                 if payload.trim() == "[DONE]" {
-                    return Ok(finalize(content_acc, tool_acc, last_usage));
+                    return Ok(finalize(content_acc, reasoning_acc, tool_acc, last_usage));
                 }
 
                 let parsed = parse_chunk(payload)?;
@@ -158,6 +159,10 @@ pub async fn chat_stream(
                 }
                 for choice in parsed.choices {
                     if let Some(text) = choice.delta.reasoning_content {
+                        // Accumulate AND forward — V4 demands the
+                        // assistant `reasoning_content` be echoed back on
+                        // the next call (e.g. after a tool result).
+                        reasoning_acc.push_str(&text);
                         on_event(StreamEvent::Reasoning(text));
                     }
                     if let Some(text) = choice.delta.content {
@@ -172,17 +177,23 @@ pub async fn chat_stream(
         }
     }
 
-    Ok(finalize(content_acc, tool_acc, last_usage))
+    Ok(finalize(content_acc, reasoning_acc, tool_acc, last_usage))
 }
 
 /// Packages the loop state into a [`ChatOutcome`].
-fn finalize(content: String, tool_acc: ToolCallAcc, usage: Option<TokenUsage>) -> ChatOutcome {
+fn finalize(
+    content: String,
+    reasoning: String,
+    tool_acc: ToolCallAcc,
+    usage: Option<TokenUsage>,
+) -> ChatOutcome {
     let tool_calls = tool_acc.finalize();
     let message = if tool_calls.is_empty() {
         Message::assistant(content)
     } else {
         Message::assistant_with_tool_calls(content, tool_calls)
     };
+    let message = message.with_reasoning(reasoning);
     ChatOutcome { message, usage }
 }
 
