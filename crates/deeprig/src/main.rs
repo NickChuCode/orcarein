@@ -12,7 +12,8 @@ mod deepseek;
 
 use anyhow::{Context, Result};
 use deeprig_core::{
-    Message, ReadFileTool, Session, TokenUsage, ToolCall, ToolDefinition, ToolRegistry,
+    BashTool, EditTool, ListDirTool, Message, ReadFileTool, Session, TokenUsage, ToolCall,
+    ToolDefinition, ToolRegistry, WriteFileTool,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -50,6 +51,10 @@ async fn main() -> Result<()> {
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(ReadFileTool));
+    registry.register(Box::new(WriteFileTool));
+    registry.register(Box::new(ListDirTool));
+    registry.register(Box::new(BashTool));
+    registry.register(Box::new(EditTool));
     let tool_defs = registry.definitions();
 
     println!("DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.");

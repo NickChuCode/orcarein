@@ -10,9 +10,13 @@ pub mod tool;
 pub use message::Message;
 pub use session::{Session, TokenUsage};
 pub use tool::{
+    // Ch11 — full tool suite
+    BashTool,
+    EditTool,
     // Ch09 protocol types
     FunctionCall,
     FunctionDefinition,
+    ListDirTool,
     // Ch10 abstraction layer + first tool
     ReadFileTool,
     RiskLevel,
@@ -23,6 +27,7 @@ pub use tool::{
     ToolOutput,
     ToolRegistry,
     ToolSchema,
+    WriteFileTool,
 };
 
 /// Returns the crate version (semver string).
