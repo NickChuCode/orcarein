@@ -1,23 +1,23 @@
-//! DeepRig CLI — interactive chat REPL with streaming, session state, and
-//! tool dispatch.
+//! DeepRig CLI — interactive chat REPL with streaming, session state, tool
+//! dispatch, and per-tool permission prompts.
 //!
-//! Chapter 10 milestone: the model can ask DeepRig to run tools. A
-//! `ToolRegistry` holds the available `Box<dyn Tool>`s (just `read_file`
-//! in Ch10), their `definitions()` ship in every request, and the REPL
-//! runs a `tool_calls -> execute -> feed back -> re-query` loop until the
-//! model is done — capped at `MAX_TOOL_ITERATIONS` so a misbehaving model
-//! can't spin forever.
+//! Chapter 12 milestone: every `Risky` tool (`bash`, `write_file`, `edit`)
+//! is gated by an interactive `y / n / A / N` prompt unless the user
+//! either has already answered `A`/`N` this session (sticky cache) or
+//! passed `--no-permission` over piped stdin. `--tools <csv>` further
+//! limits which tools get registered, which Ch24 will use for the
+//! issue-bot scriptable runs.
 
 mod deepseek;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use deeprig_core::{
-    BashTool, EditTool, ListDirTool, Message, ReadFileTool, Session, TokenUsage, ToolCall,
-    ToolDefinition, ToolRegistry, WriteFileTool,
+    BashTool, Decision, EditTool, ListDirTool, Message, PermissionStore, ReadFileTool, RiskLevel,
+    Session, TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use crate::deepseek::StreamEvent;
 
@@ -31,34 +31,153 @@ const SYSTEM_PROMPT: &str = "You are DeepRig, a concise and helpful CLI assistan
 /// over-eager model from spinning the dispatcher.
 const MAX_TOOL_ITERATIONS: usize = 8;
 
+/// Names of every built-in tool, in registration order. Kept here so the
+/// `--tools` allowlist can warn about typos against a single source of
+/// truth.
+const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "list_dir", "bash", "edit"];
+
 /// Outcome of handling a slash command — whether the loop continues or quits.
 enum CommandAction {
     Continue,
     Quit,
 }
 
+/// Parsed command-line arguments.
+struct Cli {
+    model: String,
+    no_permission: bool,
+    tools_allowlist: Option<Vec<String>>,
+}
+
+fn print_usage() {
+    eprintln!("Usage: deeprig [MODEL] [--no-permission] [--tools <csv>]");
+    eprintln!();
+    eprintln!("Positional:");
+    eprintln!("  MODEL                   DeepSeek model id (default: {DEFAULT_MODEL})");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --no-permission         Skip permission prompts. Requires non-tty stdin.");
+    eprintln!(
+        "  --tools <csv>           Comma-separated tool whitelist (e.g. read_file,list_dir)."
+    );
+    eprintln!("  -h, --help              Print this help and exit.");
+}
+
+fn parse_cli() -> Result<Cli> {
+    let mut model: Option<String> = None;
+    let mut no_permission = false;
+    let mut tools_allowlist: Option<Vec<String>> = None;
+
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "--no-permission" => no_permission = true,
+            "--tools" => {
+                let val = iter
+                    .next()
+                    .context("--tools requires a comma-separated value")?;
+                let list: Vec<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                tools_allowlist = Some(list);
+            }
+            other if other.starts_with("--") => {
+                print_usage();
+                bail!("unknown flag: {other}");
+            }
+            other if model.is_none() => model = Some(other.to_owned()),
+            other => {
+                print_usage();
+                bail!("unexpected extra positional argument: {other}");
+            }
+        }
+    }
+
+    Ok(Cli {
+        model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        no_permission,
+        tools_allowlist,
+    })
+}
+
+/// Builds the tool registry honoring `--tools`. Warns to stderr if the
+/// allowlist names any unknown tool.
+fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
+    let all_tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(ReadFileTool),
+        Box::new(WriteFileTool),
+        Box::new(ListDirTool),
+        Box::new(BashTool),
+        Box::new(EditTool),
+    ];
+
+    if let Some(list) = allowlist {
+        let known: std::collections::HashSet<&str> = KNOWN_TOOLS.iter().copied().collect();
+        for name in list {
+            if !known.contains(name.as_str()) {
+                eprintln!("warning: --tools listed unknown tool '{name}' (ignored)");
+            }
+        }
+    }
+
+    let allow_set: Option<std::collections::HashSet<String>> =
+        allowlist.map(|list| list.iter().cloned().collect());
+
+    let mut registry = ToolRegistry::new();
+    for tool in all_tools {
+        let keep = match &allow_set {
+            Some(set) => set.contains(tool.name()),
+            None => true,
+        };
+        if keep {
+            registry.register(tool);
+        }
+    }
+    registry
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = parse_cli()?;
+
+    // Safety guard: --no-permission must NEVER be silently honored in an
+    // interactive shell. The flag exists for piped / scripted runs
+    // (Ch24 issue bot), not for "just hide the prompts."
+    if cli.no_permission && std::io::stdin().is_terminal() {
+        bail!(
+            "--no-permission requires non-tty stdin (e.g. piped input) — refusing in interactive mode"
+        );
+    }
+
     let api_key = std::env::var("DEEPSEEK_API_KEY")
         .context("DEEPSEEK_API_KEY not set. In PowerShell: $env:DEEPSEEK_API_KEY = '<your-key>'")?;
-    let model = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_MODEL.into());
 
     let client = reqwest::Client::new();
     let mut session = Session::new(SYSTEM_PROMPT);
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
+    let mut permissions = PermissionStore::new();
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(ReadFileTool));
-    registry.register(Box::new(WriteFileTool));
-    registry.register(Box::new(ListDirTool));
-    registry.register(Box::new(BashTool));
-    registry.register(Box::new(EditTool));
+    let registry = build_registry(cli.tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
 
-    println!("DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.");
-    println!("Tools: {}\n", registry.names().join(", "));
+    println!(
+        "DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.",
+        model = cli.model
+    );
+    println!("Tools: {}", registry.names().join(", "));
+    if cli.no_permission {
+        println!("Permissions: DISABLED (--no-permission)\n");
+    } else {
+        println!(
+            "Permissions: prompt on Risky tools (use --no-permission with piped input to skip)\n"
+        );
+    }
 
     loop {
         let line = match editor.readline("> ") {
@@ -86,10 +205,12 @@ async fn main() -> Result<()> {
         if let Err(e) = run_turn(
             &client,
             &api_key,
-            &model,
+            &cli.model,
             &mut session,
             &registry,
             &tool_defs,
+            &mut permissions,
+            cli.no_permission,
         )
         .await
         {
@@ -106,6 +227,7 @@ async fn main() -> Result<()> {
 /// Runs one user turn: streams a reply, executes any tool calls, feeds the
 /// results back, and repeats until the model returns a tool-call-free
 /// message (or `MAX_TOOL_ITERATIONS` is reached).
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     client: &reqwest::Client,
     api_key: &str,
@@ -113,6 +235,8 @@ async fn run_turn(
     session: &mut Session,
     registry: &ToolRegistry,
     tool_defs: &[ToolDefinition],
+    permissions: &mut PermissionStore,
+    no_permission: bool,
 ) -> Result<()> {
     let mut turn_usage = TokenUsage::default();
     let mut iteration = 0usize;
@@ -171,7 +295,7 @@ async fn run_turn(
         }
 
         for call in &tool_calls {
-            let result = dispatch(registry, call).await;
+            let result = dispatch(registry, permissions, no_permission, call).await;
             session.push_assistant(Message::tool(&call.id, result));
         }
 
@@ -187,10 +311,15 @@ async fn run_turn(
     Ok(())
 }
 
-/// Executes a single tool call against the registry, formatting any
-/// failure (bad args, unknown tool, IO error) as an `ERROR:` payload that
-/// the model will see in the next round.
-async fn dispatch(registry: &ToolRegistry, call: &ToolCall) -> String {
+/// Executes a single tool call against the registry, gating `Risky`
+/// tools behind a permission prompt unless the user has cached an
+/// `AllowAlways` decision or invoked DeepRig with `--no-permission`.
+async fn dispatch(
+    registry: &ToolRegistry,
+    permissions: &mut PermissionStore,
+    no_permission: bool,
+    call: &ToolCall,
+) -> String {
     eprintln!(
         "[tool: {}({})]",
         call.function.name, call.function.arguments
@@ -211,6 +340,24 @@ async fn dispatch(registry: &ToolRegistry, call: &ToolCall) -> String {
         return msg;
     };
 
+    if tool.risk_level() == RiskLevel::Risky && !no_permission {
+        let decision = match permissions.cached(tool.name()) {
+            Some(d) => d,
+            None => {
+                let d = prompt_permission(tool.name(), &call.function.arguments);
+                if d.is_sticky() {
+                    permissions.remember(tool.name(), d);
+                }
+                d
+            }
+        };
+        if !decision.is_allow() {
+            let msg = format!("ERROR: user denied permission for '{}'", tool.name());
+            eprintln!("[denied] {msg}");
+            return msg;
+        }
+    }
+
     match tool.execute(args).await {
         Ok(out) => {
             eprintln!("[result] {} bytes", out.content.len());
@@ -221,6 +368,26 @@ async fn dispatch(registry: &ToolRegistry, call: &ToolCall) -> String {
             eprintln!("[tool error] {msg}");
             msg
         }
+    }
+}
+
+/// Synchronously prompts the user. Any input we cannot parse — empty
+/// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default).
+fn prompt_permission(name: &str, args: &str) -> Decision {
+    eprintln!();
+    eprintln!("DeepRig wants to run: {name}({args})");
+    eprint!("Allow? [y=once N=never A=always n=once]: ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Decision::DenyOnce;
+    }
+    match line.trim().chars().next() {
+        Some('y') => Decision::AllowOnce,
+        Some('A') => Decision::AllowAlways,
+        Some('N') => Decision::DenyAlways,
+        _ => Decision::DenyOnce,
     }
 }
 

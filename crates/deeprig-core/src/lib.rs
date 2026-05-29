@@ -4,10 +4,12 @@
 //! shared between the binary and external embedders.
 
 pub mod message;
+pub mod permission;
 pub mod session;
 pub mod tool;
 
 pub use message::Message;
+pub use permission::{Decision, PermissionStore};
 pub use session::{Session, TokenUsage};
 pub use tool::{
     // Ch11 — full tool suite
