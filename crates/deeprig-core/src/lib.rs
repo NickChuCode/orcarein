@@ -5,11 +5,15 @@
 
 pub mod message;
 pub mod permission;
+pub mod provider;
 pub mod session;
 pub mod tool;
 
 pub use message::Message;
 pub use permission::{Decision, PermissionStore};
+pub use provider::{
+    ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, StreamEvent,
+};
 pub use session::{Session, TokenUsage};
 pub use tool::{
     // Ch11 — full tool suite

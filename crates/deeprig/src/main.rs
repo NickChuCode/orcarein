@@ -1,28 +1,23 @@
-//! DeepRig CLI — interactive chat REPL with streaming, session state, tool
-//! dispatch, and per-tool permission prompts.
+//! DeepRig CLI — interactive chat REPL with streaming, session state,
+//! tool dispatch, permission gating, and pluggable model providers.
 //!
-//! Chapter 12 milestone: every `Risky` tool (`bash`, `write_file`, `edit`)
-//! is gated by an interactive `y / n / A / N` prompt unless the user
-//! either has already answered `A`/`N` this session (sticky cache) or
-//! passed `--no-permission` over piped stdin. `--tools <csv>` further
-//! limits which tools get registered, which Ch24 will use for the
-//! issue-bot scriptable runs.
-
-mod deepseek;
+//! Chapter 13 milestone: the REPL talks to a `dyn Provider` rather than
+//! a hard-wired DeepSeek module. `DEEPRIG_PROVIDER=deepseek|openai`
+//! picks the backend at startup; `MockProvider` is available to
+//! integration tests in `deeprig-core`. The provider returns a
+//! `BoxStream<StreamEvent>` and the REPL renders + accumulates events
+//! as they arrive.
 
 use anyhow::{bail, Context, Result};
 use deeprig_core::{
-    BashTool, Decision, EditTool, ListDirTool, Message, PermissionStore, ReadFileTool, RiskLevel,
-    Session, TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
+    BashTool, ChatOptions, Decision, DeepSeekProvider, EditTool, ListDirTool, Message,
+    OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, Session, StreamEvent,
+    TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
 };
+use futures_util::StreamExt;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
-
-use crate::deepseek::StreamEvent;
-
-/// Model used when none is given on the command line.
-const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 /// The system message that steers every conversation.
 const SYSTEM_PROMPT: &str = "You are DeepRig, a concise and helpful CLI assistant.";
@@ -31,9 +26,7 @@ const SYSTEM_PROMPT: &str = "You are DeepRig, a concise and helpful CLI assistan
 /// over-eager model from spinning the dispatcher.
 const MAX_TOOL_ITERATIONS: usize = 8;
 
-/// Names of every built-in tool, in registration order. Kept here so the
-/// `--tools` allowlist can warn about typos against a single source of
-/// truth.
+/// Names of every built-in tool — keeps `--tools` typo warnings honest.
 const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "list_dir", "bash", "edit"];
 
 /// Outcome of handling a slash command — whether the loop continues or quits.
@@ -44,7 +37,8 @@ enum CommandAction {
 
 /// Parsed command-line arguments.
 struct Cli {
-    model: String,
+    /// Model id (may be `None` — meaning "use the provider's default").
+    model: Option<String>,
     no_permission: bool,
     tools_allowlist: Option<Vec<String>>,
 }
@@ -53,7 +47,7 @@ fn print_usage() {
     eprintln!("Usage: deeprig [MODEL] [--no-permission] [--tools <csv>]");
     eprintln!();
     eprintln!("Positional:");
-    eprintln!("  MODEL                   DeepSeek model id (default: {DEFAULT_MODEL})");
+    eprintln!("  MODEL                   Provider-specific model id (default: provider's choice)");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --no-permission         Skip permission prompts. Requires non-tty stdin.");
@@ -61,6 +55,11 @@ fn print_usage() {
         "  --tools <csv>           Comma-separated tool whitelist (e.g. read_file,list_dir)."
     );
     eprintln!("  -h, --help              Print this help and exit.");
+    eprintln!();
+    eprintln!("Environment:");
+    eprintln!("  DEEPRIG_PROVIDER        deepseek (default) | openai");
+    eprintln!("  DEEPSEEK_API_KEY        Required when provider is `deepseek`.");
+    eprintln!("  OPENAI_API_KEY          Required when provider is `openai`.");
 }
 
 fn parse_cli() -> Result<Cli> {
@@ -100,10 +99,31 @@ fn parse_cli() -> Result<Cli> {
     }
 
     Ok(Cli {
-        model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        model,
         no_permission,
         tools_allowlist,
     })
+}
+
+/// Picks a `Provider` per `DEEPRIG_PROVIDER` (default `deepseek`).
+/// Each branch reads its provider-specific API key env var.
+fn select_provider() -> Result<Box<dyn Provider>> {
+    let name = std::env::var("DEEPRIG_PROVIDER").unwrap_or_else(|_| "deepseek".into());
+    match name.as_str() {
+        "deepseek" => {
+            let key = std::env::var("DEEPSEEK_API_KEY").context(
+                "DEEPSEEK_API_KEY not set. In PowerShell: $env:DEEPSEEK_API_KEY = '<your-key>'",
+            )?;
+            Ok(Box::new(DeepSeekProvider::new(key)))
+        }
+        "openai" => {
+            let key = std::env::var("OPENAI_API_KEY").context(
+                "OPENAI_API_KEY not set. In PowerShell: $env:OPENAI_API_KEY = '<your-key>'",
+            )?;
+            Ok(Box::new(OpenAIProvider::new(key)))
+        }
+        other => bail!("unknown DEEPRIG_PROVIDER: '{other}' (expected: deepseek | openai)"),
+    }
 }
 
 /// Builds the tool registry honoring `--tools`. Warns to stderr if the
@@ -146,19 +166,18 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
 async fn main() -> Result<()> {
     let cli = parse_cli()?;
 
-    // Safety guard: --no-permission must NEVER be silently honored in an
-    // interactive shell. The flag exists for piped / scripted runs
-    // (Ch24 issue bot), not for "just hide the prompts."
     if cli.no_permission && std::io::stdin().is_terminal() {
         bail!(
             "--no-permission requires non-tty stdin (e.g. piped input) — refusing in interactive mode"
         );
     }
 
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .context("DEEPSEEK_API_KEY not set. In PowerShell: $env:DEEPSEEK_API_KEY = '<your-key>'")?;
+    let provider = select_provider()?;
+    let model = cli
+        .model
+        .clone()
+        .unwrap_or_else(|| provider.default_model().to_owned());
 
-    let client = reqwest::Client::new();
     let mut session = Session::new(SYSTEM_PROMPT);
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
     let mut permissions = PermissionStore::new();
@@ -166,10 +185,8 @@ async fn main() -> Result<()> {
     let registry = build_registry(cli.tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
 
-    println!(
-        "DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.",
-        model = cli.model
-    );
+    println!("DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.");
+    println!("Provider: {}", provider.name());
     println!("Tools: {}", registry.names().join(", "));
     if cli.no_permission {
         println!("Permissions: DISABLED (--no-permission)\n");
@@ -203,9 +220,8 @@ async fn main() -> Result<()> {
         session.push_user(input);
 
         if let Err(e) = run_turn(
-            &client,
-            &api_key,
-            &cli.model,
+            provider.as_ref(),
+            &model,
             &mut session,
             &registry,
             &tool_defs,
@@ -215,7 +231,6 @@ async fn main() -> Result<()> {
         .await
         {
             eprintln!("\n[错误] {e:#}\n");
-            // Roll back the user turn so the next prompt is not stuck mid-loop.
             session.pop_last();
         }
     }
@@ -224,13 +239,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Runs one user turn: streams a reply, executes any tool calls, feeds the
-/// results back, and repeats until the model returns a tool-call-free
-/// message (or `MAX_TOOL_ITERATIONS` is reached).
+/// Runs one user turn: drives `provider.chat_stream`, executes any
+/// returned tool calls, feeds results back, and repeats until the model
+/// stops calling tools or `MAX_TOOL_ITERATIONS` is reached.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
-    client: &reqwest::Client,
-    api_key: &str,
+    provider: &dyn Provider,
     model: &str,
     session: &mut Session,
     registry: &ToolRegistry,
@@ -238,6 +252,7 @@ async fn run_turn(
     permissions: &mut PermissionStore,
     no_permission: bool,
 ) -> Result<()> {
+    let opts = ChatOptions::new(model);
     let mut turn_usage = TokenUsage::default();
     let mut iteration = 0usize;
 
@@ -247,18 +262,26 @@ async fn run_turn(
             break;
         }
 
-        // Per-iteration emit state — printed banners reset each round so
-        // a multi-turn tool loop still labels [思考] / [回复] cleanly.
+        let mut stream = provider
+            .chat_stream(session.messages(), tool_defs, &opts)
+            .await?;
+
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut started_reasoning = false;
         let mut started_content = false;
-        let emit = |event: StreamEvent| {
-            match event {
+
+        while let Some(event) = stream.next().await {
+            match event? {
                 StreamEvent::Reasoning(text) => {
                     if !started_reasoning {
                         println!("[思考]");
                         started_reasoning = true;
                     }
                     print!("{text}");
+                    let _ = std::io::stdout().flush();
+                    reasoning.push_str(&text);
                 }
                 StreamEvent::Content(text) => {
                     if !started_content {
@@ -269,26 +292,22 @@ async fn run_turn(
                         started_content = true;
                     }
                     print!("{text}");
+                    let _ = std::io::stdout().flush();
+                    content.push_str(&text);
                 }
+                StreamEvent::ToolCalls(calls) => tool_calls = calls,
+                StreamEvent::Usage(u) => turn_usage.add(u),
             }
-            let _ = std::io::stdout().flush();
-        };
-
-        let outcome =
-            deepseek::chat_stream(client, api_key, model, session.messages(), tool_defs, emit)
-                .await?;
+        }
         println!();
 
-        if let Some(u) = outcome.usage {
-            turn_usage.add(u);
-        }
-
-        // Clone tool_calls out so we can iterate after handing the
-        // message over to the session — the model needs to see the
-        // original assistant message (with tool_calls) on the next round
-        // so it can bind our role=tool replies back to its requests.
-        let tool_calls = outcome.message.tool_calls.clone();
-        session.push_assistant(outcome.message);
+        let assistant_msg = if tool_calls.is_empty() {
+            Message::assistant(&content).with_reasoning(reasoning)
+        } else {
+            Message::assistant_with_tool_calls(&content, tool_calls.clone())
+                .with_reasoning(reasoning)
+        };
+        session.push_assistant(assistant_msg);
 
         if tool_calls.is_empty() {
             break;

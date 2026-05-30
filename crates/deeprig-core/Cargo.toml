@@ -20,6 +20,15 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 # Ch10: `ReadFileTool::execute` uses `tokio::fs::read_to_string`.
 tokio = { workspace = true }
+# Ch13: trait Provider returns `anyhow::Result<BoxStream<...>>`.
+anyhow = { workspace = true }
+# Ch13: HTTP + SSE for the DeepSeek / OpenAI providers (moved from the binary).
+reqwest = { workspace = true }
+# Ch13: BoxStream type + StreamExt for iterating SSE chunks.
+futures-util = { workspace = true }
+# Ch13: `try_stream! { ... yield }` macro lets the provider impls write
+# their SSE loop linearly.
+async-stream = { workspace = true }
 
 [dev-dependencies]
 # Ch10: integration test for ReadFileTool needs scratch files.

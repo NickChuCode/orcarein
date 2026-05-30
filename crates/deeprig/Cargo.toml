@@ -14,13 +14,11 @@ path = "src/main.rs"
 
 [dependencies]
 deeprig-core = { path = "../deeprig-core" }
-# Ch05: first real chat request to DeepSeek V4.
+# Ch05: anyhow::Result for the binary's main + run_turn surface.
 anyhow = { workspace = true }
+# Ch05: async runtime hosting the REPL and `provider.chat_stream` futures.
 tokio = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 # Ch06: REPL line editor.
 rustyline = { workspace = true }
-# Ch07: stream iteration for SSE parsing.
+# Ch13: iterate `BoxStream<StreamEvent>` from the Provider trait.
 futures-util = { workspace = true }
