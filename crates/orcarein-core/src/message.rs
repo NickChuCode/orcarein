@@ -1,4 +1,4 @@
-//! Chat message types shared across DeepRig.
+//! Chat message types shared across OrcaRein.
 //!
 //! A conversation is, at bottom, a list of [`Message`]s. DeepSeek's
 //! `/chat/completions` endpoint accepts and returns this same shape, so

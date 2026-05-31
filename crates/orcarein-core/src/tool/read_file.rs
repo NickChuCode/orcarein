@@ -42,7 +42,7 @@ impl Tool for ReadFileTool {
                 "path": {
                     "type": "string",
                     "description":
-                        "Path to the file. Relative paths are resolved against DeepRig's current working directory.",
+                        "Path to the file. Relative paths are resolved against OrcaRein's current working directory.",
                 }
             },
             "required": ["path"],

@@ -1,4 +1,4 @@
-//! Core library for DeepRig agent harness.
+//! Core library for OrcaRein agent harness.
 //!
 //! This crate exposes the `Provider` and `Tool` traits and core types
 //! shared between the binary and external embedders.

@@ -1,6 +1,6 @@
 //! Integration tests for `EditTool`.
 
-use deeprig_core::{EditTool, Tool, ToolError};
+use orcarein_core::{EditTool, Tool, ToolError};
 use serde_json::json;
 use tempfile::tempdir;
 

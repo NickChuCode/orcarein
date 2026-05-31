@@ -1,6 +1,6 @@
 [package]
-name = "deeprig-core"
-description = "Core library for DeepRig agent harness"
+name = "orcarein-core"
+description = "Core library for OrcaRein agent harness"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

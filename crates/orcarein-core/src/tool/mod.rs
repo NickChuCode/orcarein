@@ -7,7 +7,7 @@
 //! first concrete tool, `read_file`. The REPL builds a registry, sends
 //! its `definitions()` along with every request, and dispatches the
 //! returned `tool_calls` back into the registry — that loop lives in the
-//! binary (`crates/deeprig/src/main.rs`).
+//! binary (`crates/orcarein/src/main.rs`).
 //!
 //! Module layout:
 //! - `protocol` — DeepSeek/OpenAI wire-format types (Ch09, moved verbatim).

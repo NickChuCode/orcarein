@@ -1,7 +1,7 @@
 //! Tool-calling protocol types — DeepSeek / OpenAI wire format.
 //!
 //! Chapter 9 defines the types and the streaming-accumulator (in
-//! `deeprig::deepseek`). Chapter 10 introduces `trait Tool`, the first
+//! `orcarein::deepseek`). Chapter 10 introduces `trait Tool`, the first
 //! concrete tool (`read_file`), and the dispatch loop that executes
 //! these calls and feeds results back to the model.
 

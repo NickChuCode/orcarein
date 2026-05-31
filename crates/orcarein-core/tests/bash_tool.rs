@@ -3,7 +3,7 @@
 //! These exercise the cross-platform shim — `cmd /C` on Windows,
 //! `bash -c` elsewhere. Use commands that behave identically under both.
 
-use deeprig_core::{BashTool, Tool};
+use orcarein_core::{BashTool, Tool};
 use serde_json::json;
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! Integration tests for `WriteFileTool`.
 
-use deeprig_core::{Tool, ToolError, WriteFileTool};
+use orcarein_core::{Tool, ToolError, WriteFileTool};
 use serde_json::json;
 use tempfile::tempdir;
 

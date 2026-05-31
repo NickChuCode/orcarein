@@ -129,33 +129,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "deeprig"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "deeprig-core",
- "futures-util",
- "rustyline",
- "tokio",
-]
-
-[[package]]
-name = "deeprig-core"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -803,6 +776,33 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "orcarein"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "orcarein-core",
+ "rustyline",
+ "tokio",
+]
+
+[[package]]
+name = "orcarein-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@
 //! orchestration code without making real HTTP calls.
 //!
 //! Lives in `provider::testing` (always-on, no feature flag) so
-//! integration tests in `crates/deeprig-core/tests/` and downstream
+//! integration tests in `crates/orcarein-core/tests/` and downstream
 //! embedders can both use it.
 
 use anyhow::Result;

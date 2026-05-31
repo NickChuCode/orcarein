@@ -1,6 +1,6 @@
 [package]
-name = "deeprig"
-description = "DeepRig CLI — an open-source agent harness for DeepSeek V4 and OpenAI-compatible models"
+name = "orcarein"
+description = "OrcaRein CLI — an open-source agent harness for DeepSeek V4 and OpenAI-compatible models"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -9,11 +9,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "deeprig"
+name = "orcarein"
 path = "src/main.rs"
 
 [dependencies]
-deeprig-core = { path = "../deeprig-core" }
+orcarein-core = { path = "../orcarein-core" }
 # Ch05: anyhow::Result for the binary's main + run_turn surface.
 anyhow = { workspace = true }
 # Ch05: async runtime hosting the REPL and `provider.chat_stream` futures.

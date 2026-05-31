@@ -1,9 +1,9 @@
-//! Integration test for `ReadFileTool` — DeepRig's first cross-crate test.
+//! Integration test for `ReadFileTool` — OrcaRein's first cross-crate test.
 //!
 //! Lives in `tests/` (separate compilation unit) so it can only touch the
 //! crate's public API. Anything missing here is a public-API regression.
 
-use deeprig_core::{ReadFileTool, RiskLevel, Tool, ToolError};
+use orcarein_core::{ReadFileTool, RiskLevel, Tool, ToolError};
 use serde_json::json;
 use tempfile::tempdir;
 

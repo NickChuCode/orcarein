@@ -1,4 +1,4 @@
-# DeepRig
+# OrcaRein
 
 > An open-source Rust CLI agent harness for DeepSeek V4 and other OpenAI-compatible LLM providers. Inspired by [claw-code](https://github.com/ultraworkers/claw-code).
 

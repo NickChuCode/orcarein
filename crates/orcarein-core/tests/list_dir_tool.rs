@@ -1,6 +1,6 @@
 //! Integration tests for `ListDirTool`.
 
-use deeprig_core::{ListDirTool, Tool, ToolError};
+use orcarein_core::{ListDirTool, Tool, ToolError};
 use serde_json::json;
 use tempfile::tempdir;
 

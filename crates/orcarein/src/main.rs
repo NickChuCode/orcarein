@@ -1,26 +1,26 @@
-//! DeepRig CLI — interactive chat REPL with streaming, session state,
+//! OrcaRein CLI — interactive chat REPL with streaming, session state,
 //! tool dispatch, permission gating, and pluggable model providers.
 //!
 //! Chapter 13 milestone: the REPL talks to a `dyn Provider` rather than
-//! a hard-wired DeepSeek module. `DEEPRIG_PROVIDER=deepseek|openai`
+//! a hard-wired DeepSeek module. `ORCAREIN_PROVIDER=deepseek|openai`
 //! picks the backend at startup; `MockProvider` is available to
-//! integration tests in `deeprig-core`. The provider returns a
+//! integration tests in `orcarein-core`. The provider returns a
 //! `BoxStream<StreamEvent>` and the REPL renders + accumulates events
 //! as they arrive.
 
 use anyhow::{bail, Context, Result};
-use deeprig_core::{
+use futures_util::StreamExt;
+use orcarein_core::{
     BashTool, ChatOptions, Decision, DeepSeekProvider, EditTool, ListDirTool, Message,
     OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, Session, StreamEvent,
     TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
 };
-use futures_util::StreamExt;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 
 /// The system message that steers every conversation.
-const SYSTEM_PROMPT: &str = "You are DeepRig, a concise and helpful CLI assistant.";
+const SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
 
 /// Upper bound on tool-call iterations within one user turn. Prevents an
 /// over-eager model from spinning the dispatcher.
@@ -44,7 +44,7 @@ struct Cli {
 }
 
 fn print_usage() {
-    eprintln!("Usage: deeprig [MODEL] [--no-permission] [--tools <csv>]");
+    eprintln!("Usage: orcarein [MODEL] [--no-permission] [--tools <csv>]");
     eprintln!();
     eprintln!("Positional:");
     eprintln!("  MODEL                   Provider-specific model id (default: provider's choice)");
@@ -57,7 +57,7 @@ fn print_usage() {
     eprintln!("  -h, --help              Print this help and exit.");
     eprintln!();
     eprintln!("Environment:");
-    eprintln!("  DEEPRIG_PROVIDER        deepseek (default) | openai");
+    eprintln!("  ORCAREIN_PROVIDER        deepseek (default) | openai");
     eprintln!("  DEEPSEEK_API_KEY        Required when provider is `deepseek`.");
     eprintln!("  OPENAI_API_KEY          Required when provider is `openai`.");
 }
@@ -105,10 +105,10 @@ fn parse_cli() -> Result<Cli> {
     })
 }
 
-/// Picks a `Provider` per `DEEPRIG_PROVIDER` (default `deepseek`).
+/// Picks a `Provider` per `ORCAREIN_PROVIDER` (default `deepseek`).
 /// Each branch reads its provider-specific API key env var.
 fn select_provider() -> Result<Box<dyn Provider>> {
-    let name = std::env::var("DEEPRIG_PROVIDER").unwrap_or_else(|_| "deepseek".into());
+    let name = std::env::var("ORCAREIN_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     match name.as_str() {
         "deepseek" => {
             let key = std::env::var("DEEPSEEK_API_KEY").context(
@@ -122,7 +122,7 @@ fn select_provider() -> Result<Box<dyn Provider>> {
             )?;
             Ok(Box::new(OpenAIProvider::new(key)))
         }
-        other => bail!("unknown DEEPRIG_PROVIDER: '{other}' (expected: deepseek | openai)"),
+        other => bail!("unknown ORCAREIN_PROVIDER: '{other}' (expected: deepseek | openai)"),
     }
 }
 
@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
     let registry = build_registry(cli.tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
 
-    println!("DeepRig — chat with {model}. /help for commands, Ctrl+D to quit.");
+    println!("OrcaRein — chat with {model}. /help for commands, Ctrl+D to quit.");
     println!("Provider: {}", provider.name());
     println!("Tools: {}", registry.names().join(", "));
     if cli.no_permission {
@@ -332,7 +332,7 @@ async fn run_turn(
 
 /// Executes a single tool call against the registry, gating `Risky`
 /// tools behind a permission prompt unless the user has cached an
-/// `AllowAlways` decision or invoked DeepRig with `--no-permission`.
+/// `AllowAlways` decision or invoked OrcaRein with `--no-permission`.
 async fn dispatch(
     registry: &ToolRegistry,
     permissions: &mut PermissionStore,
@@ -394,7 +394,7 @@ async fn dispatch(
 /// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default).
 fn prompt_permission(name: &str, args: &str) -> Decision {
     eprintln!();
-    eprintln!("DeepRig wants to run: {name}({args})");
+    eprintln!("OrcaRein wants to run: {name}({args})");
     eprint!("Allow? [y=once N=never A=always n=once]: ");
     let _ = std::io::stderr().flush();
 

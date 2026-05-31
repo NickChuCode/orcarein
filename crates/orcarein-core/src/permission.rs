@@ -1,12 +1,12 @@
 //! Per-tool permission cache and decision type.
 //!
 //! The interactive prompt itself lives in the binary (it touches stdin);
-//! `deeprig-core` owns only the **pure** pieces: the [`Decision`] enum
+//! `orcarein-core` owns only the **pure** pieces: the [`Decision`] enum
 //! and a [`PermissionStore`] that remembers a user's *sticky* answers
 //! (`AllowAlways` / `DenyAlways`) for the rest of the session.
 //!
 //! Session-scoped only. Persistence is deferred to Ch15; the user must
-//! re-grant always-permissions every time DeepRig starts.
+//! re-grant always-permissions every time OrcaRein starts.
 
 use std::collections::HashMap;
 

@@ -11,11 +11,11 @@
 //! The same shape will let Ch24's issue-bot scenarios be tested
 //! offline.
 
-use deeprig_core::{
+use futures_util::StreamExt;
+use orcarein_core::{
     ChatOptions, FunctionCall, MockProvider, Provider, ReadFileTool, StreamEvent, Tool, ToolCall,
     ToolError, ToolOutput,
 };
-use futures_util::StreamExt;
 use serde_json::json;
 use tempfile::tempdir;
 

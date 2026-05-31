@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/deeprig-core", "crates/deeprig"]
+members = ["crates/orcarein-core", "crates/orcarein"]
 
 [workspace.package]
 version = "0.0.0"
@@ -8,7 +8,7 @@ version = "0.0.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/<user>/deeprig"
+repository = "https://github.com/<user>/orcarein"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -26,7 +26,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 rustyline = "14"
 # Ch07: `StreamExt::next().await` for iterating a `Stream` of bytes.
 futures-util = "0.3"
-# Ch10: dev-dep in deeprig-core for the first tool integration test.
+# Ch10: dev-dep in orcarein-core for the first tool integration test.
 tempfile = "3"
 # Ch13: `try_stream! { ... yield }` macro used by the provider impls.
 async-stream = "0.3"
