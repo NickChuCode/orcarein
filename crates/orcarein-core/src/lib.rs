@@ -16,7 +16,7 @@ pub use permission::{Decision, PermissionStore};
 pub use provider::{
     ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, StreamEvent,
 };
-pub use session::{Session, TokenUsage};
+pub use session::{Session, SessionError, SessionStore, SessionSummary, TokenUsage};
 pub use tool::{
     // Ch11 — full tool suite
     BashTool,

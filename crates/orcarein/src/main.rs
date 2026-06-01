@@ -13,7 +13,8 @@ use futures_util::StreamExt;
 use orcarein_core::{
     env_key_var, BashTool, ChatOptions, Config, Decision, DeepSeekProvider, EditTool, ListDirTool,
     Message, OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore,
-    Session, StreamEvent, TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
+    Session, SessionStore, SessionSummary, StreamEvent, TokenUsage, Tool, ToolCall, ToolDefinition,
+    ToolRegistry, WriteFileTool,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -66,18 +67,23 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Command {
     /// Get, set, or list persisted configuration in `config.toml`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// List saved sessions or resume one by id.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
 }
 
 /// Actions for the `config` subcommand. Mirrors the `Config::get/set/entries`
 /// surface in `orcarein-core`.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ConfigAction {
     /// Print the value of one key (`provider`, `model`, `tools`, `system_prompt`).
     Get { key: String },
@@ -85,6 +91,15 @@ enum ConfigAction {
     Set { key: String, value: String },
     /// List every key and its current value.
     List,
+}
+
+/// Actions for the `session` subcommand.
+#[derive(Subcommand, Debug, Clone)]
+enum SessionAction {
+    /// List saved sessions, newest first.
+    List,
+    /// Resume a saved session by id, then continue chatting.
+    Resume { id: String },
 }
 
 /// Effective settings after resolving CLI > env > config > defaults.
@@ -186,6 +201,49 @@ fn run_config(action: ConfigAction) -> Result<()> {
     Ok(())
 }
 
+/// Runs `orcarein session list`, then returns.
+fn run_session_list() -> Result<()> {
+    let store = SessionStore::new().context("failed to locate session storage")?;
+    let sessions = store.list().context("failed to list sessions")?;
+    if sessions.is_empty() {
+        println!("No saved sessions yet. ({})", store.dir().display());
+        return Ok(());
+    }
+    println!("{:<15}  {:<9}  {:>5}  TITLE", "ID", "AGE", "TURNS");
+    let now = SessionStore::now_ms();
+    for SessionSummary {
+        id,
+        created_at_ms,
+        turns,
+        title,
+    } in sessions
+    {
+        println!(
+            "{:<15}  {:<9}  {:>5}  {}",
+            id,
+            format_age(now, created_at_ms),
+            turns,
+            title
+        );
+    }
+    Ok(())
+}
+
+/// Formats the gap between two Unix-ms timestamps as a coarse "N ago" string.
+/// Pure integer math — no calendar crate needed.
+fn format_age(now_ms: u64, then_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(then_ms) / 1000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
 /// Builds the tool registry honoring `--tools`. Warns to stderr if the
 /// allowlist names any unknown tool.
 fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
@@ -226,9 +284,18 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // `config` subcommand short-circuits the REPL.
-    if let Some(Command::Config { action }) = cli.command {
-        return run_config(action);
+    // Subcommands that fully short-circuit the REPL. `session resume` does NOT
+    // short-circuit — it yields an id we carry into the REPL below.
+    let mut resume_id: Option<String> = None;
+    match cli.command.clone() {
+        Some(Command::Config { action }) => return run_config(action),
+        Some(Command::Session {
+            action: SessionAction::List,
+        }) => return run_session_list(),
+        Some(Command::Session {
+            action: SessionAction::Resume { id },
+        }) => resume_id = Some(id),
+        None => {}
     }
 
     if cli.no_permission && std::io::stdin().is_terminal() {
@@ -236,6 +303,23 @@ async fn main() -> Result<()> {
             "--no-permission requires non-tty stdin (e.g. piped input) — refusing in interactive mode"
         );
     }
+
+    // Resolve the session store and, if resuming, load the saved session *now* —
+    // before `resolve()` demands an API key — so `resume <bad-id>` fails fast
+    // with a "no such session" error rather than a confusing key error.
+    let store = SessionStore::new().context("failed to locate session storage")?;
+    let resumed = match &resume_id {
+        Some(id) => {
+            let loaded = store
+                .load(id)
+                .with_context(|| format!("failed to resume session '{id}'"))?;
+            let created = store
+                .created_at(id)
+                .unwrap_or_else(|_| SessionStore::now_ms());
+            Some((loaded, id.clone(), created))
+        }
+        None => None,
+    };
 
     let resolved = resolve(&cli)?;
     let Resolved {
@@ -246,7 +330,18 @@ async fn main() -> Result<()> {
         config_path,
     } = resolved;
 
-    let mut session = Session::new(&system_prompt);
+    // Either continue the resumed session (keeping its id + creation time so
+    // auto-save writes back to the same file) or start a fresh one.
+    let (mut session, session_id, created_at_ms) = match resumed {
+        Some((loaded, id, created)) => {
+            println!("Resumed session {id} ({} turns).", loaded.turn_count());
+            (loaded, id, created)
+        }
+        None => {
+            let created = SessionStore::now_ms();
+            (Session::new(&system_prompt), created.to_string(), created)
+        }
+    };
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
     let mut permissions = PermissionStore::new();
 
@@ -263,6 +358,10 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "(none)".to_owned())
     );
     println!("Tools: {}", registry.names().join(", "));
+    println!(
+        "Session: {session_id} (auto-saved to {})",
+        store.path_for(&session_id).display()
+    );
     if cli.no_permission {
         println!("Permissions: DISABLED (--no-permission)\n");
     } else {
@@ -285,7 +384,7 @@ async fn main() -> Result<()> {
         }
 
         if let Some(stripped) = input.strip_prefix('/') {
-            match handle_command(stripped, &mut session) {
+            match handle_command(stripped, &mut session, &store, &session_id, created_at_ms) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
             }
@@ -307,6 +406,10 @@ async fn main() -> Result<()> {
         {
             eprintln!("\n[错误] {e:#}\n");
             session.pop_last();
+        } else if let Err(e) = store.save(&session_id, created_at_ms, &session) {
+            // Auto-save after a successful turn; never let a save error
+            // interrupt the conversation.
+            eprintln!("[warn] 自动保存失败：{e}");
         }
     }
 
@@ -485,13 +588,27 @@ fn prompt_permission(name: &str, args: &str) -> Decision {
     }
 }
 
-/// Handles a slash command (the leading `/` already stripped).
-fn handle_command(cmd: &str, session: &mut Session) -> CommandAction {
+/// Handles a slash command (the leading `/` already stripped). Takes the
+/// session store + active id so `/save` can persist on demand.
+fn handle_command(
+    cmd: &str,
+    session: &mut Session,
+    store: &SessionStore,
+    session_id: &str,
+    created_at_ms: u64,
+) -> CommandAction {
     match cmd {
         "exit" | "quit" => CommandAction::Quit,
         "clear" => {
             session.clear();
             println!("(会话已清空，system prompt 保留)");
+            CommandAction::Continue
+        }
+        "save" => {
+            match store.save(session_id, created_at_ms, session) {
+                Ok(()) => println!("已保存：{}", store.path_for(session_id).display()),
+                Err(e) => eprintln!("保存失败：{e}"),
+            }
             CommandAction::Continue
         }
         "usage" => {
@@ -509,6 +626,7 @@ fn handle_command(cmd: &str, session: &mut Session) -> CommandAction {
             println!("命令：");
             println!("  /exit, /quit   退出");
             println!("  /clear         清空会话（保留 system prompt）");
+            println!("  /save          立即保存会话到磁盘（每轮也会自动保存）");
             println!("  /usage         显示累计 token 用量");
             println!("  /help          这条帮助");
             CommandAction::Continue
@@ -589,6 +707,39 @@ mod tests {
                 action: ConfigAction::List
             })
         ));
+    }
+
+    #[test]
+    fn session_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "session", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                action: SessionAction::List
+            })
+        ));
+    }
+
+    #[test]
+    fn session_resume_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "session", "resume", "1748789422123"]).unwrap();
+        match cli.command {
+            Some(Command::Session {
+                action: SessionAction::Resume { id },
+            }) => assert_eq!(id, "1748789422123"),
+            other => panic!("expected session resume, got {other:?}"),
+        }
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn format_age_buckets() {
+        assert_eq!(format_age(30_000, 0), "30s ago");
+        assert_eq!(format_age(120_000, 0), "2m ago");
+        assert_eq!(format_age(7_200_000, 0), "2h ago");
+        assert_eq!(format_age(2 * 86_400_000, 0), "2d ago");
+        // A clock skew where "then" is in the future must not panic.
+        assert_eq!(format_age(0, 5_000), "0s ago");
     }
 
     #[test]
