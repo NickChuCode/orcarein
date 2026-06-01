@@ -1,6 +1,8 @@
 //! `list_dir` — list a single directory non-recursively.
 //!
-//! `RiskLevel::Safe` (read-only). Output is sorted alphabetically so
+//! `RiskLevel::Risky` — read-only, but enumerating a directory still leaks its
+//! structure to the model (e.g. `~/.ssh/` key filenames), so it goes through
+//! the permission gate. Output is sorted alphabetically so
 //! repeated calls on the same directory are deterministic — that helps
 //! the model reason about state across turns.
 
@@ -28,7 +30,11 @@ impl Tool for ListDirTool {
     }
 
     fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Safe
+        // `Risky`, not `Safe`: enumerating a directory leaks its structure to
+        // the model. Pointing `list_dir` at e.g. `~/.ssh/` would reveal key
+        // filenames without ever reading a byte, so the permission gate must
+        // see it. (Ch12 silently let this through.)
+        RiskLevel::Risky
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -79,7 +85,7 @@ mod tests {
     fn metadata_is_correct() {
         let t = ListDirTool;
         assert_eq!(t.name(), "list_dir");
-        assert_eq!(t.risk_level(), RiskLevel::Safe);
+        assert_eq!(t.risk_level(), RiskLevel::Risky);
         let s = t.schema();
         assert_eq!(s["type"], "object");
         assert_eq!(s["properties"]["path"]["type"], "string");
@@ -89,5 +95,13 @@ mod tests {
             .iter()
             .any(|v| v == "path"));
         assert_eq!(s["additionalProperties"], false);
+    }
+
+    #[test]
+    fn list_dir_is_risky_not_safe() {
+        // Directory enumeration leaks structure (e.g. `~/.ssh/` filenames), so
+        // it must reach the permission gate. Guard against a silent downgrade
+        // back to `Safe`.
+        assert_eq!(ListDirTool.risk_level(), RiskLevel::Risky);
     }
 }
