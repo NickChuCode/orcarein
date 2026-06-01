@@ -3,12 +3,14 @@
 //! This crate exposes the `Provider` and `Tool` traits and core types
 //! shared between the binary and external embedders.
 
+pub mod config;
 pub mod message;
 pub mod permission;
 pub mod provider;
 pub mod session;
 pub mod tool;
 
+pub use config::{env_key_var, Config, ConfigError, SecretStore, CONFIG_KEYS};
 pub use message::Message;
 pub use permission::{Decision, PermissionStore};
 pub use provider::{

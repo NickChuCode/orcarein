@@ -30,3 +30,9 @@ futures-util = "0.3"
 tempfile = "3"
 # Ch13: `try_stream! { ... yield }` macro used by the provider impls.
 async-stream = "0.3"
+# Ch14: derive-based CLI parsing + subcommands (replaces the hand-written parser).
+clap = { version = "4", features = ["derive"] }
+# Ch14: cross-platform config / secrets directory resolution (XDG / %APPDATA%).
+directories = "5"
+# Ch14: TOML (de)serialization for config.toml and secrets.toml.
+toml = "0.8"

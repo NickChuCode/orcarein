@@ -1,26 +1,28 @@
 //! OrcaRein CLI — interactive chat REPL with streaming, session state,
 //! tool dispatch, permission gating, and pluggable model providers.
 //!
-//! Chapter 13 milestone: the REPL talks to a `dyn Provider` rather than
-//! a hard-wired DeepSeek module. `ORCAREIN_PROVIDER=deepseek|openai`
-//! picks the backend at startup; `MockProvider` is available to
-//! integration tests in `orcarein-core`. The provider returns a
-//! `BoxStream<StreamEvent>` and the REPL renders + accumulates events
-//! as they arrive.
+//! Chapter 14 milestone: a layered config system. `clap` (derive) parses the
+//! CLI and a `config get/set/list` subcommand; effective settings resolve in
+//! the order **CLI flag > env var > `config.toml` > built-in default**. API
+//! keys come from the env or `secrets.toml` (never a CLI flag), via
+//! `SecretStore`.
 
 use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use orcarein_core::{
-    BashTool, ChatOptions, Decision, DeepSeekProvider, EditTool, ListDirTool, Message,
-    OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, Session, StreamEvent,
-    TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
+    env_key_var, BashTool, ChatOptions, Config, Decision, DeepSeekProvider, EditTool, ListDirTool,
+    Message, OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore,
+    Session, StreamEvent, TokenUsage, Tool, ToolCall, ToolDefinition, ToolRegistry, WriteFileTool,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 
-/// The system message that steers every conversation.
-const SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
+/// Fallback system prompt when neither `--system-prompt-file` nor the config
+/// file supplies one.
+const DEFAULT_SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
 
 /// Upper bound on tool-call iterations within one user turn. Prevents an
 /// over-eager model from spinning the dispatcher.
@@ -35,95 +37,153 @@ enum CommandAction {
     Quit,
 }
 
-/// Parsed command-line arguments.
+/// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
+/// OpenAI-compatible models.
+#[derive(Parser, Debug)]
+#[command(name = "orcarein", version, about, long_about = None)]
 struct Cli {
-    /// Model id (may be `None` — meaning "use the provider's default").
+    /// Provider-specific model id (overrides config and the provider default).
+    #[arg(value_name = "MODEL")]
     model: Option<String>,
+
+    /// Backend provider: `deepseek` (default) or `openai`.
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Skip permission prompts. Requires non-tty stdin (a safety guard).
+    #[arg(long)]
     no_permission: bool,
+
+    /// Comma-separated tool whitelist (e.g. `read_file,list_dir`).
+    #[arg(long, value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
+    /// Read the system prompt from a file instead of the built-in default.
+    #[arg(long, value_name = "PATH")]
+    system_prompt_file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Get, set, or list persisted configuration in `config.toml`.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Actions for the `config` subcommand. Mirrors the `Config::get/set/entries`
+/// surface in `orcarein-core`.
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Print the value of one key (`provider`, `model`, `tools`, `system_prompt`).
+    Get { key: String },
+    /// Set a key and persist it to `config.toml`.
+    Set { key: String, value: String },
+    /// List every key and its current value.
+    List,
+}
+
+/// Effective settings after resolving CLI > env > config > defaults.
+struct Resolved {
+    provider: Box<dyn Provider>,
+    model: String,
+    system_prompt: String,
     tools_allowlist: Option<Vec<String>>,
+    config_path: Option<PathBuf>,
 }
 
-fn print_usage() {
-    eprintln!("Usage: orcarein [MODEL] [--no-permission] [--tools <csv>]");
-    eprintln!();
-    eprintln!("Positional:");
-    eprintln!("  MODEL                   Provider-specific model id (default: provider's choice)");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --no-permission         Skip permission prompts. Requires non-tty stdin.");
-    eprintln!(
-        "  --tools <csv>           Comma-separated tool whitelist (e.g. read_file,list_dir)."
-    );
-    eprintln!("  -h, --help              Print this help and exit.");
-    eprintln!();
-    eprintln!("Environment:");
-    eprintln!("  ORCAREIN_PROVIDER        deepseek (default) | openai");
-    eprintln!("  DEEPSEEK_API_KEY        Required when provider is `deepseek`.");
-    eprintln!("  OPENAI_API_KEY          Required when provider is `openai`.");
-}
-
-fn parse_cli() -> Result<Cli> {
-    let mut model: Option<String> = None;
-    let mut no_permission = false;
-    let mut tools_allowlist: Option<Vec<String>> = None;
-
-    let mut iter = std::env::args().skip(1);
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            "--no-permission" => no_permission = true,
-            "--tools" => {
-                let val = iter
-                    .next()
-                    .context("--tools requires a comma-separated value")?;
-                let list: Vec<String> = val
-                    .split(',')
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                tools_allowlist = Some(list);
-            }
-            other if other.starts_with("--") => {
-                print_usage();
-                bail!("unknown flag: {other}");
-            }
-            other if model.is_none() => model = Some(other.to_owned()),
-            other => {
-                print_usage();
-                bail!("unexpected extra positional argument: {other}");
-            }
-        }
+/// Builds a `Provider` from a resolved name + optional API key. Validates the
+/// provider name first so a missing key never masks a typo'd provider.
+fn build_provider(name: &str, api_key: Option<String>) -> Result<Box<dyn Provider>> {
+    match name {
+        "deepseek" | "openai" => {}
+        other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
     }
+    let var = env_key_var(name).expect("provider validated above");
+    let key = api_key.with_context(|| {
+        format!(
+            "no API key for provider '{name}'. In PowerShell: $env:{var} = '<your-key>' \
+             (or store it once in secrets.toml)"
+        )
+    })?;
+    match name {
+        "deepseek" => Ok(Box::new(DeepSeekProvider::new(key))),
+        "openai" => Ok(Box::new(OpenAIProvider::new(key))),
+        _ => unreachable!("provider validated above"),
+    }
+}
 
-    Ok(Cli {
+/// Treats a blank string as absent, so `--provider ""` or `ORCAREIN_PROVIDER=`
+/// (set-but-empty) fall through to the next precedence layer rather than
+/// becoming a literal empty value.
+fn non_blank(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.trim().is_empty())
+}
+
+/// Resolves effective settings from the precedence chain
+/// CLI flag > env var > `config.toml` > built-in default.
+fn resolve(cli: &Cli) -> Result<Resolved> {
+    let config = Config::load().context("failed to load config.toml")?;
+
+    let provider_name = non_blank(cli.provider.clone())
+        .or_else(|| non_blank(std::env::var("ORCAREIN_PROVIDER").ok()))
+        .or_else(|| non_blank(config.provider.clone()))
+        .unwrap_or_else(|| "deepseek".to_owned());
+
+    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
+    let provider = build_provider(&provider_name, secrets.resolve(&provider_name))?;
+
+    let model = non_blank(cli.model.clone())
+        .or_else(|| non_blank(config.model.clone()))
+        .unwrap_or_else(|| provider.default_model().to_owned());
+
+    let tools_allowlist = cli.tools.clone().or_else(|| config.tools_allowlist.clone());
+
+    let system_prompt = match &cli.system_prompt_file {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read --system-prompt-file {}", path.display()))?,
+        None => config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_owned()),
+    };
+
+    Ok(Resolved {
+        provider,
         model,
-        no_permission,
+        system_prompt,
         tools_allowlist,
+        config_path: Config::config_path(),
     })
 }
 
-/// Picks a `Provider` per `ORCAREIN_PROVIDER` (default `deepseek`).
-/// Each branch reads its provider-specific API key env var.
-fn select_provider() -> Result<Box<dyn Provider>> {
-    let name = std::env::var("ORCAREIN_PROVIDER").unwrap_or_else(|_| "deepseek".into());
-    match name.as_str() {
-        "deepseek" => {
-            let key = std::env::var("DEEPSEEK_API_KEY").context(
-                "DEEPSEEK_API_KEY not set. In PowerShell: $env:DEEPSEEK_API_KEY = '<your-key>'",
-            )?;
-            Ok(Box::new(DeepSeekProvider::new(key)))
+/// Runs an `orcarein config get/set/list` invocation, then returns.
+fn run_config(action: ConfigAction) -> Result<()> {
+    let mut config = Config::load().context("failed to load config.toml")?;
+    match action {
+        ConfigAction::Get { key } => match config.get(&key)? {
+            Some(v) => println!("{v}"),
+            None => println!("(unset)"),
+        },
+        ConfigAction::Set { key, value } => {
+            config.set(&key, &value)?;
+            config.save().context("failed to save config.toml")?;
+            let where_ = Config::config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unknown path)".to_owned());
+            println!("set {key} = {value}  →  {where_}");
         }
-        "openai" => {
-            let key = std::env::var("OPENAI_API_KEY").context(
-                "OPENAI_API_KEY not set. In PowerShell: $env:OPENAI_API_KEY = '<your-key>'",
-            )?;
-            Ok(Box::new(OpenAIProvider::new(key)))
+        ConfigAction::List => {
+            for (k, v) in config.entries() {
+                println!("{k} = {}", v.as_deref().unwrap_or("(unset)"));
+            }
         }
-        other => bail!("unknown ORCAREIN_PROVIDER: '{other}' (expected: deepseek | openai)"),
     }
+    Ok(())
 }
 
 /// Builds the tool registry honoring `--tools`. Warns to stderr if the
@@ -164,7 +224,12 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = parse_cli()?;
+    let cli = Cli::parse();
+
+    // `config` subcommand short-circuits the REPL.
+    if let Some(Command::Config { action }) = cli.command {
+        return run_config(action);
+    }
 
     if cli.no_permission && std::io::stdin().is_terminal() {
         bail!(
@@ -172,21 +237,31 @@ async fn main() -> Result<()> {
         );
     }
 
-    let provider = select_provider()?;
-    let model = cli
-        .model
-        .clone()
-        .unwrap_or_else(|| provider.default_model().to_owned());
+    let resolved = resolve(&cli)?;
+    let Resolved {
+        provider,
+        model,
+        system_prompt,
+        tools_allowlist,
+        config_path,
+    } = resolved;
 
-    let mut session = Session::new(SYSTEM_PROMPT);
+    let mut session = Session::new(&system_prompt);
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
     let mut permissions = PermissionStore::new();
 
-    let registry = build_registry(cli.tools_allowlist.as_deref());
+    let registry = build_registry(tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
 
     println!("OrcaRein — chat with {model}. /help for commands, Ctrl+D to quit.");
     println!("Provider: {}", provider.name());
+    println!(
+        "Config: {}",
+        config_path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".to_owned())
+    );
     println!("Tools: {}", registry.names().join(", "));
     if cli.no_permission {
         println!("Permissions: DISABLED (--no-permission)\n");
@@ -442,5 +517,95 @@ fn handle_command(cmd: &str, session: &mut Session) -> CommandAction {
             eprintln!("未知命令：/{other}。/help 查看支持的命令。");
             CommandAction::Continue
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn clap_definition_is_valid() {
+        // Catches derive-level mistakes (e.g. a positional clashing with a
+        // subcommand) at test time instead of first run.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_args_is_repl() {
+        let cli = Cli::try_parse_from(["orcarein"]).unwrap();
+        assert!(cli.model.is_none());
+        assert!(cli.command.is_none());
+        assert!(!cli.no_permission);
+    }
+
+    #[test]
+    fn positional_model_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "deepseek-v4-pro"]).unwrap();
+        assert_eq!(cli.model.as_deref(), Some("deepseek-v4-pro"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn provider_and_csv_tools_parse() {
+        let cli = Cli::try_parse_from([
+            "orcarein",
+            "--provider",
+            "openai",
+            "--tools",
+            "read_file,list_dir",
+        ])
+        .unwrap();
+        assert_eq!(cli.provider.as_deref(), Some("openai"));
+        assert_eq!(
+            cli.tools.as_deref(),
+            Some(&["read_file".to_owned(), "list_dir".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn config_set_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "config", "set", "provider", "openai"]).unwrap();
+        match cli.command {
+            Some(Command::Config {
+                action: ConfigAction::Set { key, value },
+            }) => {
+                assert_eq!(key, "provider");
+                assert_eq!(value, "openai");
+            }
+            other => panic!("expected config set, got {other:?}"),
+        }
+        // A subcommand must not be mistaken for the positional model.
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn config_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "config", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                action: ConfigAction::List
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert!(Cli::try_parse_from(["orcarein", "--nope"]).is_err());
+    }
+
+    #[test]
+    fn non_blank_treats_empty_as_absent() {
+        // A set-but-empty env var or `--provider ""` must fall through, not
+        // become a literal empty provider name.
+        assert_eq!(non_blank(None), None);
+        assert_eq!(non_blank(Some(String::new())), None);
+        assert_eq!(non_blank(Some("   ".to_owned())), None);
+        assert_eq!(
+            non_blank(Some("openai".to_owned())),
+            Some("openai".to_owned())
+        );
     }
 }

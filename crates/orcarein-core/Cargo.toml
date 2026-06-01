@@ -29,6 +29,10 @@ futures-util = { workspace = true }
 # Ch13: `try_stream! { ... yield }` macro lets the provider impls write
 # their SSE loop linearly.
 async-stream = { workspace = true }
+# Ch14: resolve the per-platform config directory for Config / SecretStore.
+directories = { workspace = true }
+# Ch14: (de)serialize Config and Secrets to/from TOML on disk.
+toml = { workspace = true }
 
 [dev-dependencies]
 # Ch10: integration test for ReadFileTool needs scratch files.
