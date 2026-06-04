@@ -8,7 +8,8 @@ version = "0.1.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/<user>/orcarein"
+# Ch17: real repository URL (was a placeholder before going public).
+repository = "https://github.com/NickChuCode/orcarein"
 rust-version = "1.85"
 
 [workspace.dependencies]
