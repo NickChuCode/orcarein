@@ -3,8 +3,8 @@ resolver = "2"
 members = ["crates/orcarein-core", "crates/orcarein"]
 
 [workspace.package]
-version = "0.0.0"
-# TODO(Ch17): replace placeholder before pushing to crates.io in Ch21
+# Ch16: bumped to the MVP milestone version (tag `v0.1.0-mvp`).
+version = "0.1.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -36,3 +36,6 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 # Ch14: TOML (de)serialization for config.toml and secrets.toml.
 toml = "0.8"
+# Ch16: structured diagnostic logging (quiet by default; opt in via RUST_LOG).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

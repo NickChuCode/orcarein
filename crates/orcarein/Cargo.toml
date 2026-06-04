@@ -24,3 +24,6 @@ rustyline = { workspace = true }
 futures-util = { workspace = true }
 # Ch14: derive-based CLI parsing — `Parser`, subcommands, `--flags`.
 clap = { workspace = true }
+# Ch16: diagnostic logging facade + a stderr subscriber driven by RUST_LOG.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

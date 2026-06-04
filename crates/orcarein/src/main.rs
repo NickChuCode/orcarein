@@ -10,6 +10,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
+use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
     env_key_var, BashTool, ChatOptions, Config, Decision, DeepSeekProvider, EditTool, ListDirTool,
     Message, OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore,
@@ -19,7 +20,7 @@ use orcarein_core::{
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Fallback system prompt when neither `--system-prompt-file` nor the config
 /// file supplies one.
@@ -79,6 +80,8 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+    /// Run offline health checks and print a PASS/WARN/FAIL report.
+    Doctor,
 }
 
 /// Actions for the `config` subcommand. Mirrors the `Config::get/set/entries`
@@ -244,6 +247,184 @@ fn format_age(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
+/// Initialises a `tracing` subscriber that writes to stderr and is **quiet
+/// by default** (level `warn`). Opt into internal diagnostics with e.g.
+/// `RUST_LOG=orcarein=debug`. Uses `try_init` so it is a no-op if a
+/// subscriber is already installed (e.g. under a test harness).
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+}
+
+/// On Unix, returns `Some(true)` iff the file's permission bits are exactly
+/// `0600`. On non-Unix targets there is no POSIX mode, so returns `None`
+/// (the report treats `None` as "not applicable").
+#[cfg(unix)]
+fn secrets_mode_0600(path: Option<&Path>) -> Option<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path?).ok()?;
+    Some(meta.permissions().mode() & 0o777 == 0o600)
+}
+
+#[cfg(not(unix))]
+fn secrets_mode_0600(_path: Option<&Path>) -> Option<bool> {
+    None
+}
+
+/// Runs `orcarein doctor`: gathers facts via real I/O, hands each to the
+/// pure check functions in `orcarein_core::doctor`, prints the report, and
+/// exits with a non-zero code if any check FAILed. Never returns.
+fn run_doctor(cli: &Cli) -> ! {
+    let mut checks: Vec<Check> = Vec::new();
+
+    checks.push(doctor::build_info(
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ));
+
+    // config.toml
+    let cfg_path = Config::config_path();
+    let cfg_path_str = display_or_empty(cfg_path.as_deref());
+    let cfg_exists = cfg_path.as_deref().map(Path::exists).unwrap_or(false);
+    let cfg_parse_err = if cfg_exists {
+        cfg_path
+            .as_deref()
+            .and_then(|p| Config::load_from(p).err())
+            .map(|e| e.to_string())
+    } else {
+        None
+    };
+    checks.push(doctor::config_check(
+        cfg_path.is_some(),
+        &cfg_path_str,
+        cfg_exists,
+        cfg_parse_err.as_deref(),
+    ));
+
+    // secrets.toml
+    let sec_path = SecretStore::secrets_path();
+    let sec_path_str = display_or_empty(sec_path.as_deref());
+    let sec_exists = sec_path.as_deref().map(Path::exists).unwrap_or(false);
+    let sec_parse_err = if sec_exists {
+        sec_path
+            .as_deref()
+            .and_then(|p| SecretStore::load_from(p).err())
+            .map(|e| e.to_string())
+    } else {
+        None
+    };
+    let sec_mode = if sec_exists {
+        secrets_mode_0600(sec_path.as_deref())
+    } else {
+        None
+    };
+    checks.push(doctor::secrets_check(
+        sec_path.is_some(),
+        &sec_path_str,
+        sec_exists,
+        sec_parse_err.as_deref(),
+        sec_mode,
+    ));
+
+    // provider + API key (resolved the same way the REPL resolves them,
+    // minus building the provider — doctor must not require a key)
+    let config = Config::load().unwrap_or_default();
+    let provider_name = non_blank(cli.provider.clone())
+        .or_else(|| non_blank(std::env::var("ORCAREIN_PROVIDER").ok()))
+        .or_else(|| non_blank(config.provider.clone()))
+        .unwrap_or_else(|| "deepseek".to_owned());
+    let known = matches!(provider_name.as_str(), "deepseek" | "openai");
+    checks.push(doctor::provider_check(&provider_name, known));
+
+    if known {
+        let env_var = env_key_var(&provider_name).unwrap_or("");
+        let from_env = std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some();
+        let from_secrets = SecretStore::load()
+            .ok()
+            .and_then(|s| s.get(&provider_name).map(|k| !k.is_empty()))
+            .unwrap_or(false);
+        let (present, source) = if from_env {
+            (true, Some(format!("env {env_var}")))
+        } else if from_secrets {
+            (true, Some("secrets.toml".to_owned()))
+        } else {
+            (false, None)
+        };
+        checks.push(doctor::api_key_check(
+            &provider_name,
+            present,
+            source.as_deref(),
+            env_var,
+        ));
+    }
+
+    // data dir (sessions)
+    let data_path = SessionStore::sessions_dir();
+    let data_path_str = display_or_empty(data_path.as_deref());
+    let (writable, count) = match data_path.as_deref() {
+        Some(p) => {
+            let w = std::fs::create_dir_all(p).is_ok();
+            let c = SessionStore::new()
+                .ok()
+                .and_then(|s| s.list().ok())
+                .map(|v| v.len());
+            (w, c)
+        }
+        None => (false, None),
+    };
+    checks.push(doctor::data_dir_check(
+        data_path.is_some(),
+        &data_path_str,
+        writable,
+        count,
+    ));
+
+    // tools
+    let allowlist = cli.tools.as_deref().or(config.tools_allowlist.as_deref());
+    let registry = build_registry(allowlist);
+    let names = registry.names();
+    checks.push(doctor::tools_check(&names));
+
+    print_doctor_report(&checks);
+
+    let code = i32::from(doctor::worst_status(&checks) == CheckStatus::Fail);
+    std::process::exit(code);
+}
+
+/// Formats an optional path for display, or `""` when absent.
+fn display_or_empty(path: Option<&Path>) -> String {
+    path.map(|p| p.display().to_string()).unwrap_or_default()
+}
+
+/// Prints the doctor report table + a one-line verdict.
+fn print_doctor_report(checks: &[Check]) {
+    println!("orcarein doctor\n");
+    for c in checks {
+        println!("[{:<4}] {:<10} {}", c.status.label(), c.name, c.detail);
+    }
+    let t = doctor::tally(checks);
+    println!(
+        "\n{} passed, {} warning(s), {} failure(s).",
+        t.pass, t.warn, t.fail
+    );
+    match doctor::worst_status(checks) {
+        CheckStatus::Fail => {
+            println!("doctor: FAIL — fix the failures above before running OrcaRein.")
+        }
+        CheckStatus::Warn => println!("doctor: OK, with warnings."),
+        CheckStatus::Pass => println!("doctor: all good."),
+    }
+}
+
 /// Builds the tool registry honoring `--tools`. Warns to stderr if the
 /// allowlist names any unknown tool.
 fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
@@ -283,6 +464,7 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    init_tracing();
 
     // Subcommands that fully short-circuit the REPL. `session resume` does NOT
     // short-circuit — it yields an id we carry into the REPL below.
@@ -292,6 +474,7 @@ async fn main() -> Result<()> {
         Some(Command::Session {
             action: SessionAction::List,
         }) => return run_session_list(),
+        Some(Command::Doctor) => run_doctor(&cli), // diverges (process::exit)
         Some(Command::Session {
             action: SessionAction::Resume { id },
         }) => resume_id = Some(id),
@@ -440,6 +623,7 @@ async fn run_turn(
             break;
         }
 
+        tracing::debug!("chat_stream request: model={model}, iteration={iteration}");
         let mut stream = provider
             .chat_stream(session.messages(), tool_defs, &opts)
             .await?;
@@ -536,6 +720,7 @@ async fn dispatch(
         eprintln!("[tool error] {msg}");
         return msg;
     };
+    tracing::debug!("dispatching tool: {}", tool.name());
 
     if tool.risk_level() == RiskLevel::Risky && !no_permission {
         let decision = match permissions.cached(tool.name()) {
@@ -549,6 +734,7 @@ async fn dispatch(
             }
         };
         if !decision.is_allow() {
+            tracing::warn!("permission denied for tool '{}'", tool.name());
             let msg = format!("ERROR: user denied permission for '{}'", tool.name());
             eprintln!("[denied] {msg}");
             return msg;
@@ -729,6 +915,13 @@ mod tests {
             }) => assert_eq!(id, "1748789422123"),
             other => panic!("expected session resume, got {other:?}"),
         }
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn doctor_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Doctor)));
         assert!(cli.model.is_none());
     }
 
