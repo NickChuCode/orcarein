@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo_dark.png">
-    <img src="assets/logo.png" alt="OrcaRein" width="280">
+    <img src="assets/logo_light.png" alt="OrcaRein" width="280">
   </picture>
 
   <p><em>An open-source Rust CLI agent harness for DeepSeek V4 and OpenAI-compatible LLM providers.</em></p>

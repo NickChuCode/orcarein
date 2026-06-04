@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo_dark.png">
-    <img src="assets/logo.png" alt="OrcaRein" width="280">
+    <img src="assets/logo_light.png" alt="OrcaRein" width="280">
   </picture>
 
   <p><em>一个开源的 Rust CLI agent harness，面向 DeepSeek V4 及 OpenAI 兼容的大模型。</em></p>
