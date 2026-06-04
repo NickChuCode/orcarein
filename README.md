@@ -1,9 +1,18 @@
-# OrcaRein
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo_dark.png">
+    <img src="assets/logo.png" alt="OrcaRein" width="280">
+  </picture>
 
-> An open-source Rust CLI agent harness for DeepSeek V4 and other OpenAI-compatible LLM providers. Inspired by [claw-code](https://github.com/ultraworkers/claw-code).
+  <p><em>An open-source Rust CLI agent harness for DeepSeek V4 and OpenAI-compatible LLM providers.</em></p>
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-![Status: v0.1.0 MVP](https://img.shields.io/badge/status-v0.1.0--mvp-orange.svg)
+  <p>
+    <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+    <img src="https://img.shields.io/badge/status-v0.1.0--mvp-orange.svg" alt="Status: v0.1.0 MVP">
+  </p>
+
+  <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+</div>
 
 OrcaRein is a small, hackable terminal agent: you chat with a model, and it can
 read and modify files, run shell commands, and act on your project — gated by a
