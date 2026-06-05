@@ -1,0 +1,30 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full git history so release-plz can compute the next version
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Ch19: only maintain the Release PR (CHANGELOG + version bump).
+      # The `release` command (git tag + GitHub release + crates.io publish)
+      # is wired up in Ch20/21.
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
