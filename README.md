@@ -7,6 +7,7 @@
   <p><em>An open-source Rust CLI agent harness for DeepSeek V4 and OpenAI-compatible LLM providers.</em></p>
 
   <p>
+    <a href="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml"><img src="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
     <img src="https://img.shields.io/badge/status-v0.1.0--mvp-orange.svg" alt="Status: v0.1.0 MVP">
   </p>
