@@ -7,13 +7,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["agent", "llm", "deepseek", "cli", "harness"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "orcarein"
 path = "src/main.rs"
 
 [dependencies]
-orcarein-core = { path = "../orcarein-core" }
+# Path for local builds; `version` is required so the crate can be published to crates.io.
+orcarein-core = { path = "../orcarein-core", version = "0.1.0" }
 # Ch05: anyhow::Result for the binary's main + run_turn surface.
 anyhow = { workspace = true }
 # Ch05: async runtime hosting the REPL and `provider.chat_stream` futures.

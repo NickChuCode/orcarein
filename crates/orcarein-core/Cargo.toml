@@ -7,6 +7,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["agent", "llm", "deepseek", "harness", "ai"]
+categories = ["development-tools"]
 
 [dependencies]
 # Ch05: serde derive for message (de)serialization.
