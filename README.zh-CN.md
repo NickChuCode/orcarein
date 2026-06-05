@@ -9,7 +9,7 @@
   <p>
     <a href="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml"><img src="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="#许可证"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
-    <img src="https://img.shields.io/badge/status-v0.1.0--mvp-orange.svg" alt="Status: v0.1.0 MVP">
+    <a href="https://github.com/NickChuCode/orcarein/releases/latest"><img src="https://img.shields.io/github/v/release/NickChuCode/orcarein?sort=semver" alt="Latest release"></a>
   </p>
 
   <p><a href="README.md">English</a> · <strong>简体中文</strong></p>
@@ -32,7 +32,14 @@ OrcaRein 是一个小巧、可魔改的终端 agent：你和模型对话，它�
 
 ## 安装
 
-需要 Rust **1.85+**（MSRV）。从源码构建：
+### 预编译二进制（推荐）
+
+从[最新 release](https://github.com/NickChuCode/orcarein/releases/latest) 下载对应平台的压缩包
+（Linux x86_64、macOS x86_64/arm64、Windows x86_64），解压后把 `orcarein` 可执行文件放进 `PATH`。
+
+### 从源码
+
+需要 Rust **1.85+**（MSRV）：
 
 ```sh
 git clone https://github.com/NickChuCode/orcarein

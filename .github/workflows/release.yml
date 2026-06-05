@@ -1,0 +1,56 @@
+name: release
+
+# Build and publish cross-platform binaries when a version tag is pushed.
+# Flow: merge the release-plz Release PR (version + CHANGELOG) -> push a `vX.Y.Z`
+# tag MANUALLY -> this workflow creates the GitHub Release (notes from CHANGELOG)
+# and attaches a binary archive per platform.
+#
+# Note: the tag must be pushed by a human (or a PAT). A tag created by
+# release-plz's default GITHUB_TOKEN would NOT trigger this workflow.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # Extract this tag's section from CHANGELOG.md as the release notes.
+          changelog: CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: orcarein
+          target: ${{ matrix.target }}
+          archive: orcarein-$tag-$target
+          include: README.md,LICENSE-MIT,LICENSE-APACHE
+          token: ${{ secrets.GITHUB_TOKEN }}

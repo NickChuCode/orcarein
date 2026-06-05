@@ -9,7 +9,7 @@
   <p>
     <a href="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml"><img src="https://github.com/NickChuCode/orcarein/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
-    <img src="https://img.shields.io/badge/status-v0.1.0--mvp-orange.svg" alt="Status: v0.1.0 MVP">
+    <a href="https://github.com/NickChuCode/orcarein/releases/latest"><img src="https://img.shields.io/github/v/release/NickChuCode/orcarein?sort=semver" alt="Latest release"></a>
   </p>
 
   <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
@@ -47,7 +47,15 @@ multi-turn context, and persists sessions you can resume later.
 
 ## Install
 
-Requires Rust **1.85+** (MSRV). Build from source:
+### Prebuilt binaries (recommended)
+
+Download the archive for your platform from the [latest release](https://github.com/NickChuCode/orcarein/releases/latest)
+(Linux x86_64, macOS x86_64/arm64, Windows x86_64), extract it, and put the
+`orcarein` binary somewhere on your `PATH`.
+
+### From source
+
+Requires Rust **1.85+** (MSRV):
 
 ```sh
 git clone https://github.com/NickChuCode/orcarein
