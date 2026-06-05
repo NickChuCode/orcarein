@@ -1,17 +1,21 @@
 # release-plz configuration.
 #
-# Ch19: release-plz only maintains the "Release PR" (updates CHANGELOG.md and
-# bumps the workspace version) — it does NOT tag, create GitHub releases, or
-# publish to crates.io yet. The workflow runs `command: release-pr` only.
-#
-# Ch20/21 will wire up the `release` command (git tag + GitHub release) and
-# crates.io publishing (CARGO_REGISTRY_TOKEN).
+# Division of labour:
+# - release-plz `release-pr`  -> maintains the Release PR (version bump + CHANGELOG).
+# - release-plz `release`     -> publishes new versions to crates.io ONLY.
+# - The git tag + GitHub Release + cross-platform binaries are handled by
+#   `.github/workflows/release.yml`, triggered by an author-pushed `vX.Y.Z` tag
+#   (Ch20). So release-plz must NOT also create tags/releases, or the two flows
+#   would collide.
 
 [workspace]
-# Keep CHANGELOG.md in sync from Conventional Commits.
+# Keep CHANGELOG.md in sync from Conventional Commits. Single-version workspace
+# (`version.workspace = true`): release-plz bumps `[workspace.package].version`
+# in the root Cargo.toml plus Cargo.lock.
 changelog_update = true
-# This is a single-version workspace (`version.workspace = true` in both crates),
-# so release-plz bumps `[workspace.package].version` in the root Cargo.toml plus
-# Cargo.lock. git release / crates.io publish stay off until Ch20/21.
+# Ch21: publish to crates.io on `release`. Publishes member crates in dependency
+# order (orcarein-core before orcarein) and waits for the index between them.
+publish = true
+# Tags + GitHub Releases are owned by release.yml (author-pushed tag), NOT release-plz.
+git_tag_enable = false
 git_release_enable = false
-publish = false

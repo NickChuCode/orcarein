@@ -5,6 +5,7 @@ on:
     branches: [main]
 
 jobs:
+  # Maintains the Release PR (version bump + CHANGELOG) from Conventional Commits.
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
@@ -12,7 +13,7 @@ jobs:
       contents: write
       pull-requests: write
     concurrency:
-      group: release-plz-${{ github.ref }}
+      group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -20,11 +21,34 @@ jobs:
           fetch-depth: 0          # full git history so release-plz can compute the next version
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      # Ch19: only maintain the Release PR (CHANGELOG + version bump).
-      # The `release` command (git tag + GitHub release + crates.io publish)
-      # is wired up in Ch20/21.
       - uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Ch21: after a Release PR is merged, publish the new version to crates.io.
+  # Publishes member crates in dependency order (orcarein-core then orcarein).
+  # Tags / GitHub Release / binaries are NOT done here — release.yml owns those,
+  # on an author-pushed tag (release-plz.toml keeps git_tag/release disabled).
+  # Requires a CARGO_REGISTRY_TOKEN repo secret; without it the publish is skipped.
+  release-plz-release:
+    name: Release-plz crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
