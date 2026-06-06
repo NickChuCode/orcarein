@@ -12,10 +12,11 @@ use clap::{Parser, Subcommand};
 use orcarein_core::cost;
 use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
-    env_key_var, Agent, AgentEvent, AllowlistPolicy, BashTool, CacheMode, Config, Decision,
-    DeepSeekProvider, EditTool, EventSink, ListDirTool, OpenAIProvider, PermissionPolicy,
-    PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore, Session, SessionStore,
-    SessionSummary, Tool, ToolRegistry, WriteFileTool, MAX_TOOL_ITERATIONS,
+    env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
+    CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
+    OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RiskLevel,
+    SecretStore, Session, SessionStore, SessionSummary, Tool, ToolRegistry, WriteFileTool,
+    MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -95,6 +96,16 @@ enum Command {
         /// `bash,edit`). Without it, `run` denies every Risky tool.
         #[arg(long, value_delimiter = ',')]
         allow: Option<Vec<String>>,
+    },
+    /// Fix a GitHub issue in the current repo (BYO-key self-bootstrap loop).
+    ///
+    /// Reads issue #N from the `origin` remote's repo, lets the agent edit the
+    /// code (read/list/edit/write only — no shell), runs `cargo test`, and
+    /// shows the diff for you to review. It never commits, pushes, or opens a
+    /// PR — that's your call. Requires a clean working tree.
+    Issue {
+        /// The issue number to fix.
+        number: u64,
     },
 }
 
@@ -491,6 +502,10 @@ async fn main() -> Result<()> {
         Some(Command::Doctor) => run_doctor(&cli), // diverges (process::exit)
         Some(Command::Run { prompt, allow }) => {
             let code = run_once(&cli, prompt, allow).await;
+            std::process::exit(code);
+        }
+        Some(Command::Issue { number }) => {
+            let code = run_issue(&cli, number).await;
             std::process::exit(code);
         }
         Some(Command::Session {
@@ -936,6 +951,188 @@ fn handle_command(
     }
 }
 
+/// Tool-iteration cap for `issue` mode — higher than the default so the agent
+/// can explore and edit several files in one turn.
+const ISSUE_MAX_ITERATIONS: usize = 25;
+
+/// Event sink for `issue` mode: logs the agent's tool activity to stderr so the
+/// operator can watch what it's doing. Reasoning/content stay quiet.
+struct IssueSink;
+
+impl EventSink for IssueSink {
+    fn emit(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::ToolStarted {
+                name, arguments, ..
+            } => eprintln!("orcarein: [tool] {name}({arguments})"),
+            AgentEvent::ToolFinished {
+                name,
+                is_error,
+                result,
+                ..
+            } => {
+                if is_error {
+                    eprintln!("orcarein: [tool] {name} -> {result}");
+                } else {
+                    eprintln!("orcarein: [tool] {name} -> {} bytes", result.len());
+                }
+            }
+            AgentEvent::IterationLimit => eprintln!("orcarein: [iteration limit]"),
+            _ => {}
+        }
+    }
+}
+
+/// Runs `git` with `args`, returning trimmed stdout. Errors (with stderr) on a
+/// non-zero exit.
+fn git(args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .context("failed to run git (is it installed and on PATH?)")?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Best-effort `cargo test`: `Some(true/false)` if this is a Cargo project,
+/// `None` if there's no `Cargo.toml` to test.
+fn run_cargo_tests() -> Option<bool> {
+    if !std::path::Path::new("Cargo.toml").exists() {
+        return None;
+    }
+    eprintln!("orcarein: running `cargo test` to verify…");
+    let status = std::process::Command::new("cargo")
+        .args(["test", "--quiet"])
+        .status()
+        .ok()?;
+    Some(status.success())
+}
+
+/// `orcarein issue <n>` — the BYO-key self-bootstrap loop. Returns a process
+/// exit code.
+async fn run_issue(cli: &Cli, number: u64) -> i32 {
+    match run_issue_inner(cli, number).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("orcarein: {e:#}");
+            1
+        }
+    }
+}
+
+async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
+    // 1. Must be inside a CLEAN git repo, so the resulting diff is purely the
+    //    agent's work.
+    if git(&["rev-parse", "--is-inside-work-tree"]).unwrap_or_default() != "true" {
+        bail!("not inside a git repository — run `orcarein issue` from a clone");
+    }
+    if !git(&["status", "--porcelain"])?.is_empty() {
+        bail!("working tree is not clean — commit or stash first so the diff is purely the agent's work");
+    }
+
+    // 2. Identify the repo from the origin remote.
+    let remote = git(&["remote", "get-url", "origin"]).context("no `origin` remote found")?;
+    let (owner, repo) = parse_owner_repo(&remote)?;
+    eprintln!("orcarein: {owner}/{repo}, fixing issue #{number}");
+
+    // 3. Fetch the issue (token optional for public repos).
+    let token = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let issue = fetch_issue(&owner, &repo, number, token.as_deref())
+        .await
+        .context("failed to fetch the issue from GitHub")?;
+    eprintln!("orcarein: issue: {}", issue.title);
+
+    // 4. Resolve the model/provider (DeepSeek by default, BYO key).
+    let Resolved {
+        provider, model, ..
+    } = resolve(cli)?;
+
+    // 5. Restricted toolset: read/list/edit/write only — NO shell.
+    let issue_tools: Vec<String> = ["read_file", "list_dir", "edit", "write_file"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let registry = build_registry(Some(&issue_tools));
+    let tool_defs = registry.definitions();
+    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
+        .with_cache_mode(cache_mode(cli))
+        .with_max_iterations(ISSUE_MAX_ITERATIONS);
+
+    // 6. Let the agent work the issue. The Risky tools it may use are gated to
+    //    exactly the edit set; read_file is Safe and always allowed.
+    let mut policy: Box<dyn PermissionPolicy> = Box::new(AllowlistPolicy::from_allowed([
+        "list_dir",
+        "edit",
+        "write_file",
+    ]));
+    let system = format!(
+        "You are OrcaRein, working as an autonomous maintainer of the repository {owner}/{repo}. \
+         Fix GitHub issue #{number}. Explore the codebase with read_file and list_dir, then make \
+         minimal, focused changes with edit and write_file. Do NOT run shell commands. The working \
+         directory is the repository root. When you are done, briefly summarize what you changed."
+    );
+    let mut session = Session::new(system);
+    session.push_user(format!(
+        "Issue #{number}: {}\n\n{}",
+        issue.title, issue.body
+    ));
+
+    let mut sink = IssueSink;
+    let outcome = agent
+        .run_turn(&mut session, &model, policy.as_mut(), &mut sink)
+        .await
+        .context("the agent run failed")?;
+
+    eprintln!(
+        "\norcarein: --- agent summary ---\n{}",
+        outcome.content.trim()
+    );
+    if outcome.hit_iteration_limit {
+        eprintln!(
+            "orcarein: warning: hit the tool-iteration limit ({ISSUE_MAX_ITERATIONS}); changes may be incomplete"
+        );
+    }
+    if let Some(m) = cost::meter_line(&outcome.usage, &model) {
+        eprintln!("orcarein: [{m}]");
+    }
+
+    // 7. Did it change anything?
+    let diff = git(&["diff"])?;
+    if diff.is_empty() {
+        eprintln!("orcarein: the agent made no file changes.");
+        return Ok(0);
+    }
+
+    // 8. Verify (best-effort) — the HARNESS runs tests, not the model.
+    let tests = run_cargo_tests();
+
+    // 9. Show the diff and stop. Committing / pushing / opening the PR is your
+    //    call (E1 keeps the human in the loop).
+    println!("{diff}");
+    eprintln!(
+        "\norcarein: review the diff above. Tests: {}.",
+        match tests {
+            Some(true) => "passed",
+            Some(false) => "FAILED",
+            None => "skipped (no Cargo.toml)",
+        }
+    );
+    eprintln!(
+        "orcarein: to ship it — git switch -c fix-issue-{number} && git commit -am \"fix: …\" \
+         && git push -u origin HEAD, then open a PR with \"Closes #{number}\"."
+    );
+
+    Ok(if tests == Some(false) { 2 } else { 0 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,6 +1284,22 @@ mod tests {
             }
             other => panic!("expected run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn issue_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "issue", "42"]).unwrap();
+        match cli.command {
+            Some(Command::Issue { number }) => assert_eq!(number, 42),
+            other => panic!("expected issue, got {other:?}"),
+        }
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn issue_subcommand_requires_a_number() {
+        // A non-numeric issue id is rejected by clap.
+        assert!(Cli::try_parse_from(["orcarein", "issue", "abc"]).is_err());
     }
 
     #[test]

@@ -212,12 +212,14 @@ pub struct Agent<'a> {
     registry: &'a ToolRegistry,
     tool_defs: &'a [ToolDefinition],
     cache_mode: CacheMode,
+    max_iterations: usize,
 }
 
 impl<'a> Agent<'a> {
     /// Builds an agent over the given provider, tool registry, and the tool
     /// definitions to advertise to the model (usually `registry.definitions()`).
-    /// Cache mode defaults to [`CacheMode::Economy`].
+    /// Cache mode defaults to [`CacheMode::Economy`]; the tool-iteration cap to
+    /// [`MAX_TOOL_ITERATIONS`].
     pub fn new(
         provider: &'a dyn Provider,
         registry: &'a ToolRegistry,
@@ -228,6 +230,7 @@ impl<'a> Agent<'a> {
             registry,
             tool_defs,
             cache_mode: CacheMode::Economy,
+            max_iterations: MAX_TOOL_ITERATIONS,
         }
     }
 
@@ -235,6 +238,14 @@ impl<'a> Agent<'a> {
     /// [`CacheMode::Benchmark`] only to demonstrate the cache savings.
     pub fn with_cache_mode(mut self, mode: CacheMode) -> Self {
         self.cache_mode = mode;
+        self
+    }
+
+    /// Sets the per-turn tool-iteration cap (default [`MAX_TOOL_ITERATIONS`]).
+    /// A longer task like `issue` mode raises it so the agent can explore and
+    /// edit several files in one turn.
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n.max(1);
         self
     }
 
@@ -259,7 +270,7 @@ impl<'a> Agent<'a> {
         let mut iteration = 0usize;
 
         loop {
-            if iteration >= MAX_TOOL_ITERATIONS {
+            if iteration >= self.max_iterations {
                 sink.emit(AgentEvent::IterationLimit);
                 session.record_usage(turn_usage);
                 return Ok(TurnOutcome {
@@ -738,6 +749,30 @@ mod tests {
             .expect("a tool result");
         assert!(tool_msg.content.contains("unknown tool 'serch'"));
         assert!(tool_msg.content.contains("Available tools: echo"));
+    }
+
+    #[tokio::test]
+    async fn with_max_iterations_caps_the_loop() {
+        let provider = MockProvider::new();
+        for _ in 0..5 {
+            provider.push_tool_call("c", "echo", "{}");
+        }
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs).with_max_iterations(2);
+
+        let mut session = Session::new("sys");
+        session.push_user("loop");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut sink = |_e: AgentEvent| {};
+
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+
+        assert!(outcome.hit_iteration_limit);
     }
 
     #[test]

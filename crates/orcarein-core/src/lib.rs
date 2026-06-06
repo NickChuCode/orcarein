@@ -7,6 +7,7 @@ pub mod agent;
 pub mod config;
 pub mod cost;
 pub mod doctor;
+pub mod github;
 pub mod message;
 pub mod permission;
 pub mod provider;
@@ -20,6 +21,7 @@ pub use agent::{
 pub use config::{env_key_var, Config, ConfigError, SecretStore, CONFIG_KEYS};
 pub use cost::{CostEstimate, Prices};
 pub use doctor::{Check, CheckStatus, Tally};
+pub use github::{fetch_issue, parse_owner_repo, GithubError, Issue};
 pub use message::Message;
 pub use permission::{Decision, PermissionStore};
 pub use provider::{
