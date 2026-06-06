@@ -27,6 +27,8 @@ pub use provider::{
 };
 pub use session::{Session, SessionError, SessionStore, SessionSummary, TokenUsage};
 pub use tool::{
+    // v0.2 C — tool-call argument repair
+    parse_tool_arguments,
     // Ch11 — full tool suite
     BashTool,
     EditTool,

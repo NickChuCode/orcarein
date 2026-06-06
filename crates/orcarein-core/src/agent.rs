@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 use futures_util::StreamExt;
 
+use crate::tool::ToolError;
 use crate::{
     ChatOptions, Decision, Message, Provider, RiskLevel, Session, StreamEvent, TokenUsage,
     ToolCall, ToolDefinition, ToolRegistry,
@@ -364,17 +365,33 @@ impl<'a> Agent<'a> {
         result
     }
 
-    /// Parses arguments, looks up the tool, gates `Risky` tools through
-    /// `policy`, and executes. Every failure path returns an `ERROR:`-prefixed
-    /// string (never panics, never aborts the turn).
+    /// Looks up the tool, repairs + parses arguments, gates `Risky` tools
+    /// through `policy`, and executes. Every failure path returns an
+    /// `ERROR:`-prefixed, **self-correcting** string (it tells the model what
+    /// went wrong and how to retry) — never panics, never aborts the turn.
     async fn run_tool(&self, policy: &mut dyn PermissionPolicy, call: &ToolCall) -> String {
-        let args = match call.function.parse_arguments() {
-            Ok(v) => v,
-            Err(e) => return format!("{ERROR_PREFIX} bad arguments JSON: {e}"),
+        // Resolve the tool first: an unknown name gets the list of real ones so
+        // the model can pick a valid tool on its next attempt.
+        let Some(tool) = self.registry.get(&call.function.name) else {
+            return format!(
+                "{ERROR_PREFIX} unknown tool '{}'. Available tools: {}. Retry with one of these.",
+                call.function.name,
+                self.registry.names().join(", ")
+            );
         };
 
-        let Some(tool) = self.registry.get(&call.function.name) else {
-            return format!("{ERROR_PREFIX} unknown tool '{}'", call.function.name);
+        // Repair the model's argument string (empty / fenced / prose-wrapped
+        // JSON are all common from DeepSeek) before giving up.
+        let args = match crate::tool::parse_tool_arguments(&call.function.arguments) {
+            Ok(v) => v,
+            Err(reason) => {
+                return format!(
+                    "{ERROR_PREFIX} could not parse arguments for '{}': {reason}. \
+                     Expected JSON matching this schema: {}. Retry with valid JSON only.",
+                    tool.name(),
+                    tool.schema()
+                )
+            }
         };
 
         if tool.risk_level() == RiskLevel::Risky {
@@ -386,6 +403,13 @@ impl<'a> Agent<'a> {
 
         match tool.execute(args).await {
             Ok(out) => out.content,
+            // The args were valid JSON but did not match the tool's schema —
+            // echo the schema so the model can correct the shape.
+            Err(ToolError::InvalidArguments(e)) => format!(
+                "{ERROR_PREFIX} invalid arguments for '{}': {e}. Expected schema: {}. Retry.",
+                tool.name(),
+                tool.schema()
+            ),
             Err(e) => format!("{ERROR_PREFIX} {e}"),
         }
     }
@@ -632,6 +656,88 @@ mod tests {
             .messages()
             .iter()
             .any(|m| m.content.contains("nonce")));
+    }
+
+    #[tokio::test]
+    async fn empty_arguments_are_repaired_and_the_tool_runs() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "echo", ""); // model emitted empty args
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs);
+
+        let mut session = Session::new("sys");
+        session.push_user("call echo");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut sink = |_e: AgentEvent| {};
+
+        agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+
+        // Empty args were repaired to {} and echoed back — no error.
+        assert!(session
+            .messages()
+            .iter()
+            .any(|m| m.role == "tool" && m.content == "{}"));
+    }
+
+    #[tokio::test]
+    async fn fenced_arguments_are_repaired() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "echo", "```json\n{\"x\":1}\n```");
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs);
+
+        let mut session = Session::new("sys");
+        session.push_user("call echo");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut sink = |_e: AgentEvent| {};
+
+        agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+
+        assert!(session
+            .messages()
+            .iter()
+            .any(|m| m.role == "tool" && m.content.contains("\"x\":1")));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_error_lists_available_tools() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "serch", "{}"); // typo'd tool name
+        provider.push_text("oops");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs);
+
+        let mut session = Session::new("sys");
+        session.push_user("use serch");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut sink = |_e: AgentEvent| {};
+
+        agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+
+        let tool_msg = session
+            .messages()
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("a tool result");
+        assert!(tool_msg.content.contains("unknown tool 'serch'"));
+        assert!(tool_msg.content.contains("Available tools: echo"));
     }
 
     #[test]
