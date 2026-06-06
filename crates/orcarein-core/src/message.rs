@@ -202,4 +202,32 @@ mod tests {
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.reasoning_content.as_deref(), Some("step 1; step 2"));
     }
+
+    #[test]
+    fn message_list_serializes_deterministically() {
+        // Cache discipline: the request prefix must be byte-stable so
+        // DeepSeek's auto-cache hits it. serde gives deterministic field
+        // order; this guards against a future change (e.g. a HashMap on the
+        // wire) silently breaking caching.
+        let messages = vec![
+            Message::system("you are helpful"),
+            Message::user("hi"),
+            Message::assistant("thinking").with_reasoning("step 1"),
+            Message::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"x"}"#.into(),
+                    },
+                }],
+            ),
+            Message::tool("c1", "file contents"),
+        ];
+        let a = serde_json::to_string(&messages).unwrap();
+        let b = serde_json::to_string(&messages).unwrap();
+        assert_eq!(a, b);
+    }
 }

@@ -9,12 +9,13 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use orcarein_core::cost;
 use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
-    env_key_var, Agent, AgentEvent, AllowlistPolicy, BashTool, Config, Decision, DeepSeekProvider,
-    EditTool, EventSink, ListDirTool, OpenAIProvider, PermissionPolicy, PermissionStore, Provider,
-    ReadFileTool, RiskLevel, SecretStore, Session, SessionStore, SessionSummary, Tool,
-    ToolRegistry, WriteFileTool, MAX_TOOL_ITERATIONS,
+    env_key_var, Agent, AgentEvent, AllowlistPolicy, BashTool, CacheMode, Config, Decision,
+    DeepSeekProvider, EditTool, EventSink, ListDirTool, OpenAIProvider, PermissionPolicy,
+    PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore, Session, SessionStore,
+    SessionSummary, Tool, ToolRegistry, WriteFileTool, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -54,6 +55,11 @@ struct Cli {
     /// Comma-separated tool whitelist (e.g. `read_file,list_dir`).
     #[arg(long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
+
+    /// Benchmark mode: defeat DeepSeek's prefix cache (perturb each request)
+    /// so you can A/B the savings the stable prefix earns. Demo only.
+    #[arg(long)]
+    no_economy: bool,
 
     /// Read the system prompt from a file instead of the built-in default.
     #[arg(long, value_name = "PATH")]
@@ -564,9 +570,14 @@ async fn main() -> Result<()> {
         );
     }
 
+    if cli.no_economy {
+        println!("Cache: economy OFF (benchmark — prefix cache deliberately defeated)\n");
+    }
+
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
     // that supplies an interactive permission policy and a printing event sink.
-    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs);
+    let agent =
+        Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(&cli));
     let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
         Box::new(AllowlistPolicy::allow_all())
     } else {
@@ -603,10 +614,13 @@ async fn main() -> Result<()> {
         {
             Ok(outcome) => {
                 println!(); // close the final streamed line
+                let total = session.usage();
+                let meter = cost::meter_line(&total, &model)
+                    .map(|m| format!(" | {m}"))
+                    .unwrap_or_default();
                 eprintln!(
-                    "[tokens: +{} this turn / {} total]\n",
-                    outcome.usage.total_tokens,
-                    session.usage().total_tokens
+                    "[tokens: +{} this turn / {} total{}]\n",
+                    outcome.usage.total_tokens, total.total_tokens, meter
                 );
                 // Auto-save after a successful turn; never let a save error
                 // interrupt the conversation.
@@ -767,6 +781,15 @@ fn read_prompt(arg: Option<String>) -> Result<String> {
     Ok(buf)
 }
 
+/// Maps the `--no-economy` flag to a [`CacheMode`].
+fn cache_mode(cli: &Cli) -> CacheMode {
+    if cli.no_economy {
+        CacheMode::Benchmark
+    } else {
+        CacheMode::Economy
+    }
+}
+
 /// Runs one task non-interactively and returns a process exit code:
 /// `0` success, `1` error, `2` stopped at the tool-iteration limit.
 async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<String>>) -> i32 {
@@ -797,7 +820,11 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
 
     let registry = build_registry(tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
-    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs);
+    let agent =
+        Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(cli));
+    if cli.no_economy {
+        eprintln!("orcarein: economy OFF (benchmark — prefix cache defeated)");
+    }
 
     let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
         eprintln!("orcarein: warning: --no-permission runs ALL tools without prompting");
@@ -819,7 +846,13 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         Ok(outcome) => {
             // stdout = the final answer only.
             println!("{}", outcome.content.trim_end());
-            eprintln!("orcarein: [tokens: {} total]", outcome.usage.total_tokens);
+            let meter = cost::meter_line(&outcome.usage, &model)
+                .map(|m| format!(" | {m}"))
+                .unwrap_or_default();
+            eprintln!(
+                "orcarein: [tokens: {} total{}]",
+                outcome.usage.total_tokens, meter
+            );
             if outcome.hit_iteration_limit {
                 eprintln!("orcarein: warning: stopped at the tool-iteration limit");
                 return 2;
@@ -921,6 +954,16 @@ mod tests {
         assert!(cli.model.is_none());
         assert!(cli.command.is_none());
         assert!(!cli.no_permission);
+        assert!(!cli.no_economy);
+    }
+
+    #[test]
+    fn no_economy_flag_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "--no-economy"]).unwrap();
+        assert!(cli.no_economy);
+        assert_eq!(cache_mode(&cli), CacheMode::Benchmark);
+        let cli = Cli::try_parse_from(["orcarein"]).unwrap();
+        assert_eq!(cache_mode(&cli), CacheMode::Economy);
     }
 
     #[test]

@@ -21,6 +21,15 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from DeepSeek's automatic byte-prefix cache (the
+    /// cheap ones). DeepSeek reports this in `usage`; OpenAI does not, so it
+    /// stays 0 there. `prompt_cache_hit_tokens + prompt_cache_miss_tokens`
+    /// equals `prompt_tokens` on DeepSeek.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: u64,
+    /// Prompt tokens NOT served from cache (full price). See above.
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: u64,
 }
 
 impl TokenUsage {
@@ -29,6 +38,8 @@ impl TokenUsage {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
         self.total_tokens += other.total_tokens;
+        self.prompt_cache_hit_tokens += other.prompt_cache_hit_tokens;
+        self.prompt_cache_miss_tokens += other.prompt_cache_miss_tokens;
     }
 }
 
@@ -338,6 +349,7 @@ mod tests {
             prompt_tokens: 5,
             completion_tokens: 3,
             total_tokens: 8,
+            ..Default::default()
         });
         s.clear();
         assert_eq!(s.usage().total_tokens, 8);
@@ -350,11 +362,13 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            ..Default::default()
         });
         s.record_usage(TokenUsage {
             prompt_tokens: 20,
             completion_tokens: 8,
             total_tokens: 28,
+            ..Default::default()
         });
         let total = s.usage();
         assert_eq!(total.prompt_tokens, 30);
@@ -368,6 +382,7 @@ mod tests {
             prompt_tokens: 15,
             completion_tokens: 20,
             total_tokens: 35,
+            ..Default::default()
         };
         let s = serde_json::to_string(&u).unwrap();
         let parsed: TokenUsage = serde_json::from_str(&s).unwrap();
@@ -390,6 +405,7 @@ mod tests {
             prompt_tokens: 12,
             completion_tokens: 7,
             total_tokens: 19,
+            ..Default::default()
         });
         s
     }

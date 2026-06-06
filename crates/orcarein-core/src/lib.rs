@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod cost;
 pub mod doctor;
 pub mod message;
 pub mod permission;
@@ -13,10 +14,11 @@ pub mod session;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentError, AgentEvent, AllowlistPolicy, EventSink, PermissionPolicy, TurnOutcome,
-    MAX_TOOL_ITERATIONS,
+    Agent, AgentError, AgentEvent, AllowlistPolicy, CacheMode, EventSink, PermissionPolicy,
+    TurnOutcome, MAX_TOOL_ITERATIONS,
 };
 pub use config::{env_key_var, Config, ConfigError, SecretStore, CONFIG_KEYS};
+pub use cost::{CostEstimate, Prices};
 pub use doctor::{Check, CheckStatus, Tally};
 pub use message::Message;
 pub use permission::{Decision, PermissionStore};

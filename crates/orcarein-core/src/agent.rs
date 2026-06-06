@@ -166,6 +166,42 @@ pub enum AgentError {
     Provider(#[from] anyhow::Error),
 }
 
+/// How the engine assembles each request's prefix — the cache-discipline knob.
+///
+/// DeepSeek's cache is automatic and byte-prefix based; because a [`Session`]
+/// is append-only (history is never mutated or reordered), every request's
+/// prefix is byte-identical to the previous one and the cache hits it for free.
+/// That is `Economy`, the production default. `Benchmark` deliberately defeats
+/// the cache so you can A/B the savings the stable prefix earns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheMode {
+    /// Stable, append-only prefix — DeepSeek's auto-cache hits it. The default,
+    /// and the only mode you want in production.
+    #[default]
+    Economy,
+    /// Demo/benchmark only: perturb each request's prefix with a nonce so the
+    /// cache MISSES, to measure what `Economy` is saving. Never for production.
+    Benchmark,
+}
+
+/// Returns a copy of `messages` with a unique nonce appended to the first
+/// message's content — enough to break DeepSeek's byte-prefix cache for the
+/// benchmark mode. The nonce never touches the stored [`Session`].
+fn perturbed_for_benchmark(messages: &[Message], iteration: usize) -> Vec<Message> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let nonce = nanos.wrapping_add(iteration as u128);
+
+    let mut out = messages.to_vec();
+    if let Some(first) = out.first_mut() {
+        first.content = format!("{}\n<!--orcarein-benchmark-nonce:{nonce}-->", first.content);
+    }
+    out
+}
+
 /// The agent loop. Holds references to the pieces it needs; [`run_turn`]
 /// drives one user turn to completion.
 ///
@@ -174,11 +210,13 @@ pub struct Agent<'a> {
     provider: &'a dyn Provider,
     registry: &'a ToolRegistry,
     tool_defs: &'a [ToolDefinition],
+    cache_mode: CacheMode,
 }
 
 impl<'a> Agent<'a> {
     /// Builds an agent over the given provider, tool registry, and the tool
     /// definitions to advertise to the model (usually `registry.definitions()`).
+    /// Cache mode defaults to [`CacheMode::Economy`].
     pub fn new(
         provider: &'a dyn Provider,
         registry: &'a ToolRegistry,
@@ -188,7 +226,15 @@ impl<'a> Agent<'a> {
             provider,
             registry,
             tool_defs,
+            cache_mode: CacheMode::Economy,
         }
+    }
+
+    /// Sets the cache mode (default [`CacheMode::Economy`]). Use
+    /// [`CacheMode::Benchmark`] only to demonstrate the cache savings.
+    pub fn with_cache_mode(mut self, mode: CacheMode) -> Self {
+        self.cache_mode = mode;
+        self
     }
 
     /// Runs one user turn to completion: streams a completion, executes any
@@ -222,9 +268,22 @@ impl<'a> Agent<'a> {
                 });
             }
 
+            // Cache discipline: Economy sends the session verbatim, so the
+            // prefix is byte-stable across iterations and DeepSeek's auto-cache
+            // hits it. Benchmark perturbs the prefix to defeat the cache (A/B).
+            let bench = match self.cache_mode {
+                CacheMode::Economy => None,
+                CacheMode::Benchmark => {
+                    Some(perturbed_for_benchmark(session.messages(), iteration))
+                }
+            };
+            let messages: &[Message] = match &bench {
+                Some(v) => v.as_slice(),
+                None => session.messages(),
+            };
             let mut stream = self
                 .provider
-                .chat_stream(session.messages(), self.tool_defs, &opts)
+                .chat_stream(messages, self.tool_defs, &opts)
                 .await?;
 
             let mut content = String::new();
@@ -546,6 +605,33 @@ mod tests {
 
         assert!(outcome.hit_iteration_limit);
         assert!(events.contains(&AgentEvent::IterationLimit));
+    }
+
+    #[tokio::test]
+    async fn benchmark_mode_does_not_corrupt_stored_session() {
+        let provider = MockProvider::new();
+        provider.push_text("hi");
+        let registry = ToolRegistry::new();
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs).with_cache_mode(CacheMode::Benchmark);
+
+        let mut session = Session::new("system prompt");
+        session.push_user("yo");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut sink = |_e: AgentEvent| {};
+
+        agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+
+        // The benchmark nonce perturbs the outgoing request only — never the
+        // stored session.
+        assert_eq!(session.messages()[0].content, "system prompt");
+        assert!(!session
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("nonce")));
     }
 
     #[test]
