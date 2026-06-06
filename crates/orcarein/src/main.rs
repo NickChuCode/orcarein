@@ -9,13 +9,12 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use futures_util::StreamExt;
 use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
-    env_key_var, BashTool, ChatOptions, Config, Decision, DeepSeekProvider, EditTool, ListDirTool,
-    Message, OpenAIProvider, PermissionStore, Provider, ReadFileTool, RiskLevel, SecretStore,
-    Session, SessionStore, SessionSummary, StreamEvent, TokenUsage, Tool, ToolCall, ToolDefinition,
-    ToolRegistry, WriteFileTool,
+    env_key_var, Agent, AgentEvent, AllowlistPolicy, BashTool, Config, Decision, DeepSeekProvider,
+    EditTool, EventSink, ListDirTool, OpenAIProvider, PermissionPolicy, PermissionStore, Provider,
+    ReadFileTool, RiskLevel, SecretStore, Session, SessionStore, SessionSummary, Tool,
+    ToolRegistry, WriteFileTool, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -25,10 +24,6 @@ use std::path::{Path, PathBuf};
 /// Fallback system prompt when neither `--system-prompt-file` nor the config
 /// file supplies one.
 const DEFAULT_SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
-
-/// Upper bound on tool-call iterations within one user turn. Prevents an
-/// over-eager model from spinning the dispatcher.
-const MAX_TOOL_ITERATIONS: usize = 8;
 
 /// Names of every built-in tool — keeps `--tools` typo warnings honest.
 const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "list_dir", "bash", "edit"];
@@ -82,6 +77,19 @@ enum Command {
     },
     /// Run offline health checks and print a PASS/WARN/FAIL report.
     Doctor,
+    /// Run a single task non-interactively and exit (headless / scriptable).
+    ///
+    /// Reads the prompt from the argument, or from stdin if omitted. Writes the
+    /// final answer to stdout and diagnostics to stderr. Risky tools are
+    /// **denied** unless named with `--allow` (or `--no-permission`).
+    Run {
+        /// The task/prompt. If omitted, OrcaRein reads it from stdin.
+        prompt: Option<String>,
+        /// Allow these Risky tools without prompting (comma-separated, e.g.
+        /// `bash,edit`). Without it, `run` denies every Risky tool.
+        #[arg(long, value_delimiter = ',')]
+        allow: Option<Vec<String>>,
+    },
 }
 
 /// Actions for the `config` subcommand. Mirrors the `Config::get/set/entries`
@@ -475,6 +483,10 @@ async fn main() -> Result<()> {
             action: SessionAction::List,
         }) => return run_session_list(),
         Some(Command::Doctor) => run_doctor(&cli), // diverges (process::exit)
+        Some(Command::Run { prompt, allow }) => {
+            let code = run_once(&cli, prompt, allow).await;
+            std::process::exit(code);
+        }
         Some(Command::Session {
             action: SessionAction::Resume { id },
         }) => resume_id = Some(id),
@@ -526,7 +538,6 @@ async fn main() -> Result<()> {
         }
     };
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
-    let mut permissions = PermissionStore::new();
 
     let registry = build_registry(tools_allowlist.as_deref());
     let tool_defs = registry.definitions();
@@ -553,6 +564,15 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
+    // that supplies an interactive permission policy and a printing event sink.
+    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs);
+    let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
+        Box::new(AllowlistPolicy::allow_all())
+    } else {
+        Box::new(InteractivePolicy::new())
+    };
+
     loop {
         let line = match editor.readline("> ") {
             Ok(line) => line,
@@ -576,23 +596,28 @@ async fn main() -> Result<()> {
         let _ = editor.add_history_entry(input);
         session.push_user(input);
 
-        if let Err(e) = run_turn(
-            provider.as_ref(),
-            &model,
-            &mut session,
-            &registry,
-            &tool_defs,
-            &mut permissions,
-            cli.no_permission,
-        )
-        .await
+        let mut sink = ReplSink::new();
+        match agent
+            .run_turn(&mut session, &model, policy.as_mut(), &mut sink)
+            .await
         {
-            eprintln!("\n[错误] {e:#}\n");
-            session.pop_last();
-        } else if let Err(e) = store.save(&session_id, created_at_ms, &session) {
-            // Auto-save after a successful turn; never let a save error
-            // interrupt the conversation.
-            eprintln!("[warn] 自动保存失败：{e}");
+            Ok(outcome) => {
+                println!(); // close the final streamed line
+                eprintln!(
+                    "[tokens: +{} this turn / {} total]\n",
+                    outcome.usage.total_tokens,
+                    session.usage().total_tokens
+                );
+                // Auto-save after a successful turn; never let a save error
+                // interrupt the conversation.
+                if let Err(e) = store.save(&session_id, created_at_ms, &session) {
+                    eprintln!("[warn] 自动保存失败：{e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("\n[错误] {e:#}\n");
+                session.pop_last();
+            }
         }
     }
 
@@ -600,156 +625,210 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Runs one user turn: drives `provider.chat_stream`, executes any
-/// returned tool calls, feeds results back, and repeats until the model
-/// stops calling tools or `MAX_TOOL_ITERATIONS` is reached.
-#[allow(clippy::too_many_arguments)]
-async fn run_turn(
-    provider: &dyn Provider,
-    model: &str,
-    session: &mut Session,
-    registry: &ToolRegistry,
-    tool_defs: &[ToolDefinition],
-    permissions: &mut PermissionStore,
-    no_permission: bool,
-) -> Result<()> {
-    let opts = ChatOptions::new(model);
-    let mut turn_usage = TokenUsage::default();
-    let mut iteration = 0usize;
-
-    loop {
-        if iteration >= MAX_TOOL_ITERATIONS {
-            eprintln!("[超过 tool call 上限 {MAX_TOOL_ITERATIONS} 次，中断]");
-            break;
-        }
-
-        tracing::debug!("chat_stream request: model={model}, iteration={iteration}");
-        let mut stream = provider
-            .chat_stream(session.messages(), tool_defs, &opts)
-            .await?;
-
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut started_reasoning = false;
-        let mut started_content = false;
-
-        while let Some(event) = stream.next().await {
-            match event? {
-                StreamEvent::Reasoning(text) => {
-                    if !started_reasoning {
-                        println!("[思考]");
-                        started_reasoning = true;
-                    }
-                    print!("{text}");
-                    let _ = std::io::stdout().flush();
-                    reasoning.push_str(&text);
-                }
-                StreamEvent::Content(text) => {
-                    if !started_content {
-                        if started_reasoning {
-                            println!("\n");
-                        }
-                        println!("[回复]");
-                        started_content = true;
-                    }
-                    print!("{text}");
-                    let _ = std::io::stdout().flush();
-                    content.push_str(&text);
-                }
-                StreamEvent::ToolCalls(calls) => tool_calls = calls,
-                StreamEvent::Usage(u) => turn_usage.add(u),
-            }
-        }
-        println!();
-
-        let assistant_msg = if tool_calls.is_empty() {
-            Message::assistant(&content).with_reasoning(reasoning)
-        } else {
-            Message::assistant_with_tool_calls(&content, tool_calls.clone())
-                .with_reasoning(reasoning)
-        };
-        session.push_assistant(assistant_msg);
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        for call in &tool_calls {
-            let result = dispatch(registry, permissions, no_permission, call).await;
-            session.push_assistant(Message::tool(&call.id, result));
-        }
-
-        iteration += 1;
-    }
-
-    session.record_usage(turn_usage);
-    eprintln!(
-        "[tokens: +{} this turn / {} total]\n",
-        turn_usage.total_tokens,
-        session.usage().total_tokens
-    );
-    Ok(())
+/// The interactive permission policy: prompts the human on stdin/stderr and
+/// caches sticky decisions for the session. The *non-interactive* policy
+/// ([`AllowlistPolicy`]) lives in `orcarein-core` since it needs no I/O.
+struct InteractivePolicy {
+    store: PermissionStore,
 }
 
-/// Executes a single tool call against the registry, gating `Risky`
-/// tools behind a permission prompt unless the user has cached an
-/// `AllowAlways` decision or invoked OrcaRein with `--no-permission`.
-async fn dispatch(
-    registry: &ToolRegistry,
-    permissions: &mut PermissionStore,
-    no_permission: bool,
-    call: &ToolCall,
-) -> String {
-    eprintln!(
-        "[tool: {}({})]",
-        call.function.name, call.function.arguments
-    );
-
-    let args = match call.function.parse_arguments() {
-        Ok(v) => v,
-        Err(e) => {
-            let msg = format!("ERROR: bad arguments JSON: {e}");
-            eprintln!("[tool error] {msg}");
-            return msg;
-        }
-    };
-
-    let Some(tool) = registry.get(&call.function.name) else {
-        let msg = format!("ERROR: unknown tool '{}'", call.function.name);
-        eprintln!("[tool error] {msg}");
-        return msg;
-    };
-    tracing::debug!("dispatching tool: {}", tool.name());
-
-    if tool.risk_level() == RiskLevel::Risky && !no_permission {
-        let decision = match permissions.cached(tool.name()) {
-            Some(d) => d,
-            None => {
-                let d = prompt_permission(tool.name(), &call.function.arguments);
-                if d.is_sticky() {
-                    permissions.remember(tool.name(), d);
-                }
-                d
-            }
-        };
-        if !decision.is_allow() {
-            tracing::warn!("permission denied for tool '{}'", tool.name());
-            let msg = format!("ERROR: user denied permission for '{}'", tool.name());
-            eprintln!("[denied] {msg}");
-            return msg;
+impl InteractivePolicy {
+    fn new() -> Self {
+        InteractivePolicy {
+            store: PermissionStore::new(),
         }
     }
+}
 
-    match tool.execute(args).await {
-        Ok(out) => {
-            eprintln!("[result] {} bytes", out.content.len());
-            out.content
+impl PermissionPolicy for InteractivePolicy {
+    fn decide(&mut self, tool: &str, args: &str, _risk: RiskLevel) -> Decision {
+        if let Some(d) = self.store.cached(tool) {
+            return d;
+        }
+        let d = prompt_permission(tool, args);
+        if d.is_sticky() {
+            self.store.remember(tool, d);
+        }
+        d
+    }
+}
+
+/// Renders [`AgentEvent`]s the way the REPL always has: reasoning/content to
+/// stdout under `[思考]`/`[回复]` headers, tool activity to stderr.
+struct ReplSink {
+    started_reasoning: bool,
+    started_content: bool,
+}
+
+impl ReplSink {
+    fn new() -> Self {
+        ReplSink {
+            started_reasoning: false,
+            started_content: false,
+        }
+    }
+}
+
+impl EventSink for ReplSink {
+    fn emit(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::Reasoning(text) => {
+                if !self.started_reasoning {
+                    println!("[思考]");
+                    self.started_reasoning = true;
+                }
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            AgentEvent::Content(text) => {
+                if !self.started_content {
+                    if self.started_reasoning {
+                        println!("\n");
+                    }
+                    println!("[回复]");
+                    self.started_content = true;
+                }
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            AgentEvent::ToolStarted {
+                name, arguments, ..
+            } => {
+                if self.started_content || self.started_reasoning {
+                    println!();
+                }
+                eprintln!("[tool: {name}({arguments})]");
+            }
+            AgentEvent::ToolFinished {
+                result, is_error, ..
+            } => {
+                if is_error {
+                    eprintln!("[tool error] {result}");
+                } else {
+                    eprintln!("[result] {} bytes", result.len());
+                }
+                // The next model response is a fresh segment.
+                self.started_reasoning = false;
+                self.started_content = false;
+            }
+            AgentEvent::Usage(_) => {} // printed once at end of turn
+            AgentEvent::IterationLimit => {
+                eprintln!("[超过 tool call 上限 {MAX_TOOL_ITERATIONS} 次，中断]");
+            }
+        }
+    }
+}
+
+/// Machine-facing sink for `orcarein run`: keeps **stdout clean** (the final
+/// answer is printed by [`run_once`], not streamed here) and routes tool
+/// activity + warnings to stderr.
+struct MachineSink;
+
+impl EventSink for MachineSink {
+    fn emit(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::ToolStarted {
+                name, arguments, ..
+            } => eprintln!("[tool: {name}({arguments})]"),
+            AgentEvent::ToolFinished {
+                result, is_error, ..
+            } => {
+                if is_error {
+                    eprintln!("[tool error] {result}");
+                } else {
+                    eprintln!("[tool ok] {} bytes", result.len());
+                }
+            }
+            AgentEvent::IterationLimit => eprintln!("[warning: stopped at tool-iteration limit]"),
+            // Reasoning / Content / Usage are diagnostics here: the final
+            // answer comes from `TurnOutcome.content`, so stdout stays clean.
+            _ => {}
+        }
+    }
+}
+
+/// Reads the prompt for `orcarein run`: the argument if given, else stdin.
+fn read_prompt(arg: Option<String>) -> Result<String> {
+    if let Some(p) = arg {
+        if !p.trim().is_empty() {
+            return Ok(p);
+        }
+    }
+    if std::io::stdin().is_terminal() {
+        bail!(
+            "no prompt given — pass it as an argument (orcarein run \"...\") or pipe it on stdin"
+        );
+    }
+    let buf =
+        std::io::read_to_string(std::io::stdin()).context("failed to read prompt from stdin")?;
+    if buf.trim().is_empty() {
+        bail!("empty prompt on stdin");
+    }
+    Ok(buf)
+}
+
+/// Runs one task non-interactively and returns a process exit code:
+/// `0` success, `1` error, `2` stopped at the tool-iteration limit.
+async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<String>>) -> i32 {
+    // Validate the prompt first so a headless caller that forgot it gets a
+    // clear error before we ever demand an API key.
+    let prompt = match read_prompt(prompt_arg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("orcarein: {e:#}");
+            return 1;
+        }
+    };
+
+    let resolved = match resolve(cli) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("orcarein: {e:#}");
+            return 1;
+        }
+    };
+    let Resolved {
+        provider,
+        model,
+        system_prompt,
+        tools_allowlist,
+        ..
+    } = resolved;
+
+    let registry = build_registry(tools_allowlist.as_deref());
+    let tool_defs = registry.definitions();
+    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs);
+
+    let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
+        eprintln!("orcarein: warning: --no-permission runs ALL tools without prompting");
+        Box::new(AllowlistPolicy::allow_all())
+    } else if let Some(names) = allow {
+        Box::new(AllowlistPolicy::from_allowed(names))
+    } else {
+        Box::new(AllowlistPolicy::deny_all())
+    };
+
+    let mut session = Session::new(&system_prompt);
+    session.push_user(&prompt);
+
+    let mut sink = MachineSink;
+    match agent
+        .run_turn(&mut session, &model, policy.as_mut(), &mut sink)
+        .await
+    {
+        Ok(outcome) => {
+            // stdout = the final answer only.
+            println!("{}", outcome.content.trim_end());
+            eprintln!("orcarein: [tokens: {} total]", outcome.usage.total_tokens);
+            if outcome.hit_iteration_limit {
+                eprintln!("orcarein: warning: stopped at the tool-iteration limit");
+                return 2;
+            }
+            0
         }
         Err(e) => {
-            let msg = format!("ERROR: {e}");
-            eprintln!("[tool error] {msg}");
-            msg
+            eprintln!("orcarein: {e:#}");
+            1
         }
     }
 }
@@ -923,6 +1002,48 @@ mod tests {
         let cli = Cli::try_parse_from(["orcarein", "doctor"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Doctor)));
         assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn run_subcommand_parses_with_prompt() {
+        let cli = Cli::try_parse_from(["orcarein", "run", "fix the bug"]).unwrap();
+        match cli.command {
+            Some(Command::Run { prompt, allow }) => {
+                assert_eq!(prompt.as_deref(), Some("fix the bug"));
+                assert!(allow.is_none());
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+        // "run" must not be mistaken for the positional model.
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn run_subcommand_parses_without_prompt() {
+        let cli = Cli::try_parse_from(["orcarein", "run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                prompt: None,
+                allow: None
+            })
+        ));
+    }
+
+    #[test]
+    fn run_allow_flag_parses_csv() {
+        let cli =
+            Cli::try_parse_from(["orcarein", "run", "do it", "--allow", "bash,edit"]).unwrap();
+        match cli.command {
+            Some(Command::Run { prompt, allow }) => {
+                assert_eq!(prompt.as_deref(), Some("do it"));
+                assert_eq!(
+                    allow.as_deref(),
+                    Some(&["bash".to_owned(), "edit".to_owned()][..])
+                );
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
     }
 
     #[test]

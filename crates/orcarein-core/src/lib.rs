@@ -3,6 +3,7 @@
 //! This crate exposes the `Provider` and `Tool` traits and core types
 //! shared between the binary and external embedders.
 
+pub mod agent;
 pub mod config;
 pub mod doctor;
 pub mod message;
@@ -11,6 +12,10 @@ pub mod provider;
 pub mod session;
 pub mod tool;
 
+pub use agent::{
+    Agent, AgentError, AgentEvent, AllowlistPolicy, EventSink, PermissionPolicy, TurnOutcome,
+    MAX_TOOL_ITERATIONS,
+};
 pub use config::{env_key_var, Config, ConfigError, SecretStore, CONFIG_KEYS};
 pub use doctor::{Check, CheckStatus, Tally};
 pub use message::Message;
