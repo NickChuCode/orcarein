@@ -14,6 +14,7 @@ mod template;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProfile {
     schema_version: u32,
     device: RawDevice,
@@ -22,6 +23,7 @@ struct RawProfile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDevice {
     name: String,
     description: String,
@@ -32,11 +34,13 @@ struct RawDevice {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDevicePython {
     init: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawIntent {
     name: String,
     description: String,
@@ -49,6 +53,7 @@ struct RawIntent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawNativeBackend {
     op: String,
     #[serde(default)]
@@ -56,12 +61,14 @@ struct RawNativeBackend {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPythonBackend {
     call: String,
     returns: Option<ParamType>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawParam {
     name: String,
     #[serde(rename = "type")]
@@ -160,6 +167,19 @@ const ALLOWED_OPS: &[&str] = &[
     "gpio_set",
     "gpio_read",
 ];
+
+/// Required `args` keys for each native op (§1.4). The `args` keys of a profile
+/// must exactly match this set (no missing, no extra) for the op to be valid.
+fn required_native_args(op: &str) -> Option<&'static [&'static str]> {
+    match op {
+        "i2c_scan" => Some(&[]),
+        "i2c_write_reg" => Some(&["reg", "value"]),
+        "i2c_read_reg" => Some(&["reg"]),
+        "gpio_set" => Some(&["pin", "high"]),
+        "gpio_read" => Some(&["pin"]),
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Profile::from_toml_str entry point
@@ -299,12 +319,33 @@ fn convert_intent(raw: RawIntent) -> Result<Intent, HardwareError> {
                     name, raw.backend
                 )));
             }
-            // Rule 6: op must be in ALLOWED_OPS
-            if !ALLOWED_OPS.contains(&n.op.as_str()) {
-                return Err(HardwareError::Validation(format!(
-                    "intent {:?}: unknown native op {:?}; allowed ops: {:?}",
-                    name, n.op, ALLOWED_OPS
-                )));
+            // Rule 6 (first clause): op must be in ALLOWED_OPS
+            let required = match required_native_args(&n.op) {
+                Some(r) => r,
+                Option::None => {
+                    return Err(HardwareError::Validation(format!(
+                        "intent {:?}: unknown native op {:?}; allowed ops: {:?}",
+                        name, n.op, ALLOWED_OPS
+                    )));
+                }
+            };
+            // Rule 6 (second clause): args keys must exactly match the op's
+            // required named params (no missing, no extra).
+            for key in n.args.keys() {
+                if !required.contains(&key.as_str()) {
+                    return Err(HardwareError::Validation(format!(
+                        "intent {:?}: native op {:?} got unexpected arg {:?}; required args: {:?}",
+                        name, n.op, key, required
+                    )));
+                }
+            }
+            for req in required {
+                if !n.args.contains_key(*req) {
+                    return Err(HardwareError::Validation(format!(
+                        "intent {:?}: native op {:?} missing required arg {:?}; required args: {:?}",
+                        name, n.op, req, required
+                    )));
+                }
             }
             // Convert args values to strings
             let mut args: BTreeMap<String, String> = BTreeMap::new();
@@ -617,5 +658,155 @@ call = "set_mode(\"{mode}\")"
             "servo.servo[{nope}].angle = {angle}",
         );
         assert!(Profile::from_toml_str(&bad).is_err());
+    }
+
+    // Fix 1: Rule 6 second clause — native args keys must exactly match the
+    // op's required named params.
+    #[test]
+    fn rejects_native_op_with_missing_required_arg() {
+        // i2c_write_reg requires {reg, value}; supplying only {reg} is invalid.
+        let bad = r#"
+schema_version = 1
+[device]
+name = "d"
+description = "x"
+transport = "i2c"
+i2c_bus = 1
+[[intent]]
+name = "wr"
+description = "x"
+risk = "risky"
+backend = "native"
+[[intent.param]]
+name = "reg"
+type = "int"
+[intent.native]
+op = "i2c_write_reg"
+args = { reg = "{reg}" }
+"#;
+        let err = Profile::from_toml_str(bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
+    fn accepts_native_op_with_correct_args() {
+        // i2c_write_reg with exactly {reg, value} is accepted.
+        let ok = r#"
+schema_version = 1
+[device]
+name = "d"
+description = "x"
+transport = "i2c"
+i2c_bus = 1
+[[intent]]
+name = "wr"
+description = "x"
+risk = "risky"
+backend = "native"
+[[intent.param]]
+name = "reg"
+type = "int"
+[[intent.param]]
+name = "value"
+type = "int"
+[intent.native]
+op = "i2c_write_reg"
+args = { reg = "{reg}", value = "{value}" }
+"#;
+        let p = Profile::from_toml_str(ok).expect("valid i2c_write_reg profile");
+        assert!(matches!(
+            p.intents[0].backend,
+            Backend::Native { ref op, .. } if op == "i2c_write_reg"
+        ));
+    }
+
+    #[test]
+    fn rejects_native_op_with_extra_arg() {
+        // i2c_read_reg requires only {reg}; an extra key is rejected.
+        let bad = r#"
+schema_version = 1
+[device]
+name = "d"
+description = "x"
+transport = "i2c"
+i2c_bus = 1
+[[intent]]
+name = "rd"
+description = "x"
+risk = "safe"
+backend = "native"
+[[intent.param]]
+name = "reg"
+type = "int"
+[intent.native]
+op = "i2c_read_reg"
+args = { reg = "{reg}", bogus = "1" }
+"#;
+        let err = Profile::from_toml_str(bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
+    }
+
+    // Fix 3: regression test for the corrected flagship example —
+    // `returns` lives INSIDE [intent.python], not at [[intent]] top level.
+    #[test]
+    fn parses_python_returns_inside_intent_python() {
+        let toml = r#"
+schema_version = 1
+[device]
+name = "arm"
+description = "x"
+transport = "i2c"
+i2c_bus = 1
+[[intent]]
+name = "read_angle"
+description = "read"
+risk = "safe"
+backend = "python"
+[[intent.param]]
+name = "joint"
+type = "int"
+min = 0
+max = 5
+[intent.python]
+call = "servo.servo[{joint}].angle"
+returns = "float"
+"#;
+        let p = Profile::from_toml_str(toml).expect("valid python returns profile");
+        assert!(matches!(
+            p.intents[0].backend,
+            Backend::Python {
+                returns: Some(ParamType::Float),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_returns_at_intent_top_level() {
+        // `returns` at the [[intent]] top level is not a field of RawIntent,
+        // so deny_unknown_fields must reject it as a Parse error.
+        let bad = r#"
+schema_version = 1
+[device]
+name = "arm"
+description = "x"
+transport = "i2c"
+i2c_bus = 1
+[[intent]]
+name = "read_angle"
+description = "read"
+risk = "safe"
+backend = "python"
+returns = "float"
+[[intent.param]]
+name = "joint"
+type = "int"
+min = 0
+max = 5
+[intent.python]
+call = "servo.servo[{joint}].angle"
+"#;
+        let err = Profile::from_toml_str(bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Parse(_)), "{err:?}");
     }
 }
