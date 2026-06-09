@@ -7,5 +7,7 @@
 //! `notes/specs/2026-06-09-orcarein-hardware-terminal-positioning.md`.
 
 pub mod error;
+pub mod profile;
 
 pub use error::HardwareError;
+pub use profile::{Backend, Device, Intent, Param, ParamType, Profile, Risk, Transport};
