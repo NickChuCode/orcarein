@@ -1,7 +1,7 @@
 // Black-box integration tests for Profile parsing.
 // Does NOT depend on a shipped arm.toml file — uses inline TOML strings.
 
-use orcarein_hardware::{Backend, Profile, Risk, Transport};
+use orcarein_hardware::{Backend, Profile, Risk, TransportKind};
 
 const VALID_PROFILE: &str = r#"
 schema_version = 1
@@ -44,7 +44,7 @@ fn integration_parses_valid_profile() {
     let profile = Profile::from_toml_str(VALID_PROFILE).expect("should parse valid profile");
 
     assert_eq!(profile.device.name, "test-device");
-    assert_eq!(profile.device.transport, Transport::I2c);
+    assert_eq!(profile.device.transport, TransportKind::I2c);
     assert_eq!(profile.device.i2c_addr, Some(0x48));
     assert_eq!(profile.intents.len(), 2);
 }
@@ -122,5 +122,5 @@ backend = "python"
 call = "ping()"
 "#;
     let profile = Profile::from_toml_str(minimal).unwrap();
-    assert_eq!(profile.device.transport, Transport::None);
+    assert_eq!(profile.device.transport, TransportKind::None);
 }

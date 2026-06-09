@@ -32,7 +32,7 @@ struct RawProfile {
 struct RawDevice {
     name: String,
     description: String,
-    transport: Transport,
+    transport: TransportKind,
     i2c_bus: Option<u8>,
     i2c_addr: Option<u16>,
     python: Option<RawDevicePython>,
@@ -105,20 +105,20 @@ pub struct Device {
     /// Free-text description of the device.
     pub description: String,
     /// The bus/transport used to talk to the device.
-    pub transport: Transport,
-    /// I2C bus number (only meaningful for `Transport::I2c`).
+    pub transport: TransportKind,
+    /// I2C bus number (only meaningful for `TransportKind::I2c`).
     pub i2c_bus: Option<u8>,
-    /// I2C device address (only meaningful for `Transport::I2c`).
+    /// I2C device address (only meaningful for `TransportKind::I2c`).
     pub i2c_addr: Option<u16>,
     /// Python setup snippet run once before any Python-backed intent, e.g.
     /// importing a driver and binding it to a name the calls reference.
     pub python_init: Option<String>,
 }
 
-/// The bus or protocol used to communicate with a device.
+/// The kind of bus used to communicate with a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Transport {
+pub enum TransportKind {
     /// I2C bus.
     I2c,
     /// SPI bus.
@@ -631,7 +631,7 @@ call = "servo.servo[{joint}].angle = {angle}"
     fn parses_sample_profile() {
         let p = Profile::from_toml_str(SAMPLE).expect("valid profile");
         assert_eq!(p.device.name, "arm");
-        assert_eq!(p.device.transport, Transport::I2c);
+        assert_eq!(p.device.transport, TransportKind::I2c);
         assert_eq!(p.device.i2c_addr, Some(0x40));
         assert_eq!(p.intents.len(), 2);
         assert_eq!(p.intents[0].name, "i2c_scan");
