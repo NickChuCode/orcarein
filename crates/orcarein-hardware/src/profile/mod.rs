@@ -7,7 +7,12 @@ use serde::Deserialize;
 
 use crate::error::HardwareError;
 
+mod schema;
 mod template;
+
+// Task 6 will call these; suppress dead_code until then.
+#[allow(unused_imports)]
+pub(crate) use template::{render, validate_and_bind, Scalar};
 
 // ---------------------------------------------------------------------------
 // Raw TOML deserialization types (mirrors the TOML schema exactly)
