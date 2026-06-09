@@ -9,9 +9,11 @@
 pub mod error;
 pub mod profile;
 pub mod sidecar;
+pub mod tool;
 pub mod transport;
 
 pub use error::HardwareError;
 pub use profile::{Backend, Device, Intent, Param, ParamType, Profile, Risk, TransportKind};
 pub use sidecar::Sidecar;
+pub use tool::{Executor, ProfileTool};
 pub use transport::{MockTransport, NativeOp, Transport};

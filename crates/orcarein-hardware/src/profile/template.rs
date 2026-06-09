@@ -18,8 +18,6 @@ use crate::profile::{Param, ParamType};
 ///
 /// Produced by [`validate_and_bind`] and consumed by [`render`].
 /// `Display` emits the Python-literal form of the value (see field docs).
-// Task 6 will use this type; allow dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Scalar {
     /// An integer value. Displays as its decimal representation (e.g. `90`).
@@ -68,8 +66,6 @@ impl std::fmt::Display for Scalar {
 ///
 /// Returns `HardwareError::Validation` with an actionable message on any
 /// violation.
-// Task 6 will call this; allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn validate_and_bind(
     args: &serde_json::Value,
     params: &[Param],
@@ -203,8 +199,6 @@ fn bind_param(param: &Param, val: &serde_json::Value) -> Result<Scalar, Hardware
 /// Returns `HardwareError::Validation` if any `{name}` in the template has no
 /// entry in `bound` (should not occur after a successful `validate_and_bind`,
 /// but is defended against explicitly).
-// Task 6 will call this; allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn render(
     template: &str,
     bound: &BTreeMap<String, Scalar>,
