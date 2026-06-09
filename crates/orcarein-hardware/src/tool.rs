@@ -302,6 +302,28 @@ fn single_placeholder(template: &str) -> Option<&str> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// registry_from_profile
+// ---------------------------------------------------------------------------
+
+/// Build a [`orcarein_core::ToolRegistry`] from a device profile: each
+/// intent in the profile becomes a [`ProfileTool`] sharing the given
+/// [`Executor`].
+///
+/// Tools are inserted in profile order; the registry's internal `BTreeMap`
+/// stores them in sorted order so [`orcarein_core::ToolRegistry::names`]
+/// returns names alphabetically.
+pub fn registry_from_profile(
+    profile: &crate::profile::Profile,
+    exec: Arc<Executor>,
+) -> orcarein_core::ToolRegistry {
+    let mut registry = orcarein_core::ToolRegistry::new();
+    for intent in &profile.intents {
+        registry.register(Box::new(ProfileTool::new(intent.clone(), exec.clone())));
+    }
+    registry
+}
+
 /// Range-check an `i64` and cast to `u8`; error on out-of-range.
 fn to_u8(v: i64, field: &str) -> Result<u8, HardwareError> {
     if !(0..=255).contains(&v) {

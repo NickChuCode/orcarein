@@ -246,6 +246,80 @@ async fn risk_and_schema() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6: registry_from_profile — Task 7 (M1 close-out).
+// ---------------------------------------------------------------------------
+
+/// A profile with two native intents so we can exercise `registry_from_profile`
+/// with ≥2 tools.
+const TWO_INTENTS_PROFILE: &str = r#"
+schema_version = 1
+[device]
+name = "dual_device"
+description = "device with two intents"
+transport = "i2c"
+i2c_bus = 1
+i2c_addr = 0x40
+
+[[intent]]
+name = "i2c_scan"
+description = "scan the i2c bus"
+risk = "safe"
+backend = "native"
+[intent.native]
+op = "i2c_scan"
+
+[[intent]]
+name = "gpio_read"
+description = "read a gpio pin"
+risk = "safe"
+backend = "native"
+[[intent.param]]
+name = "pin"
+type = "int"
+min = 0
+max = 27
+[intent.native]
+op = "gpio_read"
+args = { pin = "{pin}" }
+"#;
+
+#[tokio::test]
+async fn registry_from_profile_builds_correctly() {
+    use orcarein_core::ToolRegistry;
+    use orcarein_hardware::registry_from_profile;
+
+    let profile = Profile::from_toml_str(TWO_INTENTS_PROFILE).expect("valid two-intent profile");
+
+    let exec = Arc::new(Executor {
+        transport: Arc::new(MockTransport::new()),
+        sidecar: None,
+        dry_run: true,
+    });
+
+    let registry: ToolRegistry = registry_from_profile(&profile, exec);
+
+    // len() equals intent count.
+    assert_eq!(registry.len(), 2, "registry should have 2 tools");
+
+    // names() returns intent names in sorted (BTreeMap) order.
+    let names = registry.names();
+    assert_eq!(
+        names,
+        vec!["gpio_read", "i2c_scan"],
+        "names should be sorted alphabetically"
+    );
+
+    // get() resolves each name.
+    for name in &names {
+        assert!(
+            registry.get(name).is_some(),
+            "registry.get({name:?}) should return Some"
+        );
+        assert_eq!(registry.get(name).unwrap().name(), *name);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test 5: python end-to-end (python-gated).
 // ---------------------------------------------------------------------------
 
