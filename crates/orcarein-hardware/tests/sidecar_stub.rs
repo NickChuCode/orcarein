@@ -97,3 +97,30 @@ async fn python_exception_becomes_sidecar_error() {
         "error text should mention NameError, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: stderr output in init block does not hang the sidecar
+// ---------------------------------------------------------------------------
+
+/// Spawn with an `init` block that writes to stderr, then `eval("z")` must
+/// return 5.  Verifies that the stderr-drain task prevents the pipe-buffer
+/// deadlock that would otherwise block a chatty child.
+#[tokio::test]
+async fn stderr_in_init_does_not_hang() {
+    let Some(py) = Sidecar::locate_python() else {
+        eprintln!("skipping: no python found");
+        return;
+    };
+
+    let mut sidecar = Sidecar::spawn(
+        &py,
+        &script_path(),
+        Some("import sys; sys.stderr.write('warn\\n'); z = 5"),
+    )
+    .await
+    .expect("spawn failed");
+
+    let result = sidecar.eval("z".to_owned()).await.expect("eval failed");
+
+    assert_eq!(result, serde_json::json!(5));
+}

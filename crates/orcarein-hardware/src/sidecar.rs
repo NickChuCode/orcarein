@@ -108,6 +108,19 @@ impl Sidecar {
 
         let reader = BufReader::new(stdout).lines();
 
+        // Drain stderr in a detached task so a chatty child (e.g. Adafruit/Blinka
+        // printing import-time warnings) never fills the OS pipe buffer (~64 KB)
+        // and deadlocks. Actionable failures already surface through the JSON
+        // protocol as `ok:false` responses, so discarding stderr noise is safe
+        // for v1.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                // Read to EOF; the task ends naturally when the child exits.
+                while let Ok(Some(_line)) = lines.next_line().await {}
+            });
+        }
+
         let mut sidecar = Sidecar {
             child,
             stdin,
