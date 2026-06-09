@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orcarein-core", "crates/orcarein"]
+members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware"]
 
 [workspace.package]
 # Ch16: bumped to the MVP milestone version (tag `v0.1.0-mvp`).
@@ -40,3 +40,6 @@ toml = "0.8"
 # Ch16: structured diagnostic logging (quiet by default; opt in via RUST_LOG).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# v0.2 hardware wedge: Pi GPIO/I2C/SPI/UART. Linux-only; pulled in only behind
+# the `hardware` feature + `target_os = "linux"` so non-Linux builds stay clean.
+rppal = "0.18"

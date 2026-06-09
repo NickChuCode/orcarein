@@ -1,0 +1,28 @@
+[package]
+name = "orcarein-hardware"
+description = "Hardware control terminal layer for OrcaRein (device profiles, transport, Python sidecar)"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+orcarein-core = { path = "../orcarein-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rppal = { workspace = true, optional = true }
+
+[features]
+default = []
+hardware = ["dep:rppal"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

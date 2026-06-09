@@ -1,0 +1,11 @@
+//! OrcaRein hardware control terminal layer.
+//!
+//! Loads declarative device *profiles* and exposes each profile intent as an
+//! `orcarein_core::Tool`, dispatching to either native Rust transport
+//! (`target_os = "linux"`, behind the `hardware` feature) or a persistent
+//! Python sidecar for complex drivers. See
+//! `notes/specs/2026-06-09-orcarein-hardware-terminal-positioning.md`.
+
+pub mod error;
+
+pub use error::HardwareError;
