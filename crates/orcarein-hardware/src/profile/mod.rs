@@ -1,7 +1,7 @@
 // Profile model + TOML parser for OrcaRein hardware device profiles.
 // See notes/specs/2026-06-09-orcarein-profile-dsl.md for the DSL spec.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
@@ -86,73 +86,120 @@ struct RawParam {
 /// A fully-parsed and validated device profile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
+    /// The device this profile describes (transport + connection details).
     pub device: Device,
+    /// The intents (named operations) the device exposes.
     pub intents: Vec<Intent>,
 }
 
+/// A hardware device: how to reach it and how to bring it up.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Device {
+    /// Human-readable device name.
     pub name: String,
+    /// Free-text description of the device.
     pub description: String,
+    /// The bus/transport used to talk to the device.
     pub transport: Transport,
+    /// I2C bus number (only meaningful for `Transport::I2c`).
     pub i2c_bus: Option<u8>,
+    /// I2C device address (only meaningful for `Transport::I2c`).
     pub i2c_addr: Option<u16>,
+    /// Python setup snippet run once before any Python-backed intent, e.g.
+    /// importing a driver and binding it to a name the calls reference.
     pub python_init: Option<String>,
 }
 
+/// The bus or protocol used to communicate with a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
+    /// I2C bus.
     I2c,
+    /// SPI bus.
     Spi,
+    /// GPIO pins.
     Gpio,
+    /// UART/serial.
     Uart,
+    /// No physical bus (e.g. a pure-Python virtual device).
     None,
 }
 
+/// How dangerous an intent is, used to gate execution behind confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Risk {
+    /// Read-only or otherwise harmless; may run without confirmation.
     Safe,
+    /// Mutates device state; should require confirmation before running.
     Risky,
 }
 
+/// The execution backend for an intent: exactly one is present per intent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Backend {
+    /// A built-in native operation (one of the allowed native ops).
     Native {
+        /// The native op name (validated against the allowed-ops list).
         op: String,
+        /// Substitutable command args: values may contain `{param}`
+        /// placeholders filled in from the intent's params at call time.
         args: BTreeMap<String, String>,
     },
+    /// A Python expression or statement evaluated against `python_init`.
     Python {
+        /// The Python call template; `{param}` placeholders are substituted
+        /// from the intent's params at call time.
         call: String,
+        /// If set, `call` is an expression whose result is coerced to this
+        /// type and returned; if `None`, `call` is run for its side effects.
         returns: Option<ParamType>,
     },
 }
 
+/// A named operation a device can perform, with its params and backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Intent {
+    /// Unique (within the profile) intent name.
     pub name: String,
+    /// Free-text description of what the intent does.
     pub description: String,
+    /// How dangerous the intent is.
     pub risk: Risk,
+    /// The backend that executes the intent.
     pub backend: Backend,
+    /// The parameters the intent accepts.
     pub params: Vec<Param>,
 }
 
+/// A typed parameter accepted by an intent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
+    /// Unique (within the intent) parameter name.
     pub name: String,
+    /// The parameter's value type.
     pub ty: ParamType,
+    /// Inclusive lower bound (int/float params only).
     pub min: Option<f64>,
+    /// Inclusive upper bound (int/float params only).
     pub max: Option<f64>,
+    /// Allowed string values (string params only); required when a string
+    /// param is referenced from a Python call, to prevent injection.
     pub enum_values: Option<Vec<String>>,
 }
 
+/// The value type of a parameter (or a Python `returns` coercion target).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParamType {
+    /// Integer.
     Int,
+    /// Floating-point number.
     Float,
+    /// String.
     String,
+    /// Boolean.
     Bool,
 }
 
@@ -219,7 +266,7 @@ fn validate_and_convert(raw: RawProfile) -> Result<Profile, HardwareError> {
     };
 
     // Rule 2: intent names must be unique
-    let mut seen_intents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_intents: HashSet<String> = HashSet::new();
     let mut intents = Vec::with_capacity(raw.intents.len());
     for raw_intent in raw.intents {
         if !seen_intents.insert(raw_intent.name.clone()) {
@@ -239,7 +286,7 @@ fn convert_intent(raw: RawIntent) -> Result<Intent, HardwareError> {
     let name = raw.name;
 
     // Rule 2: param names unique within intent
-    let mut seen_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_params: HashSet<String> = HashSet::new();
     let mut params: Vec<Param> = Vec::with_capacity(raw.params.len());
     for rp in raw.params {
         if !seen_params.insert(rp.name.clone()) {
@@ -306,13 +353,13 @@ fn convert_intent(raw: RawIntent) -> Result<Intent, HardwareError> {
                 name
             )));
         }
-        (Option::None, Option::None) => {
+        (None, None) => {
             return Err(HardwareError::Validation(format!(
                 "intent {:?}: neither [intent.native] nor [intent.python] present; exactly one required",
                 name
             )));
         }
-        (Some(n), Option::None) => {
+        (Some(n), None) => {
             if raw.backend != "native" {
                 return Err(HardwareError::Validation(format!(
                     "intent {:?}: backend field is {:?} but [intent.native] is present",
@@ -322,7 +369,7 @@ fn convert_intent(raw: RawIntent) -> Result<Intent, HardwareError> {
             // Rule 6 (first clause): op must be in ALLOWED_OPS
             let required = match required_native_args(&n.op) {
                 Some(r) => r,
-                Option::None => {
+                None => {
                     return Err(HardwareError::Validation(format!(
                         "intent {:?}: unknown native op {:?}; allowed ops: {:?}",
                         name, n.op, ALLOWED_OPS
@@ -358,7 +405,7 @@ fn convert_intent(raw: RawIntent) -> Result<Intent, HardwareError> {
             validate_templates_native(&name, &args, &param_names)?;
             Backend::Native { op: n.op, args }
         }
-        (Option::None, Some(p)) => {
+        (None, Some(p)) => {
             if raw.backend != "python" {
                 return Err(HardwareError::Validation(format!(
                     "intent {:?}: backend field is {:?} but [intent.python] is present",
@@ -402,7 +449,7 @@ fn validate_templates_native(
     args: &BTreeMap<String, String>,
     param_names: &[&str],
 ) -> Result<(), HardwareError> {
-    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut referenced: HashSet<String> = HashSet::new();
 
     for val in args.values() {
         let tokens = template::placeholders(val)?;
@@ -475,26 +522,38 @@ fn validate_python_call(
 }
 
 /// Rule 8: a call with `returns` must be an expression, not an assignment.
-/// Coarse check: reject if `=` appears that is NOT part of `==`, `!=`, `<=`, `>=`.
+///
+/// An *assignment* is a top-level `=` — i.e. at paren/bracket/brace nesting
+/// depth 0 — that is not part of a comparison operator (`==`, `!=`, `<=`,
+/// `>=`). We track nesting depth while scanning so that keyword arguments
+/// (`read_reg(channel=3)`, whose `=` sits inside `(...)` at depth 1) and
+/// comparisons are allowed, while a real `x = 1` is rejected.
 fn check_not_assignment(intent_name: &str, call: &str) -> Result<(), HardwareError> {
     let bytes = call.as_bytes();
+    let mut depth: i32 = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'=' {
-            // Check if it's part of a two-character comparison operator
-            let prev = if i > 0 { bytes[i - 1] } else { 0 };
-            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-            let is_comparison = next == b'='   // ==
-                || prev == b'!'               // !=
-                || prev == b'<'               // <=
-                || prev == b'>'; // >=
-            if !is_comparison {
-                return Err(HardwareError::Validation(format!(
-                    "intent {:?}: call has `returns` set but looks like an assignment (contains `=`); \
-                     use an expression instead",
-                    intent_name
-                )));
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'=' => {
+                let prev = if i > 0 { bytes[i - 1] } else { 0 };
+                let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+                // Part of a two-character comparison operator?
+                let is_comparison = next == b'='   // first `=` of `==`
+                    || prev == b'='               // second `=` of `==`
+                    || prev == b'!'               // `!=`
+                    || prev == b'<'               // `<=`
+                    || prev == b'>'; // `>=`
+                if depth == 0 && !is_comparison {
+                    return Err(HardwareError::Validation(format!(
+                        "intent {:?}: call has `returns` set but looks like an assignment \
+                         (top-level `=`); use an expression instead",
+                        intent_name
+                    )));
+                }
             }
+            _ => {}
         }
         i += 1;
     }
@@ -581,13 +640,15 @@ call = "servo.servo[{joint}].angle = {angle}"
     #[test]
     fn rejects_duplicate_intent_names() {
         let dup = SAMPLE.replace("set_joint", "i2c_scan");
-        assert!(Profile::from_toml_str(&dup).is_err());
+        let err = Profile::from_toml_str(&dup).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
     fn rejects_unknown_schema_version() {
         let bad = SAMPLE.replace("schema_version = 1", "schema_version = 99");
-        assert!(Profile::from_toml_str(&bad).is_err());
+        let err = Profile::from_toml_str(&bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
@@ -596,7 +657,8 @@ call = "servo.servo[{joint}].angle = {angle}"
             "[intent.python]\ncall = \"servo.servo[{joint}].angle = {angle}\"",
             "[intent.python]\ncall = \"x\"\n[intent.native]\nop = \"i2c_scan\"",
         );
-        assert!(Profile::from_toml_str(&bad).is_err());
+        let err = Profile::from_toml_str(&bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
@@ -619,7 +681,8 @@ type = "string"
 [intent.python]
 call = "set_mode({mode})"
 "#;
-        assert!(Profile::from_toml_str(bad).is_err());
+        let err = Profile::from_toml_str(bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
@@ -648,7 +711,8 @@ call = "set_mode(\"{mode}\")"
     #[test]
     fn rejects_min_greater_than_max() {
         let bad = SAMPLE.replace("min = 0\nmax = 5", "min = 5\nmax = 0");
-        assert!(Profile::from_toml_str(&bad).is_err());
+        let err = Profile::from_toml_str(&bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
@@ -657,7 +721,8 @@ call = "set_mode(\"{mode}\")"
             "servo.servo[{joint}].angle = {angle}",
             "servo.servo[{nope}].angle = {angle}",
         );
-        assert!(Profile::from_toml_str(&bad).is_err());
+        let err = Profile::from_toml_str(&bad).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     // Fix 1: Rule 6 second clause — native args keys must exactly match the
@@ -779,6 +844,73 @@ returns = "float"
                 ..
             }
         ));
+    }
+
+    /// Build a python intent whose call has `returns` set, for exercising
+    /// the assignment check. The `name` param is declared so the call's
+    /// `{name}` placeholder resolves; `enum` makes it usable in a call.
+    fn python_returns_profile(call: &str) -> String {
+        format!(
+            r#"
+schema_version = 1
+[device]
+name = "d"
+description = "x"
+transport = "none"
+[[intent]]
+name = "do"
+description = "x"
+risk = "safe"
+backend = "python"
+[[intent.param]]
+name = "name"
+type = "string"
+enum = ["chan0", "chan1"]
+[intent.python]
+call = "{call}"
+returns = "int"
+"#
+        )
+    }
+
+    // Fix 1: check_not_assignment must allow Python keyword arguments and
+    // comparisons, only rejecting a true top-level (depth-0) assignment.
+    #[test]
+    fn returns_allows_kwarg_call() {
+        // The `=` is inside `(...)` → depth 1 → a kwarg, not an assignment.
+        let toml = python_returns_profile("read_reg(channel={name})");
+        assert!(
+            Profile::from_toml_str(&toml).is_ok(),
+            "kwarg call with returns should parse"
+        );
+    }
+
+    #[test]
+    fn returns_allows_comparison_call() {
+        // `==` is a comparison operator, not an assignment.
+        let toml = python_returns_profile("servo.connected[{name}] == True");
+        assert!(
+            Profile::from_toml_str(&toml).is_ok(),
+            "comparison call with returns should parse"
+        );
+    }
+
+    #[test]
+    fn returns_allows_plain_expression_call() {
+        // No `=` at all → a plain attribute/index expression.
+        let toml = python_returns_profile("servo.servo[{name}].angle");
+        assert!(
+            Profile::from_toml_str(&toml).is_ok(),
+            "plain expression call with returns should parse"
+        );
+    }
+
+    #[test]
+    fn returns_rejects_top_level_assignment() {
+        // A depth-0 `=` is a real assignment and must be rejected.
+        let toml = python_returns_profile("x[{name}] = 1");
+        let err = Profile::from_toml_str(&toml).unwrap_err();
+        assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
     #[test]
