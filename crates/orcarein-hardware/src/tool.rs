@@ -117,6 +117,10 @@ impl Tool for ProfileTool {
 
                 if returns.is_some() {
                     let v = sc.eval(code).await.map_err(to_tool_err)?;
+                    // v1: numeric/bool returns render cleanly (`7`, `1.5`, `true`). A
+                    // `returns = "string"` intent would render JSON-quoted (`"\"x\""`).
+                    // No string-returning intent exists yet; when one lands (M2+), branch
+                    // `Value::String(s) => s.clone()` here so the model sees bare text.
                     Ok(ToolOutput::new(v.to_string()))
                 } else {
                     sc.exec(code).await.map_err(to_tool_err)?;
