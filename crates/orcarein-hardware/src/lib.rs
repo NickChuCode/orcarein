@@ -8,6 +8,8 @@
 
 pub mod error;
 pub mod profile;
+pub mod transport;
 
 pub use error::HardwareError;
 pub use profile::{Backend, Device, Intent, Param, ParamType, Profile, Risk, Transport};
+pub use transport::{MockTransport, NativeOp};
