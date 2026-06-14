@@ -1,0 +1,23 @@
+# Board GPIO profile — Orange Pi 5 Plus (Rockchip RK3588).
+#
+# RK3588 GPIO is banked: 5 banks (GPIO0..GPIO4) of 32 lines, each surfaced as
+# its own gpiochip. A pin is named `GPIO{bank}_{port}{index}` (ports A-D, 8
+# lines each), so it carries its own bank — no board-level chip label needed.
+# cdev addressing: chip = bank, offset = port*8 + index (C4 -> 2*8+4 = 20).
+#
+# Orange Pi's docs are weaker than Pi's — these assignments are EXAMPLES.
+# Verify on the board with `gpio readall` (WiringOP) and `gpioinfo`, and note
+# that gpiochip enumeration order is not guaranteed to equal bank order, so the
+# I/O layer resolves the bank's chip by label at runtime.
+schema_version = 1
+
+[board]
+name = "orangepi5plus"
+
+[[pin]]
+name = "LED"
+line = "GPIO1_C4"
+
+[[pin]]
+name = "RELAY"
+line = "GPIO3_B5"

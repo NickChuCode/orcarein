@@ -6,12 +6,16 @@
 //! Python sidecar for complex drivers. See
 //! `notes/specs/2026-06-09-orcarein-hardware-terminal-positioning.md`.
 
+pub mod board;
 pub mod error;
 pub mod profile;
 pub mod sidecar;
 pub mod tool;
 pub mod transport;
 
+pub use board::{
+    parse_rk_line, resolve_gpiochip_by_label, BoardProfile, ChipInfo, PinSpec, RkLine,
+};
 pub use error::HardwareError;
 pub use profile::{Backend, Device, Intent, Param, ParamType, Profile, Risk, TransportKind};
 pub use sidecar::Sidecar;

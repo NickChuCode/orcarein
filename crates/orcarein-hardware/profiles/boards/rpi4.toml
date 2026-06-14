@@ -1,0 +1,19 @@
+# Board GPIO profile — Raspberry Pi 4B (Broadcom BCM2711).
+#
+# The whole 40-pin header sits on one pinctrl chip; the cdev line offset equals
+# the BCM number. Pin assignments below are EXAMPLES — verify against the board
+# with `gpioinfo` before relying on them.
+schema_version = 1
+
+[board]
+name = "rpi4"
+# User-GPIO chip resolved by label (never a hard-coded chip number).
+gpiochip_labels = ["pinctrl-bcm2711"]
+
+[[pin]]
+name = "LED"
+offset = 17   # BCM17, physical pin 11
+
+[[pin]]
+name = "BUTTON"
+offset = 27   # BCM27, physical pin 13
