@@ -866,6 +866,10 @@ async fn main() -> Result<()> {
         Box::new(InteractivePolicy::new())
     };
 
+    // The prompt-token count of the most recent turn ≈ current context fill;
+    // surfaced in the per-turn meter and `/usage`. 0 until the first turn.
+    let mut last_prompt_tokens: u64 = 0;
+
     loop {
         let line = match editor.readline("> ") {
             Ok(line) => line,
@@ -880,7 +884,15 @@ async fn main() -> Result<()> {
         }
 
         if let Some(stripped) = input.strip_prefix('/') {
-            match handle_command(stripped, &mut session, &store, &session_id, created_at_ms) {
+            match handle_command(
+                stripped,
+                &mut session,
+                &store,
+                &session_id,
+                created_at_ms,
+                &model,
+                last_prompt_tokens,
+            ) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
             }
@@ -897,12 +909,16 @@ async fn main() -> Result<()> {
             Ok(outcome) => {
                 println!(); // close the final streamed line
                 let total = session.usage();
+                last_prompt_tokens = outcome.usage.prompt_tokens;
+                let ctx = cost::context_line(last_prompt_tokens, &model)
+                    .map(|c| format!(" | {c}"))
+                    .unwrap_or_default();
                 let meter = cost::meter_line(&total, &model)
                     .map(|m| format!(" | {m}"))
                     .unwrap_or_default();
                 eprintln!(
-                    "[tokens: +{} this turn / {} total{}]\n",
-                    outcome.usage.total_tokens, total.total_tokens, meter
+                    "[tokens: +{} this turn / {} total{}{}]\n",
+                    outcome.usage.total_tokens, total.total_tokens, ctx, meter
                 );
                 // Auto-save after a successful turn; never let a save error
                 // interrupt the conversation.
@@ -1216,13 +1232,17 @@ fn run_show(path: &str) {
 }
 
 /// Handles a slash command (the leading `/` already stripped). Takes the
-/// session store + active id so `/save` can persist on demand.
+/// session store + active id so `/save` can persist on demand, plus the model
+/// and last turn's prompt-token count so `/usage` can show context fill + cost.
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     cmd: &str,
     session: &mut Session,
     store: &SessionStore,
     session_id: &str,
     created_at_ms: u64,
+    model: &str,
+    last_prompt_tokens: u64,
 ) -> CommandAction {
     // Split into a verb and an optional argument so `/show <path>` works while
     // bare verbs (`/clear`) still match.
@@ -1244,7 +1264,7 @@ fn handle_command(
             }
             CommandAction::Continue
         }
-        "usage" => {
+        "usage" | "context" => {
             let u = session.usage();
             println!(
                 "[累计 tokens: prompt {} / completion {} / total {}; 当前 {} 轮]",
@@ -1253,6 +1273,15 @@ fn handle_command(
                 u.total_tokens,
                 session.turn_count()
             );
+            // Context fill (last turn's prompt ≈ current window use) + cost,
+            // when the model is known.
+            match cost::context_line(last_prompt_tokens, model) {
+                Some(c) => println!("[{c}]"),
+                None => println!("[ctx: 模型 {model} 的上下文窗口未知]"),
+            }
+            if let Some(meter) = cost::meter_line(&u, model) {
+                println!("[{meter}]");
+            }
             CommandAction::Continue
         }
         // `/show` and `/history` render through the pager. They are pure
@@ -1273,7 +1302,7 @@ fn handle_command(
             println!("  /exit, /quit   退出");
             println!("  /clear         清空会话（保留 system prompt）");
             println!("  /save          立即保存会话到磁盘（每轮也会自动保存）");
-            println!("  /usage         显示累计 token 用量");
+            println!("  /usage, /context  token 用量 + 上下文占用 + 成本");
             println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
             println!("  /history       分页查看本次对话记录");
             println!("  /help          这条帮助");

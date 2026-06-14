@@ -121,6 +121,48 @@ pub fn estimate(usage: &TokenUsage, model: &str) -> Option<CostEstimate> {
     })
 }
 
+/// The model's context window in tokens, or `None` if unknown (the context
+/// meter is then hidden). DeepSeek V4 — both Flash and Pro — is 1M tokens;
+/// other / custom endpoints return `None` rather than guessing.
+pub fn context_window(model: &str) -> Option<u64> {
+    if model.to_lowercase().contains("deepseek") {
+        Some(1_000_000)
+    } else {
+        None
+    }
+}
+
+/// Formats a token count compactly: `500`, `24k`, `1.0M`.
+fn human_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// A compact context-occupancy meter, e.g. `ctx 2.4% (24k/1.0M)`.
+///
+/// `prompt_tokens` is the size of the conversation sent on the most recent turn
+/// (≈ how full the window currently is). Returns `None` when the model's window
+/// is unknown, so the caller simply omits it.
+pub fn context_line(prompt_tokens: u64, model: &str) -> Option<String> {
+    let window = context_window(model)?;
+    let pct = if window > 0 {
+        prompt_tokens as f64 / window as f64 * 100.0
+    } else {
+        0.0
+    };
+    Some(format!(
+        "ctx {:.1}% ({}/{})",
+        pct,
+        human_tokens(prompt_tokens),
+        human_tokens(window)
+    ))
+}
+
 /// A one-line human meter, or `None` if the model's prices are unknown.
 ///
 /// Splits input vs output so the cache effect stays legible regardless of how
@@ -191,6 +233,31 @@ mod tests {
         assert_eq!(c.output_usd, 0.0);
         assert!((c.input_usd - 0.14).abs() < 1e-9); // 1M @ miss price
         assert!((c.spent_usd - 0.14).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_window_known_for_deepseek_only() {
+        assert_eq!(context_window("deepseek-v4-flash"), Some(1_000_000));
+        assert_eq!(context_window("deepseek-v4-pro"), Some(1_000_000));
+        assert_eq!(context_window("gpt-4o-mini"), None);
+    }
+
+    #[test]
+    fn human_tokens_uses_compact_units() {
+        assert_eq!(human_tokens(500), "500");
+        assert_eq!(human_tokens(24_000), "24k");
+        assert_eq!(human_tokens(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn context_line_shows_pct_and_units_or_none() {
+        let line = context_line(24_000, "deepseek-v4-flash").unwrap();
+        assert!(line.contains("ctx"), "{line}");
+        assert!(line.contains("2.4%"), "{line}");
+        assert!(line.contains("24k"), "{line}");
+        assert!(line.contains("1.0M"), "{line}");
+        // Unknown window → no meter.
+        assert!(context_line(24_000, "gpt-4o-mini").is_none());
     }
 
     #[test]
