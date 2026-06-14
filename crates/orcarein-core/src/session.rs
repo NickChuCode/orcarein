@@ -226,6 +226,14 @@ impl SessionStore {
         Ok(self.read_file(id)?.session)
     }
 
+    /// Deletes the session file for `id`. A missing id surfaces as an `Io`
+    /// NotFound error so the caller can report it (auto-save only ever grows
+    /// the directory; this is the explicit prune the user reaches for).
+    pub fn delete(&self, id: &str) -> Result<(), SessionError> {
+        std::fs::remove_file(self.path_for(id))?;
+        Ok(())
+    }
+
     /// The stored creation timestamp for `id` (so a resumed session can be
     /// re-saved under its original time).
     pub fn created_at(&self, id: &str) -> Result<u64, SessionError> {
@@ -477,6 +485,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SessionStore::with_dir(dir.path().to_path_buf());
         assert!(matches!(store.load("ghost"), Err(SessionError::Io(_))));
+    }
+
+    #[test]
+    fn delete_removes_the_session_file() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::with_dir(dir.path().to_path_buf());
+        store.save("gone", 1, &Session::new("sys")).unwrap();
+        assert!(store.path_for("gone").exists());
+
+        store.delete("gone").unwrap();
+
+        assert!(!store.path_for("gone").exists());
+        assert!(matches!(store.load("gone"), Err(SessionError::Io(_))));
+    }
+
+    #[test]
+    fn delete_missing_id_is_an_error() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::with_dir(dir.path().to_path_buf());
+        assert!(matches!(store.delete("ghost"), Err(SessionError::Io(_))));
     }
 
     #[test]

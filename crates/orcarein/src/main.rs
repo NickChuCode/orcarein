@@ -129,6 +129,9 @@ enum SessionAction {
     /// Resume a saved session, then continue chatting. With no id, shows a
     /// numbered menu of saved sessions to pick from (interactive terminals only).
     Resume { id: Option<String> },
+    /// Delete a saved session by id (auto-save never prunes — this is how you
+    /// clean up). Reports cleanly if the id doesn't exist.
+    Delete { id: String },
 }
 
 /// Effective settings after resolving CLI > env > config > defaults.
@@ -317,6 +320,29 @@ fn pick_session() -> Result<Option<String>> {
             Ok(None)
         }
     }
+}
+
+/// Runs `orcarein session delete <id>`, then returns. A missing id is a clean,
+/// friendly message (not an error); a present file is removed and the deleted
+/// session's title echoed back so you see what you pruned.
+fn run_session_delete(id: &str) -> Result<()> {
+    let store = SessionStore::new().context("failed to locate session storage")?;
+    if !store.path_for(id).exists() {
+        println!("没有这个 session：{id}（用 `session list` 查看现有的）");
+        return Ok(());
+    }
+    // Best-effort title for the confirmation line (a corrupt-but-present file
+    // won't show in `list`, but we still delete it).
+    let title = store
+        .list()
+        .ok()
+        .and_then(|v| v.into_iter().find(|s| s.id == id).map(|s| s.title))
+        .unwrap_or_else(|| "(无标题)".to_owned());
+    store
+        .delete(id)
+        .with_context(|| format!("failed to delete session '{id}'"))?;
+    println!("已删除 session {id}（{title}）");
+    Ok(())
 }
 
 /// Formats the gap between two Unix-ms timestamps as a coarse "N ago" string.
@@ -561,6 +587,9 @@ async fn main() -> Result<()> {
         Some(Command::Session {
             action: SessionAction::List,
         }) => return run_session_list(),
+        Some(Command::Session {
+            action: SessionAction::Delete { id },
+        }) => return run_session_delete(&id),
         Some(Command::Doctor) => run_doctor(&cli), // diverges (process::exit)
         Some(Command::Run { prompt, allow }) => {
             let code = run_once(&cli, prompt, allow).await;
@@ -1306,6 +1335,18 @@ mod tests {
                 action: SessionAction::Resume { id },
             }) => assert_eq!(id.as_deref(), Some("1748789422123")),
             other => panic!("expected session resume, got {other:?}"),
+        }
+        assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn session_delete_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "session", "delete", "1748789422123"]).unwrap();
+        match cli.command {
+            Some(Command::Session {
+                action: SessionAction::Delete { id },
+            }) => assert_eq!(id, "1748789422123"),
+            other => panic!("expected session delete, got {other:?}"),
         }
         assert!(cli.model.is_none());
     }
