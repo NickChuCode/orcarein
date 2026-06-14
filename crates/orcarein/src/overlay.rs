@@ -95,15 +95,53 @@ pub(crate) fn enter_overlay() -> std::io::Result<(
 #[cfg(feature = "tui")]
 type Tui = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
+/// Builds the body as ratatui `Text`, painting every `query` match with a
+/// high-contrast highlight so the jumped-to term is visible. With an empty
+/// query it's a plain borrowed `Text` (no per-line allocation). Span splitting
+/// is the pure [`highlight_segments`].
+#[cfg(feature = "tui")]
+fn highlighted_text<'a>(body: &'a str, query: &str) -> ratatui::text::Text<'a> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span, Text};
+
+    if query.is_empty() {
+        return Text::raw(body);
+    }
+    let hl = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let lines: Vec<Line> = body
+        .split('\n')
+        .map(|line| {
+            Line::from(
+                highlight_segments(line, query)
+                    .into_iter()
+                    .map(|(s, hit)| {
+                        if hit {
+                            Span::styled(s, hl)
+                        } else {
+                            Span::raw(s)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    Text::from(lines)
+}
+
 /// Render one pager frame — the scrolled body window plus a reversed footer —
 /// and hand back the body viewport height. `footer_fn` is called with that
 /// height inside the draw, so callers can show the exact visible line range.
-/// Shared by the scroll loop and the `/`-search input prompt.
+/// `query` (when non-empty) highlights matches in the body. Shared by the
+/// scroll loop and the `/`-search input prompt.
 #[cfg(feature = "tui")]
 fn draw_view(
     terminal: &mut Tui,
     body: &str,
     offset: usize,
+    query: &str,
     footer_fn: impl Fn(usize) -> String,
 ) -> std::io::Result<usize> {
     use ratatui::layout::{Constraint, Layout};
@@ -115,7 +153,10 @@ fn draw_view(
     terminal.draw(|f| {
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         viewport_h = (chunks[0].height as usize).max(1);
-        f.render_widget(Paragraph::new(body).scroll((offset as u16, 0)), chunks[0]);
+        f.render_widget(
+            Paragraph::new(highlighted_text(body, query)).scroll((offset as u16, 0)),
+            chunks[0],
+        );
         let footer = Line::from(footer_fn(viewport_h))
             .style(Style::default().add_modifier(Modifier::REVERSED));
         f.render_widget(Paragraph::new(footer), chunks[1]);
@@ -136,7 +177,8 @@ fn read_search_query(
 
     let mut input = String::new();
     loop {
-        draw_view(terminal, body, offset, |_vh| {
+        // Highlight live as the query is typed.
+        draw_view(terminal, body, offset, &input, |_vh| {
             format!(" /{input}   Enter 确认 · Esc 取消 ")
         })?;
         let Event::Key(k) = event::read()? else {
@@ -179,7 +221,7 @@ fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
     };
 
     loop {
-        let viewport_h = draw_view(&mut terminal, &body, offset, |vh| {
+        let viewport_h = draw_view(&mut terminal, &body, offset, &query, |vh| {
             let end = (offset + vh).min(total);
             let status = if query.is_empty() {
                 String::new()
@@ -312,6 +354,45 @@ pub fn find_match(lines: &[&str], query: &str, start: usize, forward: bool) -> O
         .find(|&idx| lines[idx].to_lowercase().contains(&needle))
 }
 
+/// Splits `line` into consecutive `(segment, is_match)` spans, where every
+/// case-insensitive occurrence of `query` is flagged for highlighting. The
+/// segments concatenate back to `line` exactly. Matching is ASCII-case-folded
+/// so byte offsets stay valid for slicing (multi-byte UTF-8 is compared as-is);
+/// an empty query (or no hit) yields a single plain span covering the line.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub fn highlight_segments<'a>(line: &'a str, query: &str) -> Vec<(&'a str, bool)> {
+    if query.is_empty() {
+        return vec![(line, false)];
+    }
+    let hay = line.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    let mut segs: Vec<(&str, bool)> = Vec::new();
+    let mut cursor = 0usize; // byte index into `line`
+    let mut plain_start = 0usize;
+    while cursor < line.len() {
+        let hit = line.is_char_boundary(cursor)
+            && hay[cursor..].starts_with(&needle)
+            && line.is_char_boundary(cursor + needle.len());
+        if hit {
+            if plain_start < cursor {
+                segs.push((&line[plain_start..cursor], false));
+            }
+            segs.push((&line[cursor..cursor + needle.len()], true));
+            cursor += needle.len();
+            plain_start = cursor;
+        } else {
+            cursor += 1;
+        }
+    }
+    if plain_start < line.len() {
+        segs.push((&line[plain_start..], false));
+    }
+    if segs.is_empty() {
+        segs.push((line, false));
+    }
+    segs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +461,41 @@ mod tests {
         assert_eq!(find_match(&lines, "zzz", 0, true), None);
         let empty: [&str; 0] = [];
         assert_eq!(find_match(&empty, "a", 0, true), None);
+    }
+
+    #[test]
+    fn highlight_segments_flags_each_case_insensitive_match() {
+        assert_eq!(
+            highlight_segments("Foo bar foo", "foo"),
+            vec![("Foo", true), (" bar ", false), ("foo", true)]
+        );
+    }
+
+    #[test]
+    fn highlight_segments_handles_start_end_and_adjacent_matches() {
+        assert_eq!(
+            highlight_segments("aXa", "a"),
+            vec![("a", true), ("X", false), ("a", true)]
+        );
+        // Adjacent matches stay as separate flagged spans.
+        assert_eq!(
+            highlight_segments("aa", "a"),
+            vec![("a", true), ("a", true)]
+        );
+    }
+
+    #[test]
+    fn highlight_segments_single_plain_span_when_no_match_or_empty_query() {
+        assert_eq!(highlight_segments("hello", "zzz"), vec![("hello", false)]);
+        assert_eq!(highlight_segments("hello", ""), vec![("hello", false)]);
+    }
+
+    #[test]
+    fn highlight_segments_preserves_multibyte_after_a_match() {
+        // ASCII match must not corrupt following multi-byte chars.
+        assert_eq!(
+            highlight_segments("a中文", "a"),
+            vec![("a", true), ("中文", false)]
+        );
     }
 }
