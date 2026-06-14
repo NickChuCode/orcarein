@@ -126,11 +126,13 @@ enum ConfigAction {
 enum SessionAction {
     /// List saved sessions, newest first.
     List,
-    /// Resume a saved session, then continue chatting. With no id, shows a
-    /// numbered menu of saved sessions to pick from (interactive terminals only).
+    /// Resume a saved session (by full id or an unambiguous prefix), then
+    /// continue chatting. With no id, shows a numbered menu of saved sessions
+    /// to pick from (interactive terminals only).
     Resume { id: Option<String> },
-    /// Delete a saved session by id (auto-save never prunes — this is how you
-    /// clean up). Reports cleanly if the id doesn't exist.
+    /// Delete a saved session by id or an unambiguous prefix (auto-save never
+    /// prunes — this is how you clean up). Reports cleanly if nothing matches,
+    /// and lists candidates if a prefix is ambiguous.
     Delete { id: String },
 }
 
@@ -261,6 +263,42 @@ fn run_session_list() -> Result<()> {
     Ok(())
 }
 
+/// Outcome of resolving a user-typed id-or-prefix against existing session ids.
+#[derive(Debug, PartialEq, Eq)]
+enum IdMatch {
+    /// Exactly one id matches (an exact full id, or a unique prefix).
+    One(String),
+    /// No id matches — caller reports "no such session".
+    None,
+    /// The prefix matches several ids — caller lists them and refuses.
+    Many(Vec<String>),
+}
+
+/// Resolves `needle` (a full id or a short prefix) against `ids`. An exact
+/// full-id match always wins — even when that id is also a prefix of a longer
+/// one. Otherwise matches by `starts_with`: one hit → `One`, none → `None`,
+/// several → `Many`. A blank needle matches nothing (so it never resumes or
+/// deletes blindly). Pure, so the matching rules are unit-testable.
+fn resolve_id_prefix(needle: &str, ids: &[String]) -> IdMatch {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return IdMatch::None;
+    }
+    if ids.iter().any(|id| id == needle) {
+        return IdMatch::One(needle.to_owned());
+    }
+    let hits: Vec<String> = ids
+        .iter()
+        .filter(|id| id.starts_with(needle))
+        .cloned()
+        .collect();
+    match hits.len() {
+        0 => IdMatch::None,
+        1 => IdMatch::One(hits.into_iter().next().expect("len checked == 1")),
+        _ => IdMatch::Many(hits),
+    }
+}
+
 /// Maps a menu choice (a 1-based line the user typed) against the listed
 /// sessions to the chosen session id. Blank, non-numeric, zero, and
 /// out-of-range all mean "cancel" → `None`, so a bare Enter backs out safely.
@@ -322,26 +360,80 @@ fn pick_session() -> Result<Option<String>> {
     }
 }
 
-/// Runs `orcarein session delete <id>`, then returns. A missing id is a clean,
-/// friendly message (not an error); a present file is removed and the deleted
-/// session's title echoed back so you see what you pruned.
-fn run_session_delete(id: &str) -> Result<()> {
-    let store = SessionStore::new().context("failed to locate session storage")?;
-    if !store.path_for(id).exists() {
-        println!("没有这个 session：{id}（用 `session list` 查看现有的）");
-        return Ok(());
+/// What `session delete <needle>` should do, decided from the existing session
+/// summaries (and, for the corrupt-file escape hatch, whether an exact-id file
+/// is present on disk). Separated from I/O so the decision is unit-testable —
+/// in particular the safety property: a non-matching needle is always
+/// `NotFound`, never a present session.
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteAction {
+    /// Delete this resolved id (a valid session, or an exact-id corrupt file).
+    Delete(String),
+    /// Nothing matched — report it cleanly.
+    NotFound,
+    /// The prefix matched several ids — list them and refuse.
+    Ambiguous(Vec<String>),
+}
+
+/// Pure decision for `session delete`. `exact_file_exists(id)` lets the
+/// corrupt-but-present escape hatch be tested without touching the filesystem.
+fn decide_delete(
+    needle: &str,
+    summaries: &[SessionSummary],
+    exact_file_exists: impl Fn(&str) -> bool,
+) -> DeleteAction {
+    let ids: Vec<String> = summaries.iter().map(|s| s.id.clone()).collect();
+    match resolve_id_prefix(needle, &ids) {
+        IdMatch::One(id) => DeleteAction::Delete(id),
+        IdMatch::Many(hits) => DeleteAction::Ambiguous(hits),
+        IdMatch::None => {
+            // Escape hatch: an exact id whose file `list` couldn't parse
+            // (corrupt but present) is still prunable by full id.
+            let exact = needle.trim();
+            if !exact.is_empty() && exact_file_exists(exact) {
+                DeleteAction::Delete(exact.to_owned())
+            } else {
+                DeleteAction::NotFound
+            }
+        }
     }
-    // Best-effort title for the confirmation line (a corrupt-but-present file
-    // won't show in `list`, but we still delete it).
-    let title = store
-        .list()
-        .ok()
-        .and_then(|v| v.into_iter().find(|s| s.id == id).map(|s| s.title))
-        .unwrap_or_else(|| "(无标题)".to_owned());
-    store
-        .delete(id)
-        .with_context(|| format!("failed to delete session '{id}'"))?;
-    println!("已删除 session {id}（{title}）");
+}
+
+/// Runs `orcarein session delete <id-or-prefix>`, then returns. The argument is
+/// a full id or an unambiguous prefix. Nothing matches → friendly message (not
+/// an error); several match → list them and refuse; one match → delete it and
+/// echo the title so you see what you pruned.
+fn run_session_delete(needle: &str) -> Result<()> {
+    let store = SessionStore::new().context("failed to locate session storage")?;
+    let summaries = store.list().unwrap_or_default();
+
+    match decide_delete(needle, &summaries, |id| store.path_for(id).exists()) {
+        DeleteAction::Delete(id) => {
+            let title = summaries
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "(无标题)".to_owned());
+            store
+                .delete(&id)
+                .with_context(|| format!("failed to delete session '{id}'"))?;
+            println!("已删除 session {id}（{title}）");
+        }
+        DeleteAction::Ambiguous(hits) => {
+            println!("前缀 '{}' 匹配多个 session，请加长：", needle.trim());
+            for id in &hits {
+                let title = summaries
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .map(|s| s.title.as_str())
+                    .unwrap_or("");
+                println!("  {id}  {title}");
+            }
+        }
+        DeleteAction::NotFound => {
+            println!("没有这个 session：{needle}（用 `session list` 查看现有的）");
+        }
+    }
     Ok(())
 }
 
@@ -626,15 +718,39 @@ async fn main() -> Result<()> {
     // before `resolve()` demands an API key — so `resume <bad-id>` fails fast
     // with a "no such session" error rather than a confusing key error.
     let store = SessionStore::new().context("failed to locate session storage")?;
-    let resumed = match &resume_id {
-        Some(id) => {
+    let resumed = match resume_id {
+        Some(needle) => {
+            // Resolve a full id or an unambiguous prefix (the picker already
+            // hands back a full id, which resolves to itself). Nothing or
+            // several → fail fast with a clear message, before demanding a key.
+            let ids: Vec<String> = store
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+            let id = match resolve_id_prefix(&needle, &ids) {
+                IdMatch::One(id) => id,
+                IdMatch::None => {
+                    bail!("no such session '{needle}' — see `session list`")
+                }
+                IdMatch::Many(hits) => bail!(
+                    "'{}' matches {} sessions — be more specific:\n{}",
+                    needle.trim(),
+                    hits.len(),
+                    hits.iter()
+                        .map(|h| format!("  {h}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            };
             let loaded = store
-                .load(id)
+                .load(&id)
                 .with_context(|| format!("failed to resume session '{id}'"))?;
             let created = store
-                .created_at(id)
+                .created_at(&id)
                 .unwrap_or_else(|_| SessionStore::now_ms());
-            Some((loaded, id.clone(), created))
+            Some((loaded, id, created))
         }
         None => None,
     };
@@ -1373,6 +1489,92 @@ mod tests {
                 title: String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn decide_delete_unique_prefix_targets_one() {
+        let s = summaries(&["1748111", "1799222"]);
+        assert_eq!(
+            decide_delete("1748", &s, |_| false),
+            DeleteAction::Delete("1748111".to_owned())
+        );
+    }
+
+    #[test]
+    fn decide_delete_ambiguous_refuses() {
+        let s = summaries(&["1748111", "1748222"]);
+        match decide_delete("1748", &s, |_| false) {
+            DeleteAction::Ambiguous(hits) => assert_eq!(hits.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_delete_no_match_deletes_nothing() {
+        // Regression guard: a non-matching needle must NEVER resolve to a
+        // present session (the "delete 99999 wiped 1780…" scare).
+        let s = summaries(&["1780737346422"]);
+        assert_eq!(
+            decide_delete("99999", &s, |_| false),
+            DeleteAction::NotFound
+        );
+    }
+
+    #[test]
+    fn decide_delete_exact_corrupt_file_falls_back() {
+        // id absent from the parseable summaries, but its file exists on disk.
+        let s = summaries(&[]);
+        assert_eq!(
+            decide_delete("123", &s, |e| e == "123"),
+            DeleteAction::Delete("123".to_owned())
+        );
+    }
+
+    #[test]
+    fn decide_delete_blank_is_not_found_even_if_file_exists() {
+        let s = summaries(&["1780737346422"]);
+        assert_eq!(decide_delete("", &s, |_| true), DeleteAction::NotFound);
+    }
+
+    #[test]
+    fn resolve_id_prefix_exact_full_id_wins() {
+        // An exact id match wins even when it is also a prefix of a longer id.
+        let ids = vec!["1748".to_owned(), "1748999".to_owned()];
+        assert_eq!(
+            resolve_id_prefix("1748", &ids),
+            IdMatch::One("1748".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_id_prefix_unique_prefix_resolves() {
+        let ids = vec!["1748111".to_owned(), "1799222".to_owned()];
+        assert_eq!(
+            resolve_id_prefix("1748", &ids),
+            IdMatch::One("1748111".to_owned())
+        );
+        // leading/trailing whitespace is trimmed
+        assert_eq!(
+            resolve_id_prefix(" 1799 ", &ids),
+            IdMatch::One("1799222".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_id_prefix_none_when_nothing_matches_or_empty() {
+        let ids = vec!["1748111".to_owned(), "1748222".to_owned()];
+        assert_eq!(resolve_id_prefix("9", &ids), IdMatch::None);
+        // an empty needle matches nothing (safe: never deletes/resumes blindly)
+        assert_eq!(resolve_id_prefix("", &ids), IdMatch::None);
+    }
+
+    #[test]
+    fn resolve_id_prefix_ambiguous_lists_all_hits() {
+        let ids = vec!["1748111".to_owned(), "1748222".to_owned()];
+        match resolve_id_prefix("1748", &ids) {
+            IdMatch::Many(hits) => assert_eq!(hits.len(), 2),
+            other => panic!("expected Many, got {other:?}"),
+        }
     }
 
     #[test]
