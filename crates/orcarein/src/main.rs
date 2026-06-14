@@ -126,8 +126,9 @@ enum ConfigAction {
 enum SessionAction {
     /// List saved sessions, newest first.
     List,
-    /// Resume a saved session by id, then continue chatting.
-    Resume { id: String },
+    /// Resume a saved session, then continue chatting. With no id, shows a
+    /// numbered menu of saved sessions to pick from (interactive terminals only).
+    Resume { id: Option<String> },
 }
 
 /// Effective settings after resolving CLI > env > config > defaults.
@@ -255,6 +256,67 @@ fn run_session_list() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Maps a menu choice (a 1-based line the user typed) against the listed
+/// sessions to the chosen session id. Blank, non-numeric, zero, and
+/// out-of-range all mean "cancel" → `None`, so a bare Enter backs out safely.
+/// Pure (no I/O) so the selection logic is unit-testable.
+fn resolve_pick(input: &str, sessions: &[SessionSummary]) -> Option<String> {
+    let n: usize = input.trim().parse().ok()?;
+    if n == 0 || n > sessions.len() {
+        return None;
+    }
+    Some(sessions[n - 1].id.clone())
+}
+
+/// Interactive `session resume` (no id): prints a numbered menu of saved
+/// sessions and returns the chosen id. `Ok(None)` means "nothing to resume" or
+/// "user cancelled" — the caller exits cleanly. Requires a tty: piped stdin has
+/// no human to pick, so we refuse with a hint to pass the id explicitly.
+fn pick_session() -> Result<Option<String>> {
+    let store = SessionStore::new().context("failed to locate session storage")?;
+    let sessions = store.list().context("failed to list sessions")?;
+    if sessions.is_empty() {
+        println!("No saved sessions yet. ({})", store.dir().display());
+        return Ok(None);
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "`session resume` without an id needs an interactive terminal — \
+             pass the id explicitly (see `session list`)"
+        );
+    }
+
+    println!(
+        "{:<3}  {:<15}  {:<9}  {:>5}  TITLE",
+        "#", "ID", "AGE", "TURNS"
+    );
+    let now = SessionStore::now_ms();
+    for (i, s) in sessions.iter().enumerate() {
+        println!(
+            "{:<3}  {:<15}  {:<9}  {:>5}  {}",
+            i + 1,
+            s.id,
+            format_age(now, s.created_at_ms),
+            s.turns,
+            s.title
+        );
+    }
+    eprint!("选择要恢复的 session [1-{}，回车取消]: ", sessions.len());
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Ok(None);
+    }
+    match resolve_pick(&line, &sessions) {
+        Some(id) => Ok(Some(id)),
+        None => {
+            println!("已取消。");
+            Ok(None)
+        }
+    }
 }
 
 /// Formats the gap between two Unix-ms timestamps as a coarse "N ago" string.
@@ -510,7 +572,18 @@ async fn main() -> Result<()> {
         }
         Some(Command::Session {
             action: SessionAction::Resume { id },
-        }) => resume_id = Some(id),
+        }) => {
+            // An explicit id is used as-is; without one, show the picker. A
+            // cancelled or empty pick exits cleanly rather than starting a
+            // fresh session the user didn't ask for.
+            match id {
+                Some(id) => resume_id = Some(id),
+                None => match pick_session()? {
+                    Some(id) => resume_id = Some(id),
+                    None => return Ok(()),
+                },
+            }
+        }
         None => {}
     }
 
@@ -1231,10 +1304,53 @@ mod tests {
         match cli.command {
             Some(Command::Session {
                 action: SessionAction::Resume { id },
-            }) => assert_eq!(id, "1748789422123"),
+            }) => assert_eq!(id.as_deref(), Some("1748789422123")),
             other => panic!("expected session resume, got {other:?}"),
         }
         assert!(cli.model.is_none());
+    }
+
+    #[test]
+    fn session_resume_without_id_parses_as_none() {
+        // `session resume` with no positional triggers the interactive picker;
+        // clap must accept the missing id as `None`, not error.
+        let cli = Cli::try_parse_from(["orcarein", "session", "resume"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                action: SessionAction::Resume { id: None }
+            })
+        ));
+    }
+
+    fn summaries(ids: &[&str]) -> Vec<SessionSummary> {
+        ids.iter()
+            .map(|id| SessionSummary {
+                id: (*id).to_owned(),
+                created_at_ms: 0,
+                turns: 0,
+                title: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolve_pick_maps_1based_choice_to_id() {
+        let s = summaries(&["aaa", "bbb", "ccc"]);
+        assert_eq!(resolve_pick("1", &s).as_deref(), Some("aaa"));
+        assert_eq!(resolve_pick(" 2 \n", &s).as_deref(), Some("bbb")); // trims ws
+        assert_eq!(resolve_pick("3", &s).as_deref(), Some("ccc"));
+    }
+
+    #[test]
+    fn resolve_pick_cancels_on_blank_or_out_of_range() {
+        let s = summaries(&["aaa", "bbb"]);
+        assert_eq!(resolve_pick("", &s), None); // bare Enter = cancel
+        assert_eq!(resolve_pick("   ", &s), None);
+        assert_eq!(resolve_pick("abc", &s), None); // non-numeric = cancel
+        assert_eq!(resolve_pick("0", &s), None); // menu is 1-based
+        assert_eq!(resolve_pick("3", &s), None); // past the end
+        assert_eq!(resolve_pick("-1", &s), None);
     }
 
     #[test]
