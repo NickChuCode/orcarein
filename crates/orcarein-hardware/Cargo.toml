@@ -1,6 +1,14 @@
 [package]
 name = "orcarein-hardware"
 description = "Hardware control terminal layer for OrcaRein (device profiles, transport, Python sidecar)"
+# Not published to crates.io (yet): this is experimental v0.2 wedge work — M1
+# (no-hardware foundation) only, M2 still blocked on real hardware, no crates.io
+# metadata (keywords/categories/README) prepared, and a heavy Linux/Pi-only dep
+# (rppal). crates.io versions are permanent, so we don't make that commitment
+# prematurely. Keeping this `false` also makes release-plz skip it, so the
+# crates.io release job stays green without a token. Flip deliberately (add
+# metadata + CARGO_REGISTRY_TOKEN) when the layer is ready to ship.
+publish = false
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
