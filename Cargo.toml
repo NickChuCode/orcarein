@@ -43,3 +43,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # v0.2 hardware wedge: Pi GPIO/I2C/SPI/UART. Linux-only; pulled in only behind
 # the `hardware` feature + `target_os = "linux"` so non-Linux builds stay clean.
 rppal = "0.18"
+# v0.2 terminal UX: TUI overlay (pager + future GPIO monitor). crossterm is used
+# via `ratatui::crossterm`. Binary-only, behind the `tui` feature.
+ratatui = "0.29"

@@ -31,3 +31,14 @@ clap = { workspace = true }
 # Ch16: diagnostic logging facade + a stderr subscriber driven by RUST_LOG.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# v0.2 terminal UX: alt-screen overlay/pager (crossterm via `ratatui::crossterm`).
+# Optional + behind the `tui` feature (default-on). `--no-default-features`
+# drops it for a lean headless build; pager then degrades to plain printing.
+ratatui = { workspace = true, optional = true }
+
+[features]
+default = ["tui"]
+# Compile the alt-screen overlay (pager now; GPIO live monitor later). At
+# runtime the overlay is still capability-gated (non-tty / TERM=dumb / serial /
+# headless → plain print), so this only controls whether the code is built in.
+tui = ["dep:ratatui"]

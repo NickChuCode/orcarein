@@ -23,6 +23,8 @@ use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+mod overlay;
+
 /// Fallback system prompt when neither `--system-prompt-file` nor the config
 /// file supplies one.
 const DEFAULT_SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
@@ -1119,6 +1121,53 @@ fn prompt_permission(name: &str, args: &str) -> Decision {
     }
 }
 
+/// Renders a session's messages to plain text for the `/history` pager. Pure
+/// and read-only — viewing history must never *become* history: the persisted
+/// `Vec<Message>` (and thus the model's cache prefix) is left untouched.
+fn render_transcript(session: &Session) -> String {
+    let mut out = String::new();
+    for m in session.messages() {
+        match m.role.as_str() {
+            "system" => continue, // the system prompt isn't part of the visible chat
+            "user" => out.push_str(&format!("▌ 你\n{}\n\n", m.content.trim_end())),
+            "assistant" => {
+                for tc in &m.tool_calls {
+                    out.push_str(&format!(
+                        "▌ OrcaRein → {}({})\n\n",
+                        tc.function.name, tc.function.arguments
+                    ));
+                }
+                if !m.content.trim().is_empty() {
+                    out.push_str(&format!("▌ OrcaRein\n{}\n\n", m.content.trim_end()));
+                }
+            }
+            "tool" => out.push_str(&format!("▌ 工具结果\n{}\n\n", m.content.trim_end())),
+            other => out.push_str(&format!("▌ {other}\n{}\n\n", m.content.trim_end())),
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(对话为空)\n");
+    }
+    out
+}
+
+/// `/show <path>`: reads a file and shows it through the pager. Read failures
+/// are reported, not fatal.
+fn run_show(path: &str) {
+    if path.is_empty() {
+        eprintln!("用法：/show <文件路径>");
+        return;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            if let Err(e) = overlay::show_paged(path, &content) {
+                eprintln!("显示失败：{e}");
+            }
+        }
+        Err(e) => eprintln!("读不了 {path}：{e}"),
+    }
+}
+
 /// Handles a slash command (the leading `/` already stripped). Takes the
 /// session store + active id so `/save` can persist on demand.
 fn handle_command(
@@ -1128,7 +1177,13 @@ fn handle_command(
     session_id: &str,
     created_at_ms: u64,
 ) -> CommandAction {
-    match cmd {
+    // Split into a verb and an optional argument so `/show <path>` works while
+    // bare verbs (`/clear`) still match.
+    let (verb, arg) = match cmd.split_once(char::is_whitespace) {
+        Some((v, a)) => (v, a.trim()),
+        None => (cmd, ""),
+    };
+    match verb {
         "exit" | "quit" => CommandAction::Quit,
         "clear" => {
             session.clear();
@@ -1153,12 +1208,27 @@ fn handle_command(
             );
             CommandAction::Continue
         }
+        // `/show` and `/history` render through the pager. They are pure
+        // presentation — neither pushes anything into the session.
+        "show" => {
+            run_show(arg);
+            CommandAction::Continue
+        }
+        "history" => {
+            let transcript = render_transcript(session);
+            if let Err(e) = overlay::show_paged("对话记录", &transcript) {
+                eprintln!("显示失败：{e}");
+            }
+            CommandAction::Continue
+        }
         "help" => {
             println!("命令：");
             println!("  /exit, /quit   退出");
             println!("  /clear         清空会话（保留 system prompt）");
             println!("  /save          立即保存会话到磁盘（每轮也会自动保存）");
             println!("  /usage         显示累计 token 用量");
+            println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
+            println!("  /history       分页查看本次对话记录");
             println!("  /help          这条帮助");
             CommandAction::Continue
         }
@@ -1355,6 +1425,7 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use orcarein_core::Message;
 
     #[test]
     fn clap_definition_is_valid() {
@@ -1687,5 +1758,23 @@ mod tests {
             non_blank(Some("openai".to_owned())),
             Some("openai".to_owned())
         );
+    }
+
+    #[test]
+    fn render_transcript_shows_turns_but_not_system_prompt() {
+        let mut s = Session::new("be a helpful secret system prompt");
+        s.push_user("hello");
+        s.push_assistant(Message::assistant("hi there"));
+        let t = render_transcript(&s);
+        assert!(t.contains("hello"));
+        assert!(t.contains("hi there"));
+        // the system prompt is not part of the visible chat
+        assert!(!t.contains("secret system prompt"));
+    }
+
+    #[test]
+    fn render_transcript_marks_an_empty_session() {
+        let s = Session::new("sys");
+        assert!(render_transcript(&s).contains("空"));
     }
 }
