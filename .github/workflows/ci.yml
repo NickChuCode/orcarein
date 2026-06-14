@@ -26,15 +26,25 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    name: clippy
+    name: clippy (${{ matrix.features == '' && 'default' || matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lint the same feature combos the author verifies by hand. Plain
+        # `clippy` only covers the default set, so the off-by-default `hardware`
+        # gate (the hwmon GPIO monitor) and the lean `--no-default-features`
+        # headless build (pager degrades to plain printing) were never linted in
+        # CI. "" = default, --all-features adds `hardware`, --no-default-features
+        # drops `tui`.
+        features: ["", "--all-features", "--no-default-features"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -59,4 +69,7 @@ jobs:
       # The repo's rust-toolchain.toml pins `stable`, which would override the
       # toolchain installed above. The command-line `+1.85.0` override wins over
       # rust-toolchain.toml, so the MSRV check actually runs on 1.85.
-      - run: cargo +1.85.0 check --workspace --all-targets
+      # `--all-features` so the off-by-default `hardware` gate and the `tui`
+      # overlay are MSRV-verified too (their extra deps, pinned in Cargo.lock,
+      # must still build on 1.85), not just the default set.
+      - run: cargo +1.85.0 check --workspace --all-targets --all-features
