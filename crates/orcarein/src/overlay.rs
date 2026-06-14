@@ -92,61 +92,149 @@ pub(crate) fn enter_overlay() -> std::io::Result<(
     Ok((terminal, guard))
 }
 
+#[cfg(feature = "tui")]
+type Tui = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
+
+/// Render one pager frame — the scrolled body window plus a reversed footer —
+/// and hand back the body viewport height. `footer_fn` is called with that
+/// height inside the draw, so callers can show the exact visible line range.
+/// Shared by the scroll loop and the `/`-search input prompt.
+#[cfg(feature = "tui")]
+fn draw_view(
+    terminal: &mut Tui,
+    body: &str,
+    offset: usize,
+    footer_fn: impl Fn(usize) -> String,
+) -> std::io::Result<usize> {
+    use ratatui::layout::{Constraint, Layout};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+
+    let mut viewport_h = 1usize;
+    terminal.draw(|f| {
+        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
+        viewport_h = (chunks[0].height as usize).max(1);
+        f.render_widget(Paragraph::new(body).scroll((offset as u16, 0)), chunks[0]);
+        let footer = Line::from(footer_fn(viewport_h))
+            .style(Style::default().add_modifier(Modifier::REVERSED));
+        f.render_widget(Paragraph::new(footer), chunks[1]);
+    })?;
+    Ok(viewport_h)
+}
+
+/// The `/`-search input prompt: a small modal loop that echoes the query being
+/// typed in the footer. Returns the entered query on Enter (None if empty), or
+/// None on Esc (cancelled). Pure terminal I/O; the match logic is [`find_match`].
+#[cfg(feature = "tui")]
+fn read_search_query(
+    terminal: &mut Tui,
+    body: &str,
+    offset: usize,
+) -> std::io::Result<Option<String>> {
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    let mut input = String::new();
+    loop {
+        draw_view(terminal, body, offset, |_vh| {
+            format!(" /{input}   Enter 确认 · Esc 取消 ")
+        })?;
+        let Event::Key(k) = event::read()? else {
+            continue;
+        };
+        if k.kind == KeyEventKind::Release {
+            continue;
+        }
+        match k.code {
+            KeyCode::Enter => return Ok((!input.is_empty()).then_some(input)),
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Char(c) => input.push(c),
+            _ => {}
+        }
+    }
+}
+
 /// Drives the alternate-screen pager: render the visible window with a status
 /// footer, loop on keystrokes until `q`. Terminal restore is handled by the
 /// overlay guard from [`enter_overlay`].
 #[cfg(feature = "tui")]
 fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-    use ratatui::layout::{Constraint, Layout};
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::Line;
-    use ratatui::widgets::Paragraph;
 
     let (mut terminal, _guard) = enter_overlay()?;
     let body = lines.join("\n");
     let total = lines.len();
     let mut offset = 0usize;
+    let mut query = String::new();
+    let mut last_match: Option<usize> = None;
+
+    // Jump so the matched line sits at the top of the viewport (clamped).
+    let jump_to = |m: Option<usize>, off: &mut usize, max: usize| {
+        if let Some(m) = m {
+            *off = m.min(max);
+        }
+    };
 
     loop {
-        let mut viewport_h = 1usize;
-        terminal.draw(|f| {
-            let chunks =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-            viewport_h = (chunks[0].height as usize).max(1);
-            f.render_widget(
-                Paragraph::new(body.as_str()).scroll((offset as u16, 0)),
-                chunks[0],
-            );
-            let end = (offset + viewport_h).min(total);
-            let footer = Line::from(format!(
-                " {title}  行 {}-{}/{}   j/k ↑↓ · PgUp/PgDn · g/G · q 退出 ",
+        let viewport_h = draw_view(&mut terminal, &body, offset, |vh| {
+            let end = (offset + vh).min(total);
+            let status = if query.is_empty() {
+                String::new()
+            } else {
+                match last_match {
+                    Some(m) => format!("  /{query}→行{}", m + 1),
+                    None => format!("  /{query} 无匹配"),
+                }
+            };
+            format!(
+                " {title}  行 {}-{}/{}   j/k · /搜索 n/N · g/G · q 退出{status} ",
                 (offset + 1).min(total),
                 end,
                 total
-            ))
-            .style(Style::default().add_modifier(Modifier::REVERSED));
-            f.render_widget(Paragraph::new(footer), chunks[1]);
+            )
         })?;
+        let max = total.saturating_sub(viewport_h);
 
-        if let Event::Key(k) = event::read()? {
-            if k.kind == KeyEventKind::Release {
-                continue; // Windows emits press+release; act on press only
+        let Event::Key(k) = event::read()? else {
+            continue;
+        };
+        if k.kind == KeyEventKind::Release {
+            continue; // Windows emits press+release; act on press only
+        }
+        match k.code {
+            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Char('/') => {
+                if let Some(q) = read_search_query(&mut terminal, &body, offset)? {
+                    query = q;
+                    last_match = find_match(lines, &query, offset, true);
+                    jump_to(last_match, &mut offset, max);
+                }
             }
-            let pk = match k.code {
-                KeyCode::Char('q') | KeyCode::Esc => PagerKey::Quit,
-                KeyCode::Char('j') | KeyCode::Down => PagerKey::Down,
-                KeyCode::Char('k') | KeyCode::Up => PagerKey::Up,
-                KeyCode::Char(' ') | KeyCode::PageDown => PagerKey::PageDown,
-                KeyCode::PageUp => PagerKey::PageUp,
-                KeyCode::Char('g') | KeyCode::Home => PagerKey::Top,
-                KeyCode::Char('G') | KeyCode::End => PagerKey::Bottom,
-                _ => PagerKey::Other,
-            };
-            if pk == PagerKey::Quit {
-                break;
+            KeyCode::Char('n') if !query.is_empty() => {
+                let from = last_match.map_or(offset, |m| (m + 1) % total);
+                last_match = find_match(lines, &query, from, true);
+                jump_to(last_match, &mut offset, max);
             }
-            offset = next_offset(offset, pk, total, viewport_h);
+            KeyCode::Char('N') if !query.is_empty() => {
+                let from = last_match.map_or(offset, |m| (m + total - 1) % total);
+                last_match = find_match(lines, &query, from, false);
+                jump_to(last_match, &mut offset, max);
+            }
+            _ => {
+                let pk = match k.code {
+                    KeyCode::Char('j') | KeyCode::Down => PagerKey::Down,
+                    KeyCode::Char('k') | KeyCode::Up => PagerKey::Up,
+                    KeyCode::Char(' ') | KeyCode::PageDown => PagerKey::PageDown,
+                    KeyCode::PageUp => PagerKey::PageUp,
+                    KeyCode::Char('g') | KeyCode::Home => PagerKey::Top,
+                    KeyCode::Char('G') | KeyCode::End => PagerKey::Bottom,
+                    _ => PagerKey::Other,
+                };
+                offset = next_offset(offset, pk, total, viewport_h);
+            }
         }
     }
     Ok(())
@@ -163,7 +251,6 @@ pub enum PagerKey {
     PageDown,
     Top,
     Bottom,
-    Quit,
     Other,
 }
 
@@ -196,9 +283,33 @@ pub fn next_offset(offset: usize, key: PagerKey, total_lines: usize, viewport_h:
         PagerKey::PageUp => offset.saturating_sub(page),
         PagerKey::Top => 0,
         PagerKey::Bottom => max,
-        PagerKey::Quit | PagerKey::Other => offset,
+        PagerKey::Other => offset,
     };
     raw.min(max)
+}
+
+/// Pure pager search: the index of the next line containing `query`, scanning
+/// from `start` (inclusive) in the `forward`/backward direction and wrapping
+/// around the ends. Matching is case-insensitive substring — forgiving for a
+/// content viewer, and no regex surface. Returns `None` for an empty query, an
+/// empty slice, or when no line matches anywhere.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub fn find_match(lines: &[&str], query: &str, start: usize, forward: bool) -> Option<usize> {
+    if query.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let n = lines.len();
+    let needle = query.to_lowercase();
+    let start = start % n; // tolerate an out-of-range starting index
+    (0..n)
+        .map(|step| {
+            if forward {
+                (start + step) % n
+            } else {
+                (start + n - step) % n
+            }
+        })
+        .find(|&idx| lines[idx].to_lowercase().contains(&needle))
 }
 
 #[cfg(test)]
@@ -229,11 +340,45 @@ mod tests {
         assert_eq!(next_offset(85, PagerKey::PageDown, 100, 10), 90); // clamp at bottom
         assert_eq!(next_offset(50, PagerKey::Bottom, 100, 10), 90);
         assert_eq!(next_offset(50, PagerKey::Top, 100, 10), 0);
-        assert_eq!(next_offset(5, PagerKey::Quit, 100, 10), 5); // unchanged
+        assert_eq!(next_offset(5, PagerKey::Other, 100, 10), 5); // unchanged
     }
 
     #[test]
     fn next_offset_zero_when_everything_fits() {
         assert_eq!(next_offset(0, PagerKey::Bottom, 5, 10), 0);
+    }
+
+    #[test]
+    fn find_match_forward_is_case_insensitive_and_includes_start() {
+        let lines = ["alpha", "BETA", "gamma beta", "delta"];
+        // Forward from 0 → first match is "BETA" at 1 (case-insensitive).
+        assert_eq!(find_match(&lines, "beta", 0, true), Some(1));
+        // Start is inclusive: from 2, line 2 itself contains "beta".
+        assert_eq!(find_match(&lines, "beta", 2, true), Some(2));
+    }
+
+    #[test]
+    fn find_match_backward_finds_previous() {
+        let lines = ["x match", "y", "z match", "w"];
+        // Backward from 3 scans 3,2,1,0 → first hit at line 2.
+        assert_eq!(find_match(&lines, "match", 3, false), Some(2));
+    }
+
+    #[test]
+    fn find_match_wraps_around() {
+        let lines = ["hit", "a", "b", "c"];
+        // Forward from 1 → 1,2,3 miss, wrap to 0 → "hit".
+        assert_eq!(find_match(&lines, "hit", 1, true), Some(0));
+        // Backward from 0 → wrap to 3,2,1,0; only line 0 matches.
+        assert_eq!(find_match(&lines, "hit", 0, false), Some(0));
+    }
+
+    #[test]
+    fn find_match_none_on_empty_query_no_hit_or_empty_input() {
+        let lines = ["a", "b"];
+        assert_eq!(find_match(&lines, "", 0, true), None);
+        assert_eq!(find_match(&lines, "zzz", 0, true), None);
+        let empty: [&str; 0] = [];
+        assert_eq!(find_match(&empty, "a", 0, true), None);
     }
 }
