@@ -23,7 +23,13 @@ use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "hardware")]
+mod hwmon;
 mod overlay;
+
+/// Demo pins watched by `hw monitor` when `--pins` is omitted.
+#[cfg(feature = "hardware")]
+const DEFAULT_MONITOR_PINS: &[u8] = &[17, 27, 22, 23, 24, 25];
 
 /// Fallback system prompt when neither `--system-prompt-file` nor the config
 /// file supplies one.
@@ -108,6 +114,30 @@ enum Command {
     Issue {
         /// The issue number to fix.
         number: u64,
+    },
+    /// GPIO live monitor (experimental hardware wedge — build `--features hardware`).
+    #[cfg(feature = "hardware")]
+    Hw {
+        #[command(subcommand)]
+        action: HwAction,
+    },
+}
+
+/// Actions for the `hw` subcommand.
+#[cfg(feature = "hardware")]
+#[derive(Subcommand, Debug, Clone)]
+enum HwAction {
+    /// Live-monitor GPIO pin levels (demo data until the real backend lands at M2).
+    Monitor {
+        /// Pins to watch (comma-separated, e.g. `17,27,22`). Defaults to a demo set.
+        #[arg(long, value_delimiter = ',')]
+        pins: Vec<u8>,
+        /// Refresh interval in milliseconds.
+        #[arg(long, default_value_t = 500)]
+        interval: u64,
+        /// Print a single snapshot and exit (no live overlay).
+        #[arg(long)]
+        once: bool,
     },
 }
 
@@ -692,6 +722,23 @@ async fn main() -> Result<()> {
         Some(Command::Issue { number }) => {
             let code = run_issue(&cli, number).await;
             std::process::exit(code);
+        }
+        #[cfg(feature = "hardware")]
+        Some(Command::Hw {
+            action:
+                HwAction::Monitor {
+                    pins,
+                    interval,
+                    once,
+                },
+        }) => {
+            let pins = if pins.is_empty() {
+                DEFAULT_MONITOR_PINS.to_vec()
+            } else {
+                pins
+            };
+            return hwmon::run_monitor(&hwmon::DemoGpio, &pins, interval, once)
+                .context("gpio monitor failed");
         }
         Some(Command::Session {
             action: SessionAction::Resume { id },
@@ -1776,5 +1823,27 @@ mod tests {
     fn render_transcript_marks_an_empty_session() {
         let s = Session::new("sys");
         assert!(render_transcript(&s).contains("空"));
+    }
+
+    #[cfg(feature = "hardware")]
+    #[test]
+    fn hw_monitor_subcommand_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "hw", "monitor", "--pins", "17,27", "--once"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Hw {
+                action:
+                    HwAction::Monitor {
+                        pins,
+                        once,
+                        interval,
+                    },
+            }) => {
+                assert_eq!(pins, vec![17, 27]);
+                assert!(once);
+                assert_eq!(interval, 500); // default
+            }
+            other => panic!("expected hw monitor, got {other:?}"),
+        }
     }
 }

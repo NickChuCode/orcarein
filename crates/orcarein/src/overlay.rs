@@ -59,37 +59,51 @@ fn paged_overlay(title: &str, content: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Drives the alternate-screen pager: enter raw mode + alt screen (restored on
-/// drop, even on panic), render the visible window with a status footer, and
-/// loop on keystrokes until `q`.
+/// Shared overlay primitive: enter raw mode + the alternate screen and hand
+/// back a ratatui `Terminal`. The returned guard restores the terminal on drop
+/// (even on panic / early return). Both the pager and the GPIO live monitor
+/// build their loops on top of this.
+#[cfg(feature = "tui")]
+pub(crate) struct OverlayGuard;
+
+#[cfg(feature = "tui")]
+impl Drop for OverlayGuard {
+    fn drop(&mut self) {
+        use ratatui::crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+        let _ = disable_raw_mode();
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+#[cfg(feature = "tui")]
+#[allow(clippy::type_complexity)]
+pub(crate) fn enter_overlay() -> std::io::Result<(
+    ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    OverlayGuard,
+)> {
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+    use ratatui::Terminal;
+
+    enable_raw_mode()?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
+    let guard = OverlayGuard;
+    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    Ok((terminal, guard))
+}
+
+/// Drives the alternate-screen pager: render the visible window with a status
+/// footer, loop on keystrokes until `q`. Terminal restore is handled by the
+/// overlay guard from [`enter_overlay`].
 #[cfg(feature = "tui")]
 fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
-    use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::{
-        event::{self, Event, KeyCode, KeyEventKind},
-        execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    };
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
     use ratatui::layout::{Constraint, Layout};
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
-    use ratatui::Terminal;
 
-    // RAII guard: restore the terminal even if rendering panics mid-pager.
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = disable_raw_mode();
-            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-        }
-    }
-
-    enable_raw_mode()?;
-    execute!(std::io::stdout(), EnterAlternateScreen)?;
-    let _restore = Restore;
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    let (mut terminal, _guard) = enter_overlay()?;
     let body = lines.join("\n");
     let total = lines.len();
     let mut offset = 0usize;

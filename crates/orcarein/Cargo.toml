@@ -42,3 +42,10 @@ default = ["tui"]
 # runtime the overlay is still capability-gated (non-tty / TERM=dumb / serial /
 # headless → plain print), so this only controls whether the code is built in.
 tui = ["dep:ratatui"]
+# Compile the `orcarein hw` subcommand (GPIO live monitor). OFF by default: the
+# hardware wedge is experimental and orcarein-hardware isn't on crates.io yet,
+# so the published binary stays clean of a hardware command. Pure cfg flag for
+# now (the monitor reads through the bin-local `GpioSource` with a demo backend);
+# when orcarein-hardware ships, this feature will also pull it in for the real
+# pin-reading adapter. Build/run with `--features hardware`.
+hardware = []
