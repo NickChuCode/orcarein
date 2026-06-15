@@ -1,9 +1,9 @@
 //! Transport abstraction for the hardware layer.
 //!
-//! [`Transport`] abstracts the Linux char-device transport (rppal) so all
-//! logic and tests compile and run on any platform.  The real Linux impl
-//! (`transport::linux`, rppal-backed) arrives in a later task; [`MockTransport`]
-//! stands in for tests and non-Linux hosts.
+//! [`Transport`] abstracts the Linux char-device transport so all logic and
+//! tests compile and run on any platform. The real Linux GPIO backend lives in
+//! [`cdev`] (`gpiocdev`, behind `target_os = "linux"` + the `hardware`
+//! feature); [`MockTransport`] stands in for tests and non-Linux hosts.
 
 use async_trait::async_trait;
 
@@ -54,8 +54,8 @@ pub enum NativeOp {
 /// Abstracts the Linux char-device transport so logic and tests run on any
 /// platform.
 ///
-/// The real impl (`transport::linux`, rppal) arrives in a later task;
-/// [`MockTransport`] stands in for tests and non-Linux hosts.
+/// The real GPIO backend is [`cdev::CdevGpio`] (`gpiocdev`); [`MockTransport`]
+/// stands in for tests and non-Linux hosts.
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Execute one native op, returning a human/model-readable result string
@@ -70,3 +70,10 @@ pub trait Transport: Send + Sync {
 
 pub mod mock;
 pub use mock::MockTransport;
+
+// Real Linux GPIO backend (gpiocdev). Linux-only + behind the `hardware`
+// feature, since gpiocdev is a Linux-only dependency.
+#[cfg(all(target_os = "linux", feature = "hardware"))]
+pub mod cdev;
+#[cfg(all(target_os = "linux", feature = "hardware"))]
+pub use cdev::CdevGpio;

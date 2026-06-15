@@ -235,6 +235,62 @@ impl BoardProfile {
     }
 }
 
+/// A logical pin resolved to a concrete cdev line: which `/dev/gpiochipN` and
+/// which line offset within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLine {
+    /// The `N` in `/dev/gpiochipN` to open.
+    pub chip_index: u32,
+    /// The line offset on that chip.
+    pub offset: u32,
+}
+
+/// Resolves a board profile's logical pin to a concrete `(gpiochip, offset)`
+/// against the chips actually present on the running board (`detected`, e.g.
+/// from `gpiodetect`). This is the pure decision the cdev I/O backend makes
+/// before opening a line; it never touches hardware, so it is unit-tested on any
+/// platform.
+///
+/// * `Offset` pins resolve their chip by **label** ([`resolve_gpiochip_by_label`]
+///   over the board's `gpiochip_labels`) — never by a fixed number.
+/// * `Banked` pins (RK3588) use **chip index = bank** (the documented default),
+///   requiring that chip to be present. Bank→chip resolution by label is a later
+///   refinement once real on-board `gpiodetect` labels are known; until then the
+///   bank default is validated against `detected` rather than assumed blindly.
+pub fn resolve_line(
+    profile: &BoardProfile,
+    pin: &str,
+    detected: &[ChipInfo],
+) -> Result<ResolvedLine, HardwareError> {
+    let spec = profile.pin(pin).ok_or_else(|| {
+        HardwareError::Validation(format!("board {:?}: unknown pin {:?}", profile.name, pin))
+    })?;
+    match spec {
+        PinSpec::Offset(offset) => {
+            let labels: Vec<&str> = profile.gpiochip_labels.iter().map(String::as_str).collect();
+            let chip_index = resolve_gpiochip_by_label(detected, &labels).ok_or_else(|| {
+                HardwareError::Validation(format!(
+                    "board {:?}: no detected gpiochip matches labels {:?}",
+                    profile.name, profile.gpiochip_labels
+                ))
+            })?;
+            Ok(ResolvedLine { chip_index, offset })
+        }
+        PinSpec::Banked { bank, offset } => {
+            if !detected.iter().any(|c| c.index == bank) {
+                return Err(HardwareError::Validation(format!(
+                    "board {:?}: pin {:?} needs gpiochip{} (bank {}) but no such chip is present",
+                    profile.name, pin, bank, bank
+                )));
+            }
+            Ok(ResolvedLine {
+                chip_index: bank,
+                offset,
+            })
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -535,5 +591,67 @@ line = "GPIO1_E0"
         );
         // 5 Plus and 5 Max genuinely differ: pin 7 maps to different lines.
         assert_ne!(plus.pin("pin7"), max.pin("pin7"));
+    }
+
+    #[test]
+    fn resolve_line_offset_pin_uses_label_resolved_chip() {
+        let rpi5 = BoardProfile::from_toml_str(include_str!("../profiles/boards/rpi5.toml"))
+            .expect("rpi5.toml");
+        // Pi 5 current kernel: pinctrl-rp1 on gpiochip0.
+        let detected = chips(&[(0, "pinctrl-rp1"), (10, "gpio-brcmstb")]);
+        assert_eq!(
+            resolve_line(&rpi5, "pin11", &detected).unwrap(),
+            ResolvedLine {
+                chip_index: 0,
+                offset: 17
+            }
+        );
+        // Old image: same label, gpiochip4 — resolved by label, not number.
+        let old = chips(&[(0, "gpio-brcmstb"), (4, "pinctrl-rp1")]);
+        assert_eq!(
+            resolve_line(&rpi5, "pin11", &old).unwrap(),
+            ResolvedLine {
+                chip_index: 4,
+                offset: 17
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_line_banked_pin_defaults_chip_to_bank() {
+        let max = BoardProfile::from_toml_str(include_str!("../profiles/boards/orangepi5max.toml"))
+            .expect("orangepi5max.toml");
+        let detected = chips(&[(0, "gpio0"), (1, "gpio1"), (3, "gpio3"), (4, "gpio4")]);
+        // pin12 = GPIO4_A6 → chip4 offset6.
+        assert_eq!(
+            resolve_line(&max, "pin12", &detected).unwrap(),
+            ResolvedLine {
+                chip_index: 4,
+                offset: 6
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_line_errors_on_unknown_pin_or_missing_chip() {
+        let rpi5 = BoardProfile::from_toml_str(include_str!("../profiles/boards/rpi5.toml"))
+            .expect("rpi5.toml");
+        // Unknown pin name.
+        assert!(matches!(
+            resolve_line(&rpi5, "pin99", &chips(&[(0, "pinctrl-rp1")])),
+            Err(HardwareError::Validation(_))
+        ));
+        // Label not present among detected chips.
+        assert!(matches!(
+            resolve_line(&rpi5, "pin11", &chips(&[(0, "something-else")])),
+            Err(HardwareError::Validation(_))
+        ));
+        // Banked pin whose bank chip isn't present.
+        let max = BoardProfile::from_toml_str(include_str!("../profiles/boards/orangepi5max.toml"))
+            .expect("orangepi5max.toml");
+        assert!(matches!(
+            resolve_line(&max, "pin12", &chips(&[(0, "gpio0"), (1, "gpio1")])),
+            Err(HardwareError::Validation(_))
+        ));
     }
 }

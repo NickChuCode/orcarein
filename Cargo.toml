@@ -40,9 +40,12 @@ toml = "0.8"
 # Ch16: structured diagnostic logging (quiet by default; opt in via RUST_LOG).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# v0.2 hardware wedge: Pi GPIO/I2C/SPI/UART. Linux-only; pulled in only behind
-# the `hardware` feature + `target_os = "linux"` so non-Linux builds stay clean.
-rppal = "0.18"
+# v0.2 hardware wedge (M2): cross-SoC GPIO via the Linux character device.
+# SoC-agnostic (drives Broadcom Pi + Rockchip Orange Pi through the kernel cdev
+# ABI), pure Rust, MSRV 1.68. Linux-only; pulled in only behind the `hardware`
+# feature + `target_os = "linux"` so non-Linux builds stay clean. Replaces the
+# retired, Broadcom-only `rppal` (see the M2/M3 revised spec).
+gpiocdev = "0.8"
 # v0.2 terminal UX: TUI overlay (pager + future GPIO monitor). crossterm is used
 # via `ratatui::crossterm`. Binary-only, behind the `tui` feature.
 ratatui = "0.29"

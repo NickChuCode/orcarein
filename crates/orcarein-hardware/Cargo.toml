@@ -26,11 +26,11 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rppal = { workspace = true, optional = true }
+gpiocdev = { workspace = true, optional = true }
 
 [features]
 default = []
-hardware = ["dep:rppal"]
+hardware = ["dep:gpiocdev"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

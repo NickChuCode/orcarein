@@ -14,7 +14,8 @@ pub mod tool;
 pub mod transport;
 
 pub use board::{
-    parse_rk_line, resolve_gpiochip_by_label, BoardProfile, ChipInfo, PinSpec, RkLine,
+    parse_rk_line, resolve_gpiochip_by_label, resolve_line, BoardProfile, ChipInfo, PinSpec,
+    ResolvedLine, RkLine,
 };
 pub use error::HardwareError;
 pub use profile::{Backend, Device, Intent, Param, ParamType, Profile, Risk, TransportKind};
