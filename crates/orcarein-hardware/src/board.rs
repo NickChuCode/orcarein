@@ -462,26 +462,78 @@ line = "GPIO1_E0"
         assert!(matches!(err, HardwareError::Validation(_)), "{err:?}");
     }
 
-    // The shipped board-profile fixtures parse and resolve their key pins.
+    // The shipped board-profile fixtures parse, and spot-checked pins resolve to
+    // the values transcribed from the official manuals/whitepaper. These guard
+    // against transcription and offset-formula errors (not against a wrong-but-
+    // well-formed label — the final check is `gpio readall` on the board).
     #[test]
     fn shipped_board_profiles_parse() {
+        // --- Raspberry Pi: offset == BCM on the user pinctrl chip ---
         let rpi4 = BoardProfile::from_toml_str(include_str!("../profiles/boards/rpi4.toml"))
             .expect("rpi4.toml");
         assert_eq!(rpi4.name, "rpi4");
         assert!(rpi4.gpiochip_labels.iter().any(|l| l.contains("bcm2711")));
+        // Physical pin 11 = BCM17, pin 3 = BCM2 (SDA1), pin 19 = BCM10 (MOSI).
+        assert_eq!(rpi4.pin("pin11"), Some(PinSpec::Offset(17)));
+        assert_eq!(rpi4.pin("pin3"), Some(PinSpec::Offset(2)));
+        assert_eq!(rpi4.pin("pin19"), Some(PinSpec::Offset(10)));
 
         let rpi5 = BoardProfile::from_toml_str(include_str!("../profiles/boards/rpi5.toml"))
             .expect("rpi5.toml");
         assert!(rpi5.gpiochip_labels.iter().any(|l| l.contains("rp1")));
+        // Pi 5 shares the Pi 4 pinout; only the chip label differs.
+        assert_eq!(rpi5.pin("pin11"), Some(PinSpec::Offset(17)));
 
-        let opi =
+        // --- Orange Pi 5 Plus (RK3588, banked) ---
+        let plus =
             BoardProfile::from_toml_str(include_str!("../profiles/boards/orangepi5plus.toml"))
                 .expect("orangepi5plus.toml");
-        assert_eq!(opi.name, "orangepi5plus");
-        // Every Orange Pi pin is banked (carries its own bank).
-        assert!(opi
+        assert_eq!(plus.name, "orangepi5plus");
+        assert!(plus
             .pins
             .values()
             .all(|p| matches!(p, PinSpec::Banked { .. })));
+        // pin 16 = GPIO3_B5 → chip3 offset13; pin 3 = GPIO0_C0 → chip0 offset16.
+        assert_eq!(
+            plus.pin("pin16"),
+            Some(PinSpec::Banked {
+                bank: 3,
+                offset: 13
+            })
+        );
+        assert_eq!(
+            plus.pin("pin3"),
+            Some(PinSpec::Banked {
+                bank: 0,
+                offset: 16
+            })
+        );
+        // The self-conflicting pins 8/10 are deliberately not shipped.
+        assert_eq!(plus.pin("pin8"), None);
+        assert_eq!(plus.pin("pin10"), None);
+
+        // --- Orange Pi 5 Max (RK3588, banked, DIFFERENT pinout) ---
+        let max = BoardProfile::from_toml_str(include_str!("../profiles/boards/orangepi5max.toml"))
+            .expect("orangepi5max.toml");
+        assert_eq!(max.name, "orangepi5max");
+        assert!(max
+            .pins
+            .values()
+            .all(|p| matches!(p, PinSpec::Banked { .. })));
+        // pin 12 = GPIO4_A6 → chip4 offset6 (the 5 Max breaks out bank 4);
+        // pin 31 = GPIO3_B5 → chip3 offset13.
+        assert_eq!(
+            max.pin("pin12"),
+            Some(PinSpec::Banked { bank: 4, offset: 6 })
+        );
+        assert_eq!(
+            max.pin("pin31"),
+            Some(PinSpec::Banked {
+                bank: 3,
+                offset: 13
+            })
+        );
+        // 5 Plus and 5 Max genuinely differ: pin 7 maps to different lines.
+        assert_ne!(plus.pin("pin7"), max.pin("pin7"));
     }
 }

@@ -1,23 +1,99 @@
 # Board GPIO profile — Orange Pi 5 Plus (Rockchip RK3588).
 #
-# RK3588 GPIO is banked: 5 banks (GPIO0..GPIO4) of 32 lines, each surfaced as
-# its own gpiochip. A pin is named `GPIO{bank}_{port}{index}` (ports A-D, 8
-# lines each), so it carries its own bank — no board-level chip label needed.
-# cdev addressing: chip = bank, offset = port*8 + index (C4 -> 2*8+4 = 20).
+# Pinout transcribed from the official "OrangePi 5 Plus RK3588 User Manual"
+# v1.5.1 (Xunlong), 40-pin diagram. RK3588 GPIO is banked: 5 banks GPIO0..GPIO4
+# of 32 lines, each its own gpiochip; a pin label `GPIO{bank}_{port}{index}`
+# (ports A-D = 0-3) maps to cdev chip=bank, offset=port*8+index. Keys are
+# physical header pins; power/ground omitted.
 #
-# Orange Pi's docs are weaker than Pi's — these assignments are EXAMPLES.
-# Verify on the board with `gpio readall` (WiringOP) and `gpioinfo`, and note
-# that gpiochip enumeration order is not guaranteed to equal bank order, so the
-# I/O layer resolves the bank's chip by label at runtime.
+# NOTE — pins 8 and 10 are intentionally omitted: the v1.5.1 manual's printed
+# labels (GPIO1_A1 / GPIO1_A0) conflict with its own wPi numbers (109 / 110,
+# which compute to GPIO3_B5 / GPIO3_B6). Rather than ship a guess, verify on the
+# board with `gpio readall` / `gpioinfo` and add them.
+#
+# NOTE — the RK3588 5 Plus and 5 Max have DIFFERENT pinouts; do not interchange.
+# gpiochip enumeration is not guaranteed to equal bank order, so the I/O layer
+# resolves each bank's chip by label at runtime.
 schema_version = 1
 
 [board]
 name = "orangepi5plus"
 
 [[pin]]
-name = "LED"
-line = "GPIO1_C4"
-
+name = "pin3"
+line = "GPIO0_C0"   # wPi 16 · I2C2_M0 SDA
 [[pin]]
-name = "RELAY"
-line = "GPIO3_B5"
+name = "pin5"
+line = "GPIO0_B7"   # wPi 15 · I2C2_M0 SCL
+[[pin]]
+name = "pin7"
+line = "GPIO1_D6"   # wPi 62
+[[pin]]
+name = "pin11"
+line = "GPIO1_A4"   # wPi 36
+[[pin]]
+name = "pin12"
+line = "GPIO3_A1"   # wPi 97
+[[pin]]
+name = "pin13"
+line = "GPIO1_A7"   # wPi 39
+[[pin]]
+name = "pin15"
+line = "GPIO1_B0"   # wPi 40
+[[pin]]
+name = "pin16"
+line = "GPIO3_B5"   # wPi 32
+[[pin]]
+name = "pin18"
+line = "GPIO3_B6"   # wPi 33
+[[pin]]
+name = "pin19"
+line = "GPIO1_B2"   # wPi 42 · SPI MOSI
+[[pin]]
+name = "pin21"
+line = "GPIO1_B1"   # wPi 41 · SPI MISO
+[[pin]]
+name = "pin22"
+line = "GPIO1_A2"   # wPi 34
+[[pin]]
+name = "pin23"
+line = "GPIO1_B3"   # wPi 43 · SPI CLK
+[[pin]]
+name = "pin24"
+line = "GPIO1_B4"   # wPi 44 · SPI CS0
+[[pin]]
+name = "pin26"
+line = "GPIO1_B5"   # wPi 45
+[[pin]]
+name = "pin27"
+line = "GPIO1_B7"   # wPi 47
+[[pin]]
+name = "pin28"
+line = "GPIO1_B6"   # wPi 46
+[[pin]]
+name = "pin29"
+line = "GPIO1_D7"   # wPi 63
+[[pin]]
+name = "pin31"
+line = "GPIO3_A0"   # wPi 96
+[[pin]]
+name = "pin32"
+line = "GPIO1_A3"   # wPi 35
+[[pin]]
+name = "pin33"
+line = "GPIO3_C2"   # wPi 114
+[[pin]]
+name = "pin35"
+line = "GPIO3_A2"   # wPi 98
+[[pin]]
+name = "pin36"
+line = "GPIO3_A5"   # wPi 101
+[[pin]]
+name = "pin37"
+line = "GPIO3_C1"   # wPi 113
+[[pin]]
+name = "pin38"
+line = "GPIO3_A4"   # wPi 100
+[[pin]]
+name = "pin40"
+line = "GPIO3_A3"   # wPi 99

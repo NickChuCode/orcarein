@@ -1,19 +1,97 @@
 # Board GPIO profile — Raspberry Pi 4B (Broadcom BCM2711).
 #
-# The whole 40-pin header sits on one pinctrl chip; the cdev line offset equals
-# the BCM number. Pin assignments below are EXAMPLES — verify against the board
-# with `gpioinfo` before relying on them.
+# Pinout transcribed from the official Raspberry Pi whitepaper "GPIO Usage on
+# Raspberry Pi Devices" (Release 2, 2025-08-13), Figure 1. The 40-pin header is
+# identical across Pi 2/3/4/5, Pi 400/500, and CM4/CM5 carriers, so this same
+# pin table applies to any BCM2711-class board (4B / 400 / CM4).
+#
+# On the user-facing pinctrl chip the cdev line offset equals the BCM GPIO
+# number (whitepaper §"GPIO Offset"), so each pin's `offset` is its BCM number.
+# Keys are physical header pins; power/ground pins and the reserved HAT-ID
+# EEPROM pins (27=GPIO0/ID_SD, 28=GPIO1/ID_SC) are omitted.
 schema_version = 1
 
 [board]
 name = "rpi4"
-# User-GPIO chip resolved by label (never a hard-coded chip number).
+# User-GPIO chip resolved by label, never by number (whitepaper: index is not
+# stable; label is). BCM2711-class boards report `pinctrl-bcm2711`.
 gpiochip_labels = ["pinctrl-bcm2711"]
 
 [[pin]]
-name = "LED"
-offset = 17   # BCM17, physical pin 11
-
+name = "pin3"
+offset = 2    # BCM2  · I2C1 SDA
 [[pin]]
-name = "BUTTON"
-offset = 27   # BCM27, physical pin 13
+name = "pin5"
+offset = 3    # BCM3  · I2C1 SCL
+[[pin]]
+name = "pin7"
+offset = 4    # BCM4  · GPCLK0
+[[pin]]
+name = "pin8"
+offset = 14   # BCM14 · UART0 TXD
+[[pin]]
+name = "pin10"
+offset = 15   # BCM15 · UART0 RXD
+[[pin]]
+name = "pin11"
+offset = 17   # BCM17
+[[pin]]
+name = "pin12"
+offset = 18   # BCM18 · PCM_CLK / PWM0
+[[pin]]
+name = "pin13"
+offset = 27   # BCM27
+[[pin]]
+name = "pin15"
+offset = 22   # BCM22
+[[pin]]
+name = "pin16"
+offset = 23   # BCM23
+[[pin]]
+name = "pin18"
+offset = 24   # BCM24
+[[pin]]
+name = "pin19"
+offset = 10   # BCM10 · SPI0 MOSI
+[[pin]]
+name = "pin21"
+offset = 9    # BCM9  · SPI0 MISO
+[[pin]]
+name = "pin22"
+offset = 25   # BCM25
+[[pin]]
+name = "pin23"
+offset = 11   # BCM11 · SPI0 SCLK
+[[pin]]
+name = "pin24"
+offset = 8    # BCM8  · SPI0 CE0
+[[pin]]
+name = "pin26"
+offset = 7    # BCM7  · SPI0 CE1
+[[pin]]
+name = "pin29"
+offset = 5    # BCM5
+[[pin]]
+name = "pin31"
+offset = 6    # BCM6
+[[pin]]
+name = "pin32"
+offset = 12   # BCM12 · PWM0
+[[pin]]
+name = "pin33"
+offset = 13   # BCM13 · PWM1
+[[pin]]
+name = "pin35"
+offset = 19   # BCM19 · PCM_FS
+[[pin]]
+name = "pin36"
+offset = 16   # BCM16
+[[pin]]
+name = "pin37"
+offset = 26   # BCM26
+[[pin]]
+name = "pin38"
+offset = 20   # BCM20 · PCM_DIN
+[[pin]]
+name = "pin40"
+offset = 21   # BCM21 · PCM_DOUT
