@@ -17,7 +17,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-orcarein-core = { path = "../orcarein-core", version = "0.1.0" }
+orcarein-core = { path = "../orcarein-core", version = "0.2.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

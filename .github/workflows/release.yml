@@ -38,6 +38,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # aarch64 Linux for SBCs (Raspberry Pi 4B/5, Orange Pi 5 Plus/Max).
+          # `gnu` for standard distros (Raspberry Pi OS, Armbian, Ubuntu); the
+          # action cross-compiles it against an older glibc so it also runs on
+          # the Orange Pi's customized Ubuntu 22.04 (jammy, glibc 2.35).
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          # `musl` = fully static, no glibc dependency at all — the "runs on any
+          # aarch64 Linux" fallback if the gnu build ever complains about glibc.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin

@@ -3,8 +3,10 @@ resolver = "2"
 members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware"]
 
 [workspace.package]
-# Ch16: bumped to the MVP milestone version (tag `v0.1.0-mvp`).
-version = "0.1.0"
+# Ch16: MVP `v0.1.0-mvp`. v0.2.0: terminal UX + session mgmt + cross-SoC hardware
+# layer (board profiles + gpiocdev GPIO backend) — first packaged release with
+# aarch64 Linux binaries for Pi / Orange Pi.
+version = "0.2.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -21,8 +23,17 @@ anyhow = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
-# Ch05+Ch07: HTTP client. "json" + "stream" features.
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# Ch05+Ch07: HTTP client. "json" + "stream"; rustls (not the default OpenSSL)
+# so cross-compiling to aarch64 Linux (Pi / Orange Pi) is painless and the
+# binary carries bundled Mozilla roots — no system cert store needed on minimal
+# SBC images. (v0.2 release packaging: see release.yml aarch64 targets.)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
 # Ch06: line editor for the REPL (history, arrow keys, Ctrl+C/D handling).
 rustyline = "14"
 # Ch07: `StreamExt::next().await` for iterating a `Stream` of bytes.
