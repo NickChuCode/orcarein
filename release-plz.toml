@@ -13,9 +13,14 @@
 # (`version.workspace = true`): release-plz bumps `[workspace.package].version`
 # in the root Cargo.toml plus Cargo.lock.
 changelog_update = true
-# Ch21: publish to crates.io on `release`. Publishes member crates in dependency
-# order (orcarein-core before orcarein) and waits for the index between them.
-publish = true
+# crates.io publishing is OFF for now: v0.2 ships as prebuilt binaries
+# (release.yml on a pushed tag), not crates.io, and no CARGO_REGISTRY_TOKEN is
+# configured — with publishing on, the `release` job hard-errors ("non-empty
+# token") on every main push. Flip back to `true` AND add the CARGO_REGISTRY_TOKEN
+# repo secret when you want to publish member crates (orcarein-core, then
+# orcarein) to crates.io. (crates.io 0.1.0 is already published; 0.2.0 would
+# follow once re-enabled.)
+publish = false
 # Tags + GitHub Releases are owned by release.yml (author-pushed tag), NOT release-plz.
 git_tag_enable = false
 git_release_enable = false
