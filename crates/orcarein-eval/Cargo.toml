@@ -1,0 +1,23 @@
+[package]
+name = "orcarein-eval"
+# Research-track eval harness. Never published (mirrors orcarein-hardware).
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+orcarein-core = { path = "../orcarein-core", version = "0.2.0" }
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+csv.workspace = true
+# tempfile is a RUNTIME dep here (run_case builds a temp workspace), not dev-only.
+tempfile.workspace = true
+
+[dev-dependencies]
+# MockProvider lives in orcarein-core (provider::testing), so no extra dep needed.

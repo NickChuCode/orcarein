@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware"]
+members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware", "crates/orcarein-eval"]
 
 [workspace.package]
 # Ch16: MVP `v0.1.0-mvp`. v0.2.0: terminal UX + session mgmt + cross-SoC hardware
@@ -60,3 +60,6 @@ gpiocdev = "0.8"
 # v0.2 terminal UX: TUI overlay (pager + future GPIO monitor). crossterm is used
 # via `ratatui::crossterm`. Binary-only, behind the `tui` feature.
 ratatui = "0.29"
+# v0.2 research track: CSV export for the eval harness (orcarein-eval only).
+# Eval-only; core/bin never depend on it, so it can't reach a published crate.
+csv = "1"
