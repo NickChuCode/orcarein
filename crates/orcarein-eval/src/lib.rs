@@ -8,4 +8,5 @@
 //! crate compiles green after every task (a `pub mod` for a not-yet-created
 //! file would break `cargo test`).
 
+pub mod metrics;
 pub mod task;
