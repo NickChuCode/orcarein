@@ -29,6 +29,10 @@ pub struct RunConfig {
 pub struct RunRecord {
     pub usage: TokenUsage,
     pub verdict: Verdict,
+    /// Number of tool calls *attempted* — counts `ToolStarted`, which the
+    /// engine emits before the permission check, so a tool denied by the
+    /// `AllowlistPolicy` still counts. Equal to tools executed when the
+    /// allowlist permits everything the run calls.
     pub steps: usize,
     pub wall_ms: u64,
     pub ttft_ms: Option<u64>,

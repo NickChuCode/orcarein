@@ -4,8 +4,9 @@
 //!   cargo run -p orcarein-eval --bin eval -- \
 //!     --configs economy,benchmark --repeat 3 --out results/ --model deepseek-v4-flash
 //!
-//! Reads the API key from $DEEPSEEK_API_KEY. With no key, only `--dry-run`
-//! (Mock provider) works.
+//! Reads the API key from $DEEPSEEK_API_KEY (env only; never written to disk).
+//! With no key set, the run errors out before any request. The Mock-provider
+//! path is exercised by the crate's e2e test, not a CLI flag.
 
 use std::path::PathBuf;
 
@@ -65,6 +66,21 @@ async fn main() -> Result<()> {
     let run_id = format!("run-{}", std::process::id()); // stable within one invocation
     let trace_dir = args.out.join(&run_id);
     std::fs::create_dir_all(&trace_dir)?;
+
+    // Reproducibility discipline (spec §6): persist the exact run parameters
+    // alongside the traces. The key is NOT included.
+    let run_config = serde_json::json!({
+        "run_id": run_id,
+        "configs": configs,
+        "repeat": args.repeat,
+        "model": args.model,
+        "max_cases": args.max_cases,
+        "max_iterations": args.max_iterations,
+    });
+    std::fs::write(
+        trace_dir.join("config.json"),
+        serde_json::to_string_pretty(&run_config)?,
+    )?;
 
     let mut rows = Vec::new();
     let mut cells = 0usize;
