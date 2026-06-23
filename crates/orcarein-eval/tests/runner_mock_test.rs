@@ -1,8 +1,8 @@
 use orcarein_core::provider::testing::MockProvider;
+use orcarein_core::CacheMode;
 use orcarein_core::{StreamEvent, TokenUsage};
 use orcarein_eval::runner::{run_case, standard_registry, RunConfig};
 use orcarein_eval::task::{toy_suite, Verdict};
-use orcarein_core::CacheMode;
 
 #[tokio::test]
 async fn run_case_executes_a_write_and_grades_pass() {
@@ -28,7 +28,10 @@ async fn run_case_executes_a_write_and_grades_pass() {
 
     let registry = standard_registry();
     let defs = registry.definitions();
-    let case = toy_suite().into_iter().find(|c| c.id == "create-hello").unwrap();
+    let case = toy_suite()
+        .into_iter()
+        .find(|c| c.id == "create-hello")
+        .unwrap();
     let cfg = RunConfig {
         cache_mode: CacheMode::Economy,
         model: "mock-model".into(),
@@ -36,7 +39,9 @@ async fn run_case_executes_a_write_and_grades_pass() {
         max_iterations: 4,
     };
 
-    let rec = run_case(&case, &cfg, &provider, &registry, &defs).await.unwrap();
+    let rec = run_case(&case, &cfg, &provider, &registry, &defs)
+        .await
+        .unwrap();
 
     assert_eq!(rec.verdict, Verdict::Pass);
     assert_eq!(rec.usage.prompt_tokens, 1000);

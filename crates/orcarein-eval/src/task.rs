@@ -45,14 +45,11 @@ pub fn toy_suite() -> Vec<EvalCase> {
     vec![
         EvalCase {
             id: "create-hello".into(),
-            prompt: "Create a file named hello.txt whose contents are exactly: hello world"
-                .into(),
+            prompt: "Create a file named hello.txt whose contents are exactly: hello world".into(),
             setup: empty_setup,
-            grader: |dir| {
-                match std::fs::read_to_string(dir.join("hello.txt")) {
-                    Ok(s) if s.contains("hello world") => Verdict::Pass,
-                    _ => Verdict::Fail,
-                }
+            grader: |dir| match std::fs::read_to_string(dir.join("hello.txt")) {
+                Ok(s) if s.contains("hello world") => Verdict::Pass,
+                _ => Verdict::Fail,
             },
         },
         EvalCase {
@@ -60,11 +57,9 @@ pub fn toy_suite() -> Vec<EvalCase> {
             prompt: "There is a file notes.txt. Append a new line containing the word DONE to it."
                 .into(),
             setup: |dir| std::fs::write(dir.join("notes.txt"), "first line\n"),
-            grader: |dir| {
-                match std::fs::read_to_string(dir.join("notes.txt")) {
-                    Ok(s) if s.contains("first line") && s.contains("DONE") => Verdict::Pass,
-                    _ => Verdict::Fail,
-                }
+            grader: |dir| match std::fs::read_to_string(dir.join("notes.txt")) {
+                Ok(s) if s.contains("first line") && s.contains("DONE") => Verdict::Pass,
+                _ => Verdict::Fail,
             },
         },
     ]

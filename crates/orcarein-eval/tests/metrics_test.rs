@@ -15,7 +15,17 @@ fn usage(prompt: u64, hit: u64, miss: u64, completion: u64) -> TokenUsage {
 #[test]
 fn aggregate_carries_tokens_and_computes_cache_hit_rate() {
     let u = usage(1000, 800, 200, 100);
-    let m: TaskMetrics = aggregate(&u, Verdict::Pass, 3, 1200, Some(80), "create-hello", "economy", 0, "deepseek-v4-flash");
+    let m: TaskMetrics = aggregate(
+        &u,
+        Verdict::Pass,
+        3,
+        1200,
+        Some(80),
+        "create-hello",
+        "economy",
+        0,
+        "deepseek-v4-flash",
+    );
 
     assert_eq!(m.task_id, "create-hello");
     assert_eq!(m.config, "economy");
@@ -38,7 +48,17 @@ fn aggregate_carries_tokens_and_computes_cache_hit_rate() {
 #[test]
 fn aggregate_unknown_model_zeroes_cost_fields() {
     let u = usage(1000, 800, 200, 100);
-    let m = aggregate(&u, Verdict::Fail, 1, 50, None, "x", "benchmark", 2, "gpt-4o");
+    let m = aggregate(
+        &u,
+        Verdict::Fail,
+        1,
+        50,
+        None,
+        "x",
+        "benchmark",
+        2,
+        "gpt-4o",
+    );
     // Unknown model => cost::estimate returns None => cost/cache fields are 0.
     assert_eq!(m.spent_usd, 0.0);
     assert_eq!(m.saved_usd, 0.0);

@@ -70,7 +70,11 @@ async fn main() -> Result<()> {
     let mut cells = 0usize;
     'outer: for case in &suite {
         // Allow the risky tools the toy suite needs.
-        let allow = vec!["write_file".to_string(), "edit".to_string(), "read_file".to_string()];
+        let allow = vec![
+            "write_file".to_string(),
+            "edit".to_string(),
+            "read_file".to_string(),
+        ];
         for cfg_name in &configs {
             let cache_mode = parse_config(cfg_name)?;
             for r in 0..args.repeat {
@@ -85,8 +89,7 @@ async fn main() -> Result<()> {
                 };
                 let rec = run_case(case, &cfg, &provider, &registry, &defs).await?;
                 // Persist the full trace as JSONL.
-                let trace_path =
-                    trace_dir.join(format!("{}-{}-{}.jsonl", case.id, cfg_name, r));
+                let trace_path = trace_dir.join(format!("{}-{}-{}.jsonl", case.id, cfg_name, r));
                 let lines: Vec<String> = rec
                     .trace
                     .iter()
@@ -95,8 +98,15 @@ async fn main() -> Result<()> {
                 std::fs::write(&trace_path, lines.join("\n"))?;
 
                 let m = aggregate(
-                    &rec.usage, rec.verdict, rec.steps, rec.wall_ms, rec.ttft_ms,
-                    &case.id, cfg_name, r, &args.model,
+                    &rec.usage,
+                    rec.verdict,
+                    rec.steps,
+                    rec.wall_ms,
+                    rec.ttft_ms,
+                    &case.id,
+                    cfg_name,
+                    r,
+                    &args.model,
                 );
                 println!(
                     "{:>14} {:>9} #{r}: {} hit={:.2} ${:.5}",
@@ -120,8 +130,14 @@ mod tests {
 
     #[test]
     fn parse_config_maps_known_names() {
-        assert!(matches!(parse_config("economy").unwrap(), CacheMode::Economy));
-        assert!(matches!(parse_config("benchmark").unwrap(), CacheMode::Benchmark));
+        assert!(matches!(
+            parse_config("economy").unwrap(),
+            CacheMode::Economy
+        ));
+        assert!(matches!(
+            parse_config("benchmark").unwrap(),
+            CacheMode::Benchmark
+        ));
         assert!(parse_config("bogus").is_err());
     }
 }

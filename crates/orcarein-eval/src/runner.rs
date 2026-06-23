@@ -57,16 +57,19 @@ struct CollectingSink {
 
 impl CollectingSink {
     fn new(started: Instant) -> Self {
-        CollectingSink { events: Vec::new(), tool_starts: 0, started, ttft_ms: None }
+        CollectingSink {
+            events: Vec::new(),
+            tool_starts: 0,
+            started,
+            ttft_ms: None,
+        }
     }
 }
 
 impl EventSink for CollectingSink {
     fn emit(&mut self, event: AgentEvent) {
         match &event {
-            AgentEvent::Content(_) | AgentEvent::Reasoning(_)
-                if self.ttft_ms.is_none() =>
-            {
+            AgentEvent::Content(_) | AgentEvent::Reasoning(_) if self.ttft_ms.is_none() => {
                 self.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
             }
             AgentEvent::Content(_) | AgentEvent::Reasoning(_) => {}

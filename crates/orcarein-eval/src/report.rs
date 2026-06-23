@@ -11,9 +11,20 @@ use crate::metrics::TaskMetrics;
 pub fn write_csv(rows: &[TaskMetrics], out: &Path) -> Result<()> {
     let mut w = csv::Writer::from_path(out)?;
     w.write_record([
-        "task_id", "config", "repeat", "verdict", "steps", "prompt_tokens",
-        "cached_tokens", "cache_hit_rate", "completion_tokens", "spent_usd",
-        "saved_usd", "input_saved_pct", "wall_ms", "ttft_ms",
+        "task_id",
+        "config",
+        "repeat",
+        "verdict",
+        "steps",
+        "prompt_tokens",
+        "cached_tokens",
+        "cache_hit_rate",
+        "completion_tokens",
+        "spent_usd",
+        "saved_usd",
+        "input_saved_pct",
+        "wall_ms",
+        "ttft_ms",
     ])?;
     for r in rows {
         w.write_record([
@@ -45,10 +56,20 @@ mod tests {
 
     fn row(id: &str, cfg: &str, hit_rate: f64) -> TaskMetrics {
         TaskMetrics {
-            task_id: id.into(), config: cfg.into(), repeat: 0, verdict: Verdict::Pass,
-            steps: 2, prompt_tokens: 1000, cached_tokens: 800, cache_hit_rate: hit_rate,
-            completion_tokens: 50, spent_usd: 0.001, saved_usd: 0.01,
-            input_saved_pct: 0.9, wall_ms: 500, ttft_ms: Some(40),
+            task_id: id.into(),
+            config: cfg.into(),
+            repeat: 0,
+            verdict: Verdict::Pass,
+            steps: 2,
+            prompt_tokens: 1000,
+            cached_tokens: 800,
+            cache_hit_rate: hit_rate,
+            completion_tokens: 50,
+            spent_usd: 0.001,
+            saved_usd: 0.01,
+            input_saved_pct: 0.9,
+            wall_ms: 500,
+            ttft_ms: Some(40),
         }
     }
 
