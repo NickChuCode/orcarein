@@ -7,3 +7,5 @@
 //! Module declarations are added incrementally, one per task below, so the
 //! crate compiles green after every task (a `pub mod` for a not-yet-created
 //! file would break `cargo test`).
+
+pub mod task;
