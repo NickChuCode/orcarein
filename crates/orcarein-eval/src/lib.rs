@@ -9,4 +9,5 @@
 //! file would break `cargo test`).
 
 pub mod metrics;
+pub mod report;
 pub mod task;
