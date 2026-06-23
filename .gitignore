@@ -5,6 +5,11 @@ target/
 .env
 *.session.json
 
+# orcarein-eval run artifacts: CSV metrics + JSONL traces from API runs.
+# Cost/usage data stays out of the public repo, wherever --out points.
+results/
+**/results/
+
 # IDE files
 .idea/
 .vscode/
