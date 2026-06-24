@@ -43,6 +43,10 @@ toml = { workspace = true }
 # default; the binary opts in.
 mcp = []
 
+[[bin]]
+name = "mock_mcp_server"
+required-features = ["mcp"]
+
 [dev-dependencies]
 # Ch10: integration test for ReadFileTool needs scratch files.
 tempfile = { workspace = true }

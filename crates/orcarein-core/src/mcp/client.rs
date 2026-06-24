@@ -1,18 +1,27 @@
 //! Protocol orchestration (generic, duplex-testable) + the concrete
-//! `McpClient` (added in a later task).
+//! `McpClient` (spawn + mutex-guarded connection + sync Drop kill).
+
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::protocol::{
     InitializeResult, RemoteTool, ToolCallResult, ToolsListResult, PROTOCOL_VERSION,
 };
 use super::transport::McpConnection;
 use super::McpError;
+use crate::config::McpServerConfig;
+
+// ---------------------------------------------------------------------------
+// Low-level protocol ops (generic over R/W — used directly in unit tests
+// via in-process duplex streams; also called by McpClient below).
+// ---------------------------------------------------------------------------
 
 /// Runs the MCP handshake: `initialize` request, then the
 /// `notifications/initialized` notification.
-#[allow(dead_code)]
 pub(crate) async fn initialize<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     conn: &mut McpConnection<R, W>,
 ) -> Result<InitializeResult, McpError> {
@@ -28,7 +37,6 @@ pub(crate) async fn initialize<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// Fetches the server's advertised tools.
-#[allow(dead_code)]
 pub(crate) async fn fetch_tools<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     conn: &mut McpConnection<R, W>,
 ) -> Result<Vec<RemoteTool>, McpError> {
@@ -39,7 +47,6 @@ pub(crate) async fn fetch_tools<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
 /// Calls one tool and returns its concatenated text content.
 /// `isError: true` -> `McpError`.
-#[allow(dead_code)]
 pub(crate) async fn invoke_tool<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     conn: &mut McpConnection<R, W>,
     name: &str,
@@ -61,6 +68,70 @@ pub(crate) async fn invoke_tool<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         )));
     }
     Ok(text)
+}
+
+// ---------------------------------------------------------------------------
+// Concrete client: spawns a subprocess and owns its stdio connection.
+// ---------------------------------------------------------------------------
+
+/// A live connection to one stdio MCP server.
+///
+/// `child` is a `std::sync::Mutex` (not tokio's) so `Drop` can lock it
+/// synchronously to kill the process. `conn` is async (request/response run on
+/// the runtime).
+pub struct McpClient {
+    pub name: String,
+    child: std::sync::Mutex<Child>,
+    conn: AsyncMutex<McpConnection<ChildStdout, ChildStdin>>,
+}
+
+impl McpClient {
+    /// Spawns the server, wires its stdio, and runs the handshake.
+    pub async fn connect(cfg: &McpServerConfig) -> Result<Arc<Self>, McpError> {
+        let mut child = Command::new(&cfg.command)
+            .args(&cfg.args)
+            .envs(cfg.env.iter())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map_err(McpError::Spawn)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Protocol("no stdout".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Protocol("no stdin".into()))?;
+        let mut conn = McpConnection::new(stdout, stdin);
+        initialize(&mut conn).await?;
+        Ok(Arc::new(McpClient {
+            name: cfg.name.clone(),
+            child: std::sync::Mutex::new(child),
+            conn: AsyncMutex::new(conn),
+        }))
+    }
+
+    pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, McpError> {
+        let mut conn = self.conn.lock().await;
+        fetch_tools(&mut conn).await
+    }
+
+    pub async fn call_tool(&self, remote_name: &str, args: Value) -> Result<String, McpError> {
+        let mut conn = self.conn.lock().await;
+        invoke_tool(&mut conn, remote_name, args).await
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        // Sync context: no .await, no tokio Mutex. start_kill is non-reaping
+        // SIGKILL; try_lock avoids blocking. Best-effort.
+        if let Ok(mut c) = self.child.try_lock() {
+            let _ = c.start_kill();
+        }
+    }
 }
 
 #[cfg(test)]
