@@ -37,11 +37,16 @@ tracing-subscriber = { workspace = true }
 ratatui = { workspace = true, optional = true }
 
 [features]
-default = ["tui"]
+default = ["tui", "mcp"]
 # Compile the alt-screen overlay (pager now; GPIO live monitor later). At
 # runtime the overlay is still capability-gated (non-tty / TERM=dumb / serial /
 # headless → plain print), so this only controls whether the code is built in.
 tui = ["dep:ratatui"]
+# Enable the hand-rolled MCP client and register MCP-server tools at session
+# startup. Default-on so that a config.toml [mcp_servers] block is picked up
+# out of the box. Turn off with --no-default-features for a lean headless build
+# that has no MCP overhead.
+mcp = ["orcarein-core/mcp"]
 # Compile the `orcarein hw` subcommand (GPIO live monitor). OFF by default: the
 # hardware wedge is experimental and orcarein-hardware isn't on crates.io yet,
 # so the published binary stays clean of a hardware command. Pure cfg flag for

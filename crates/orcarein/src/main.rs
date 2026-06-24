@@ -827,7 +827,13 @@ async fn main() -> Result<()> {
     };
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
 
-    let registry = build_registry(tools_allowlist.as_deref());
+    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    let mut registry = build_registry(tools_allowlist.as_deref());
+    #[cfg(feature = "mcp")]
+    let _mcp_clients = {
+        let mcp_cfg = orcarein_core::Config::load().unwrap_or_default();
+        orcarein_core::mcp::setup_servers(&mcp_cfg.mcp_servers, &mut registry).await
+    };
     let tool_defs = registry.definitions();
 
     println!("OrcaRein — chat with {model}. /help for commands, Ctrl+D to quit.");
@@ -1116,7 +1122,13 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         ..
     } = resolved;
 
-    let registry = build_registry(tools_allowlist.as_deref());
+    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    let mut registry = build_registry(tools_allowlist.as_deref());
+    #[cfg(feature = "mcp")]
+    let _mcp_clients = {
+        let mcp_cfg = orcarein_core::Config::load().unwrap_or_default();
+        orcarein_core::mcp::setup_servers(&mcp_cfg.mcp_servers, &mut registry).await
+    };
     let tool_defs = registry.definitions();
     let agent =
         Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(cli));
