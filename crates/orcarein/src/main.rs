@@ -898,6 +898,7 @@ async fn main() -> Result<()> {
                 created_at_ms,
                 &model,
                 last_prompt_tokens,
+                &registry.names(),
             ) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
@@ -1243,9 +1244,41 @@ fn run_show(path: &str) {
     }
 }
 
+/// Formats the registry's tool names for the `/tools` command, splitting
+/// built-in tools from MCP-provided ones (`mcp__<server>__<tool>`) so the user
+/// can confirm at a glance which MCP servers loaded.
+fn format_tool_list(names: &[&str]) -> String {
+    let mcp: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| n.starts_with("mcp__"))
+        .collect();
+    let builtin: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| !n.starts_with("mcp__"))
+        .collect();
+    let fmt = |v: &[&str]| {
+        if v.is_empty() {
+            "（无）".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    format!(
+        "工具（{}）：\n  内置（{}）：{}\n  MCP（{}）：{}",
+        names.len(),
+        builtin.len(),
+        fmt(&builtin),
+        mcp.len(),
+        fmt(&mcp),
+    )
+}
+
 /// Handles a slash command (the leading `/` already stripped). Takes the
-/// session store + active id so `/save` can persist on demand, plus the model
-/// and last turn's prompt-token count so `/usage` can show context fill + cost.
+/// session store + active id so `/save` can persist on demand, the model
+/// and last turn's prompt-token count so `/usage` can show context fill + cost,
+/// and the registered tool names for `/tools`.
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     cmd: &str,
@@ -1255,6 +1288,7 @@ fn handle_command(
     created_at_ms: u64,
     model: &str,
     last_prompt_tokens: u64,
+    tool_names: &[&str],
 ) -> CommandAction {
     // Split into a verb and an optional argument so `/show <path>` works while
     // bare verbs (`/clear`) still match.
@@ -1298,6 +1332,10 @@ fn handle_command(
         }
         // `/show` and `/history` render through the pager. They are pure
         // presentation — neither pushes anything into the session.
+        "tools" => {
+            println!("{}", format_tool_list(tool_names));
+            CommandAction::Continue
+        }
         "show" => {
             run_show(arg);
             CommandAction::Continue
@@ -1315,6 +1353,7 @@ fn handle_command(
             println!("  /clear         清空会话（保留 system prompt）");
             println!("  /save          立即保存会话到磁盘（每轮也会自动保存）");
             println!("  /usage, /context  token 用量 + 上下文占用 + 成本");
+            println!("  /tools         列出当前可用工具（内置 + MCP）");
             println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
             println!("  /history       分页查看本次对话记录");
             println!("  /help          这条帮助");
@@ -1753,6 +1792,27 @@ mod tests {
         assert_eq!(resolve_pick("0", &s), None); // menu is 1-based
         assert_eq!(resolve_pick("3", &s), None); // past the end
         assert_eq!(resolve_pick("-1", &s), None);
+    }
+
+    #[test]
+    fn format_tool_list_groups_builtin_and_mcp() {
+        let names = ["edit", "mcp__fs__read", "read_file", "mcp__fs__list"];
+        let out = format_tool_list(&names);
+        assert!(out.contains("工具（4）"), "shows total count: {out}");
+        assert!(out.contains("内置（2）"));
+        assert!(out.contains("edit"));
+        assert!(out.contains("read_file"));
+        assert!(out.contains("MCP（2）"));
+        assert!(out.contains("mcp__fs__read"));
+        assert!(out.contains("mcp__fs__list"));
+    }
+
+    #[test]
+    fn format_tool_list_no_mcp_shows_none() {
+        let names = ["read_file", "write_file"];
+        let out = format_tool_list(&names);
+        assert!(out.contains("工具（2）"));
+        assert!(out.contains("MCP（0）：（无）"), "no-MCP marker: {out}");
     }
 
     #[test]
