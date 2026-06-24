@@ -8,6 +8,8 @@ pub mod config;
 pub mod cost;
 pub mod doctor;
 pub mod github;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod message;
 pub mod permission;
 pub mod provider;

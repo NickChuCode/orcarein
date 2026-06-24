@@ -37,6 +37,12 @@ directories = { workspace = true }
 # Ch14: (de)serialize Config and Secrets to/from TOML on disk.
 toml = { workspace = true }
 
+[features]
+# Hand-rolled MCP (Model Context Protocol) stdio client. No new deps — uses
+# tokio (process/io/sync via "full") + serde_json already present. Off by
+# default; the binary opts in.
+mcp = []
+
 [dev-dependencies]
 # Ch10: integration test for ReadFileTool needs scratch files.
 tempfile = { workspace = true }
