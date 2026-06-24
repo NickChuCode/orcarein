@@ -61,6 +61,26 @@ pub struct Config {
     /// Override for the system prompt that steers the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// MCP servers to launch and expose tools from. Empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// One MCP server the client should launch and expose tools from.
+///
+/// Defined here (not under the `mcp` feature) so `Config` compiles
+/// regardless of the feature; `crate::mcp` re-exports it. Derives must match
+/// `Config`'s (Debug/Clone/PartialEq/Eq/Serialize/Deserialize).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Logical name; tools surface as `mcp__<name>__<tool>`.
+    pub name: String,
+    /// Executable to launch (e.g. `npx`).
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// The qualifier/org/app triple identifying OrcaRein's config directory.
@@ -367,5 +387,35 @@ mod tests {
         s.save_to(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn config_roundtrips_mcp_servers() {
+        let toml_src = r#"
+[[mcp_servers]]
+name = "fs"
+command = "npx"
+args = ["-y", "server-filesystem", "/tmp"]
+[mcp_servers.env]
+TOKEN = "x"
+"#;
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.mcp_servers.len(), 1);
+        assert_eq!(cfg.mcp_servers[0].name, "fs");
+        assert_eq!(cfg.mcp_servers[0].command, "npx");
+        assert_eq!(
+            cfg.mcp_servers[0].args,
+            vec!["-y", "server-filesystem", "/tmp"]
+        );
+        assert_eq!(
+            cfg.mcp_servers[0].env.get("TOKEN").map(String::as_str),
+            Some("x")
+        );
+
+        // Default has no servers and round-trips clean (skip_serializing_if).
+        let empty = Config::default();
+        assert!(empty.mcp_servers.is_empty());
+        let s = toml::to_string(&empty).unwrap();
+        assert!(!s.contains("mcp_servers"));
     }
 }
