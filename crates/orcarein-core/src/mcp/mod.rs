@@ -5,6 +5,7 @@
 //! registered into the existing registry. See the design spec for scope.
 
 pub mod protocol;
+pub mod transport;
 
 /// Errors from the MCP client.
 #[derive(Debug, thiserror::Error)]
