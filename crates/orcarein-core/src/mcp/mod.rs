@@ -4,6 +4,7 @@
 //! `tools/call`. Remote tools are adapted to [`crate::tool::Tool`] and
 //! registered into the existing registry. See the design spec for scope.
 
+pub mod client;
 pub mod protocol;
 pub mod transport;
 

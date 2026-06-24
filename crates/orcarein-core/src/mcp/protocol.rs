@@ -40,6 +40,15 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
+/// `initialize` result.
+#[derive(Debug, Deserialize)]
+pub struct InitializeResult {
+    #[serde(rename = "protocolVersion", default)]
+    pub protocol_version: String,
+    #[serde(rename = "serverInfo", default)]
+    pub server_info: Value,
+}
+
 /// `tools/list` result.
 #[derive(Debug, Deserialize)]
 pub struct ToolsListResult {
