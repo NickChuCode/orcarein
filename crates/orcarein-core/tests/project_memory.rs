@@ -1,5 +1,5 @@
 //! Integration tests for project-memory discovery/loading (v02-20).
-use orcarein_core::find_agents_md;
+use orcarein_core::{find_agents_md, format_memory_block, load_project_memory};
 use tempfile::tempdir;
 
 #[test]
@@ -46,4 +46,47 @@ fn skips_a_directory_named_agents_md_and_continues_up() {
         dir.path().join("AGENTS.md"),
         "dir named AGENTS.md must be skipped"
     );
+}
+
+#[test]
+fn loads_content_untruncated() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), "build with cargo").unwrap();
+    let mem = load_project_memory(dir.path()).unwrap();
+    assert_eq!(mem.content, "build with cargo");
+    assert!(!mem.truncated);
+}
+
+#[test]
+fn empty_or_whitespace_file_is_skipped() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), "   \n\t\n").unwrap();
+    assert!(load_project_memory(dir.path()).is_none());
+}
+
+#[test]
+fn truncates_on_a_char_boundary_yielding_valid_utf8() {
+    let dir = tempdir().unwrap();
+    // 3-byte chars: 32 KiB is not a multiple of 3, so the byte cap lands
+    // mid-character. The result must still be valid UTF-8.
+    let big = "世".repeat(20_000); // 60_000 bytes > 32 KiB
+    std::fs::write(dir.path().join("AGENTS.md"), &big).unwrap();
+    let mem = load_project_memory(dir.path()).unwrap();
+    assert!(mem.truncated);
+    assert!(mem.content.len() <= 32 * 1024);
+    // Boundary landed on a whole 3-byte char (would have panicked on a mid-char
+    // slice). Pin it explicitly so a buggy boundary walk can't slip through.
+    assert_eq!(mem.content.len() % 3, 0);
+    assert!(mem.content.chars().all(|c| c == '世'));
+}
+
+#[test]
+fn format_block_has_delimiter_and_truncation_notice() {
+    let plain = format_memory_block("hello", false);
+    assert!(plain.contains("# Project context (from AGENTS.md)"));
+    assert!(plain.contains("hello"));
+    assert!(!plain.contains("truncated"));
+
+    let cut = format_memory_block("hello", true);
+    assert!(cut.contains("truncated to 32 KiB"));
 }
