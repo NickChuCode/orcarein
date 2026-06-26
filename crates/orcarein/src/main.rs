@@ -49,6 +49,7 @@ const KNOWN_TOOLS: &[&str] = &[
 enum CommandAction {
     Continue,
     Quit,
+    RunInit,
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -753,6 +754,58 @@ fn init_precondition(cwd: &std::path::Path) -> InitDecision {
     }
 }
 
+/// `/init`: have the agent explore the repo and write AGENTS.md. Provider is a
+/// parameter so this is testable with `MockProvider`. Never propagates errors
+/// — the REPL must survive a failed command.
+async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path) {
+    match init_precondition(cwd) {
+        InitDecision::Exists => {
+            println!("AGENTS.md exists; delete it first to regenerate.");
+            return;
+        }
+        InitDecision::ProceedShadowing(parent) => {
+            println!(
+                "note: a parent AGENTS.md at {} is currently active; \
+                 creating one here will shadow it.",
+                parent.display()
+            );
+        }
+        InitDecision::Proceed => {}
+    }
+
+    // Read-only exploration + the single write. No bash/edit.
+    let init_tools: Vec<String> = ["search", "read_file", "list_dir", "write_file"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let registry = build_registry(Some(&init_tools));
+    let tool_defs = registry.definitions();
+    let agent =
+        Agent::new(provider, &registry, &tool_defs).with_max_iterations(ISSUE_MAX_ITERATIONS);
+
+    // read_file is Safe (always allowed); allowlist the Risky read-only + write.
+    let mut policy: Box<dyn PermissionPolicy> =
+        Box::new(AllowlistPolicy::from_allowed(["search", "list_dir", "write_file"]));
+
+    let system = "You are OrcaRein, initializing AGENTS.md for this repository. \
+        Explore the project with search, read_file, and list_dir, then write a concise \
+        AGENTS.md at the repository root using write_file. Include sections: Project (one \
+        line on purpose), Build & Test (the real commands), Conventions, and Layout. Write \
+        only facts you verified from the repository. Keep it short. The working directory is \
+        the repository root.";
+    let mut session = Session::new(system);
+    session.push_user("Initialize AGENTS.md for this repository.");
+
+    let mut sink = IssueSink; // reuse the issue path's quiet, operator-facing sink
+    match agent
+        .run_turn(&mut session, model, policy.as_mut(), &mut sink)
+        .await
+    {
+        Ok(outcome) => println!("\n{}", outcome.content.trim_end()),
+        Err(e) => eprintln!("/init failed: {e:#}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -962,6 +1015,11 @@ async fn main() -> Result<()> {
             ) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
+                CommandAction::RunInit => {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                    handle_init(provider.as_ref(), &model, &cwd).await;
+                    continue;
+                }
             }
         }
 
@@ -1403,6 +1461,7 @@ fn handle_command(
             run_show(arg);
             CommandAction::Continue
         }
+        "init" => CommandAction::RunInit,
         "history" => {
             let transcript = render_transcript(session);
             if let Err(e) = overlay::show_paged("对话记录", &transcript) {
@@ -1419,6 +1478,7 @@ fn handle_command(
             println!("  /tools         列出当前可用工具（内置 + MCP）");
             println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
             println!("  /history       分页查看本次对话记录");
+            println!("  /init          让 agent 探索仓库并生成 AGENTS.md（项目记忆）");
             println!("  /help          这条帮助");
             CommandAction::Continue
         }
@@ -1664,6 +1724,29 @@ mod tests {
         // The system prompt is messages()[0] (a system Message); resume reuses it verbatim.
         let system = &session.messages()[0].content;
         assert_eq!(system.matches("# Project context").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_init_runs_a_turn_that_writes_agents_md() {
+        use orcarein_core::MockProvider;
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("AGENTS.md");
+
+        // Script the model: one tool call writing AGENTS.md, then a final summary.
+        let provider = MockProvider::new();
+        let args = format!(
+            r##"{{"path":"{}","content":"# Project\nDemo."}}"##,
+            target.display().to_string().replace('\\', "\\\\")
+        );
+        provider.push_tool_call("c1", "write_file", &args);
+        provider.push_text("Wrote AGENTS.md.");
+
+        super::handle_init(&provider, "mock-model", dir.path()).await;
+
+        assert!(target.is_file(), "handle_init should have written AGENTS.md");
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert!(body.contains("# Project"));
     }
 
     #[test]
