@@ -54,3 +54,7 @@ mcp = ["orcarein-core/mcp"]
 # when orcarein-hardware ships, this feature will also pull it in for the real
 # pin-reading adapter. Build/run with `--features hardware`.
 hardware = []
+
+[dev-dependencies]
+# v02-20: scratch dirs for project-memory injection tests.
+tempfile = { workspace = true }

@@ -706,6 +706,30 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
     registry
 }
 
+/// Loads the repo's AGENTS.md (walking up from `cwd`) and returns the
+/// formatted block to append to a system prompt, or `None`. Logs via
+/// `tracing` (silent by default) so headless stdout/stderr stay clean.
+fn project_memory_block(cwd: &std::path::Path) -> Option<String> {
+    let mem = orcarein_core::load_project_memory(cwd)?;
+    tracing::info!(
+        path = %mem.path.display(),
+        bytes = mem.content.len(),
+        truncated = mem.truncated,
+        "loaded AGENTS.md"
+    );
+    Some(orcarein_core::format_memory_block(&mem.content, mem.truncated))
+}
+
+/// Base persona prompt + the project-memory block (if any). Used ONLY for a
+/// fresh session — a resumed session keeps its frozen prompt, consistent with
+/// how `config.system_prompt` already behaves.
+fn fresh_session_prompt(base: String, cwd: &std::path::Path) -> String {
+    match project_memory_block(cwd) {
+        Some(block) => format!("{base}{block}"),
+        None => base,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -830,7 +854,12 @@ async fn main() -> Result<()> {
         }
         None => {
             let created = SessionStore::now_ms();
-            (Session::new(&system_prompt), created.to_string(), created)
+            // Inject project memory into the fresh-session prompt only. A resumed
+            // session keeps its frozen prompt (consistent with config.system_prompt),
+            // so a changed AGENTS.md takes effect on the next new session.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let prompt = fresh_session_prompt(system_prompt, &cwd);
+            (Session::new(&prompt), created.to_string(), created)
         }
     };
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
@@ -1154,6 +1183,9 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         Box::new(AllowlistPolicy::deny_all())
     };
 
+    // Inject project memory (AGENTS.md) into the headless run prompt too.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let system_prompt = fresh_session_prompt(system_prompt, &cwd);
     let mut session = Session::new(&system_prompt);
     session.push_user(&prompt);
 
@@ -1504,6 +1536,9 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
          The working directory is the repository root. When you are done, briefly summarize what \
          you changed."
     );
+    // The issue fix benefits most from project context — inject AGENTS.md here too.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let system = fresh_session_prompt(system, &cwd);
     let mut session = Session::new(system);
     session.push_user(format!(
         "Issue #{number}: {}\n\n{}",
@@ -1563,6 +1598,50 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use orcarein_core::Message;
+
+    #[test]
+    fn project_memory_block_appends_when_present_and_skips_when_absent() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+
+        // Absent -> None.
+        assert!(super::project_memory_block(dir.path()).is_none());
+
+        // Present -> Some block carrying the delimiter + content.
+        std::fs::write(dir.path().join("AGENTS.md"), "use cargo test").unwrap();
+        let block = super::project_memory_block(dir.path()).expect("present -> Some");
+        assert!(block.contains("# Project context"));
+        assert!(block.contains("use cargo test"));
+    }
+
+    #[test]
+    fn fresh_session_prompt_injects_exactly_one_block() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "facts").unwrap();
+
+        let base = "You are OrcaRein.".to_string();
+        let prompt = super::fresh_session_prompt(base.clone(), dir.path());
+        assert!(prompt.starts_with(&base), "base persona must be preserved");
+        assert_eq!(
+            prompt.matches("# Project context").count(),
+            1,
+            "fresh session injects exactly one block"
+        );
+    }
+
+    #[test]
+    fn resumed_session_prompt_is_used_verbatim_no_reinjection() {
+        // Spec §6 #9: resume keeps the frozen prompt. A session whose prompt was
+        // baked earlier (already carries one block) must not gain a second block
+        // when resumed. The resume branch reuses the loaded Session's prompt as-is
+        // and never calls `fresh_session_prompt`; this guards that invariant.
+        let baked = "You are OrcaRein.\n\n# Project context (from AGENTS.md)\n\nfacts\n";
+        let session = Session::new(baked);
+        // The system prompt is messages()[0] (a system Message); resume reuses it verbatim.
+        let system = &session.messages()[0].content;
+        assert_eq!(system.matches("# Project context").count(), 1);
+    }
 
     #[test]
     fn clap_definition_is_valid() {
