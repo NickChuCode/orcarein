@@ -718,7 +718,10 @@ fn project_memory_block(cwd: &std::path::Path) -> Option<String> {
         truncated = mem.truncated,
         "loaded AGENTS.md"
     );
-    Some(orcarein_core::format_memory_block(&mem.content, mem.truncated))
+    Some(orcarein_core::format_memory_block(
+        &mem.content,
+        mem.truncated,
+    ))
 }
 
 /// Base persona prompt + the project-memory block (if any). Used ONLY for a
@@ -784,8 +787,11 @@ async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path
         Agent::new(provider, &registry, &tool_defs).with_max_iterations(ISSUE_MAX_ITERATIONS);
 
     // read_file is Safe (always allowed); allowlist the Risky read-only + write.
-    let mut policy: Box<dyn PermissionPolicy> =
-        Box::new(AllowlistPolicy::from_allowed(["search", "list_dir", "write_file"]));
+    let mut policy: Box<dyn PermissionPolicy> = Box::new(AllowlistPolicy::from_allowed([
+        "search",
+        "list_dir",
+        "write_file",
+    ]));
 
     let system = "You are OrcaRein, initializing AGENTS.md for this repository. \
         Explore the project with search, read_file, and list_dir, then write a concise \
@@ -1744,7 +1750,10 @@ mod tests {
 
         super::handle_init(&provider, "mock-model", dir.path()).await;
 
-        assert!(target.is_file(), "handle_init should have written AGENTS.md");
+        assert!(
+            target.is_file(),
+            "handle_init should have written AGENTS.md"
+        );
         let body = std::fs::read_to_string(&target).unwrap();
         assert!(body.contains("# Project"));
     }
