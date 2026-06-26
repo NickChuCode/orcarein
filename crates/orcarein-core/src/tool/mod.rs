@@ -21,6 +21,7 @@ pub mod list_dir;
 pub mod protocol;
 pub mod read_file;
 pub mod repair;
+pub mod search;
 pub mod write_file;
 
 pub use bash::BashTool;
@@ -29,6 +30,7 @@ pub use list_dir::ListDirTool;
 pub use protocol::{FunctionCall, FunctionDefinition, ToolCall, ToolDefinition, ToolSchema};
 pub use read_file::ReadFileTool;
 pub use repair::parse_tool_arguments;
+pub use search::SearchTool;
 pub use write_file::WriteFileTool;
 
 use async_trait::async_trait;

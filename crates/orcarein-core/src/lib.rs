@@ -43,6 +43,7 @@ pub use tool::{
     // Ch10 abstraction layer + first tool
     ReadFileTool,
     RiskLevel,
+    SearchTool,
     Tool,
     ToolCall,
     ToolDefinition,

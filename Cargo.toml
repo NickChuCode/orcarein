@@ -63,3 +63,9 @@ ratatui = "0.29"
 # v0.2 research track: CSV export for the eval harness (orcarein-eval only).
 # Eval-only; core/bin never depend on it, so it can't reach a published crate.
 csv = "1"
+# v02-19 `search` tool: ripgrep's directory walker (gitignore-aware traversal,
+# glob overrides, symlink-loop safety) + the RE2-style regex engine (no
+# catastrophic backtracking). See docs/decisions/0001-search-tool-traversal.md.
+# MSRV 1.85 held via Cargo.lock pins if a transitive crate ships a newer floor.
+ignore = "0.4"
+regex = "1"

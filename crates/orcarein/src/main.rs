@@ -15,8 +15,8 @@ use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
     OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RiskLevel,
-    SecretStore, Session, SessionStore, SessionSummary, Tool, ToolRegistry, WriteFileTool,
-    MAX_TOOL_ITERATIONS,
+    SearchTool, SecretStore, Session, SessionStore, SessionSummary, Tool, ToolRegistry,
+    WriteFileTool, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -36,7 +36,14 @@ const DEFAULT_MONITOR_PINS: &[u8] = &[17, 27, 22, 23, 24, 25];
 const DEFAULT_SYSTEM_PROMPT: &str = "You are OrcaRein, a concise and helpful CLI assistant.";
 
 /// Names of every built-in tool — keeps `--tools` typo warnings honest.
-const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "list_dir", "bash", "edit"];
+const KNOWN_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "list_dir",
+    "bash",
+    "edit",
+    "search",
+];
 
 /// Outcome of handling a slash command — whether the loop continues or quits.
 enum CommandAction {
@@ -671,6 +678,7 @@ fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
         Box::new(ListDirTool),
         Box::new(BashTool),
         Box::new(EditTool),
+        Box::new(SearchTool),
     ];
 
     if let Some(list) = allowlist {
@@ -1470,8 +1478,8 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         provider, model, ..
     } = resolve(cli)?;
 
-    // 5. Restricted toolset: read/list/edit/write only — NO shell.
-    let issue_tools: Vec<String> = ["read_file", "list_dir", "edit", "write_file"]
+    // 5. Restricted toolset: read/list/search/edit/write only — NO shell.
+    let issue_tools: Vec<String> = ["read_file", "list_dir", "search", "edit", "write_file"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -1485,14 +1493,16 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
     //    exactly the edit set; read_file is Safe and always allowed.
     let mut policy: Box<dyn PermissionPolicy> = Box::new(AllowlistPolicy::from_allowed([
         "list_dir",
+        "search",
         "edit",
         "write_file",
     ]));
     let system = format!(
         "You are OrcaRein, working as an autonomous maintainer of the repository {owner}/{repo}. \
-         Fix GitHub issue #{number}. Explore the codebase with read_file and list_dir, then make \
-         minimal, focused changes with edit and write_file. Do NOT run shell commands. The working \
-         directory is the repository root. When you are done, briefly summarize what you changed."
+         Fix GitHub issue #{number}. Explore the codebase with search, read_file, and list_dir, \
+         then make minimal, focused changes with edit and write_file. Do NOT run shell commands. \
+         The working directory is the repository root. When you are done, briefly summarize what \
+         you changed."
     );
     let mut session = Session::new(system);
     session.push_user(format!(

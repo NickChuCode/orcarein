@@ -36,6 +36,11 @@ async-stream = { workspace = true }
 directories = { workspace = true }
 # Ch14: (de)serialize Config and Secrets to/from TOML on disk.
 toml = { workspace = true }
+# v02-19: the `search` tool walks the tree with ripgrep's `ignore` (honors
+# .gitignore so it never feeds build artifacts to the model) and matches with
+# `regex`. See docs/decisions/0001-search-tool-traversal.md.
+ignore = { workspace = true }
+regex = { workspace = true }
 
 [features]
 # Hand-rolled MCP (Model Context Protocol) stdio client. No new deps — uses
