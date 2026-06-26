@@ -730,6 +730,29 @@ fn fresh_session_prompt(base: String, cwd: &std::path::Path) -> String {
     }
 }
 
+/// Whether `/init` may write AGENTS.md in `cwd`.
+#[derive(Debug)]
+enum InitDecision {
+    /// cwd already has AGENTS.md — refuse (never clobber).
+    Exists,
+    /// No AGENTS.md anywhere up the tree — go ahead.
+    Proceed,
+    /// cwd has none but an ancestor does — writing here shadows it; warn + proceed.
+    ProceedShadowing(std::path::PathBuf),
+}
+
+/// Pure decision for `/init` (no model call, no fs writes).
+fn init_precondition(cwd: &std::path::Path) -> InitDecision {
+    if cwd.join(orcarein_core::memory::AGENTS_FILENAME).is_file() {
+        InitDecision::Exists
+    } else if let Some(found) = orcarein_core::find_agents_md(cwd) {
+        // cwd has none, so any hit is necessarily an ancestor's.
+        InitDecision::ProceedShadowing(found)
+    } else {
+        InitDecision::Proceed
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1641,6 +1664,36 @@ mod tests {
         // The system prompt is messages()[0] (a system Message); resume reuses it verbatim.
         let system = &session.messages()[0].content;
         assert_eq!(system.matches("# Project context").count(), 1);
+    }
+
+    #[test]
+    fn init_precondition_classifies_cwd_parent_and_none() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("child");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Nothing anywhere -> Proceed.
+        assert!(matches!(
+            super::init_precondition(&sub),
+            super::InitDecision::Proceed
+        ));
+
+        // Parent has one, cwd doesn't -> ProceedShadowing(parent file).
+        std::fs::write(dir.path().join("AGENTS.md"), "root").unwrap();
+        match super::init_precondition(&sub) {
+            super::InitDecision::ProceedShadowing(p) => {
+                assert_eq!(p, dir.path().join("AGENTS.md"))
+            }
+            other => panic!("expected ProceedShadowing, got {other:?}"),
+        }
+
+        // cwd has one -> Exists.
+        std::fs::write(sub.join("AGENTS.md"), "child").unwrap();
+        assert!(matches!(
+            super::init_precondition(&sub),
+            super::InitDecision::Exists
+        ));
     }
 
     #[test]
