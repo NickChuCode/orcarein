@@ -50,6 +50,7 @@ enum CommandAction {
     Continue,
     Quit,
     RunInit,
+    RunCompact,
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -757,6 +758,34 @@ fn init_precondition(cwd: &std::path::Path) -> InitDecision {
     }
 }
 
+/// `/compact`: summarize older turns to shrink the prompt. Returns whether it
+/// compacted (so the caller can persist). Never propagates errors.
+async fn handle_compact(provider: &dyn Provider, model: &str, session: &mut Session) -> bool {
+    use orcarein_core::compact::{compact_session, CompactOutcome, KEEP_RECENT_USER_TURNS};
+    match compact_session(session, provider, model, KEEP_RECENT_USER_TURNS).await {
+        Ok(CompactOutcome::Compacted {
+            messages_before,
+            messages_after,
+            chars_before,
+            chars_after,
+        }) => {
+            println!(
+                "已压缩：{messages_before}→{messages_after} 条（约 {chars_before}→{chars_after} 字符）。"
+            );
+            println!("（下次请求会一次性 cache miss——前缀已变；之后在更小前缀上重建，更省。）");
+            true
+        }
+        Ok(CompactOutcome::NothingToDo) => {
+            println!("nothing to compact（历史已经很小）。");
+            false
+        }
+        Err(e) => {
+            eprintln!("/compact 失败：{e:#}");
+            false
+        }
+    }
+}
+
 /// `/init`: have the agent explore the repo and write AGENTS.md. Provider is a
 /// parameter so this is testable with `MockProvider`. Never propagates errors
 /// — the REPL must survive a failed command.
@@ -1024,6 +1053,12 @@ async fn main() -> Result<()> {
                 CommandAction::RunInit => {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
                     handle_init(provider.as_ref(), &model, &cwd).await;
+                    continue;
+                }
+                CommandAction::RunCompact => {
+                    if handle_compact(provider.as_ref(), &model, &mut session).await {
+                        let _ = store.save(&session_id, created_at_ms, &session);
+                    }
                     continue;
                 }
             }
@@ -1468,6 +1503,7 @@ fn handle_command(
             CommandAction::Continue
         }
         "init" => CommandAction::RunInit,
+        "compact" => CommandAction::RunCompact,
         "history" => {
             let transcript = render_transcript(session);
             if let Err(e) = overlay::show_paged("对话记录", &transcript) {
@@ -1485,6 +1521,7 @@ fn handle_command(
             println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
             println!("  /history       分页查看本次对话记录");
             println!("  /init          让 agent 探索仓库并生成 AGENTS.md（项目记忆）");
+            println!("  /compact       压缩较早对话（摘要旧段、保留最近，省 token）");
             println!("  /help          这条帮助");
             CommandAction::Continue
         }
@@ -1730,6 +1767,39 @@ mod tests {
         // The system prompt is messages()[0] (a system Message); resume reuses it verbatim.
         let system = &session.messages()[0].content;
         assert_eq!(system.matches("# Project context").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_compact_shrinks_session_and_returns_true() {
+        use orcarein_core::{MockProvider, Message, Session, StreamEvent, TokenUsage};
+        let mut session = Session::new("SYS");
+        for i in 0..5 {
+            session.push_user(format!("u{i}"));
+            session.push_assistant(Message::assistant(format!("a{i}")));
+        }
+        let before = session.messages().len();
+        let provider = MockProvider::new();
+        provider.push_response(vec![
+            StreamEvent::Content("summary".into()),
+            StreamEvent::Usage(TokenUsage {
+                total_tokens: 5,
+                ..Default::default()
+            }),
+        ]);
+
+        let compacted = super::handle_compact(&provider, "mock-model", &mut session).await;
+        assert!(compacted);
+        assert!(session.messages().len() < before);
+    }
+
+    #[tokio::test]
+    async fn handle_compact_nothing_to_do_returns_false() {
+        use orcarein_core::{MockProvider, Session};
+        let mut session = Session::new("SYS");
+        session.push_user("only one");
+        let provider = MockProvider::new();
+        let compacted = super::handle_compact(&provider, "mock-model", &mut session).await;
+        assert!(!compacted);
     }
 
     #[tokio::test]
