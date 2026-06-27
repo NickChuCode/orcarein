@@ -343,7 +343,9 @@ mod tests {
         assert_eq!(m[0].role, "system");
         assert_eq!(m[0].content, "SYS");
         assert_eq!(m[1].role, "user");
-        assert!(m[1].content.starts_with("[Summary of earlier conversation]"));
+        assert!(m[1]
+            .content
+            .starts_with("[Summary of earlier conversation]"));
         assert!(m[1].content.contains("SUMMARY"));
         assert_eq!(m[2].content, "u2");
         assert_eq!(m[3].content, "a2");

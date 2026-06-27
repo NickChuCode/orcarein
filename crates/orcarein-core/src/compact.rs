@@ -55,7 +55,10 @@ pub async fn compact_session(
 
     // Flatten the old span to plain text — no reasoning/tool-chain replay.
     let span_text = render_span(&session.messages()[1..boundary]);
-    let summarize = vec![Message::system(SUMMARY_INSTRUCTION), Message::user(span_text)];
+    let summarize = vec![
+        Message::system(SUMMARY_INSTRUCTION),
+        Message::user(span_text),
+    ];
     let opts = ChatOptions::new(model);
 
     let mut stream = provider.chat_stream(&summarize, &[], &opts).await?;
@@ -113,8 +116,11 @@ pub fn render_span(messages: &[Message]) -> String {
     for m in messages {
         match m.role.as_str() {
             "assistant" if !m.tool_calls.is_empty() => {
-                let names: Vec<&str> =
-                    m.tool_calls.iter().map(|c| c.function.name.as_str()).collect();
+                let names: Vec<&str> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| c.function.name.as_str())
+                    .collect();
                 let tools = names.join(", ");
                 if m.content.is_empty() {
                     out.push_str(&format!("assistant: [called tool: {tools}]"));
@@ -148,19 +154,28 @@ mod tests {
     #[test]
     fn boundary_keeps_last_two_user_blocks() {
         // [sys,u,a,u,a,u,a] users at 1,3,5; keep=2 -> boundary 3.
-        let m: Vec<Message> =
-            ["system", "user", "assistant", "user", "assistant", "user", "assistant"]
-                .iter()
-                .map(|r| msg(r))
-                .collect();
+        let m: Vec<Message> = [
+            "system",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        .iter()
+        .map(|r| msg(r))
+        .collect();
         assert_eq!(compaction_boundary(&m, 2), Some(3));
         assert_eq!(m[3].role, "user");
     }
 
     #[test]
     fn boundary_none_when_history_short() {
-        let short: Vec<Message> =
-            ["system", "user", "assistant"].iter().map(|r| msg(r)).collect();
+        let short: Vec<Message> = ["system", "user", "assistant"]
+            .iter()
+            .map(|r| msg(r))
+            .collect();
         assert_eq!(compaction_boundary(&short, 2), None);
         // Exactly `keep` user turns -> still None (nothing older to fold).
         let exactly: Vec<Message> = ["system", "user", "assistant", "user", "assistant"]

@@ -1771,7 +1771,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_compact_shrinks_session_and_returns_true() {
-        use orcarein_core::{MockProvider, Message, Session, StreamEvent, TokenUsage};
+        use orcarein_core::{Message, MockProvider, Session, StreamEvent, TokenUsage};
         let mut session = Session::new("SYS");
         for i in 0..5 {
             session.push_user(format!("u{i}"));
