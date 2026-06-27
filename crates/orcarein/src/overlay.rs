@@ -24,12 +24,29 @@ pub fn show_paged(title: &str, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Terminal width in columns; 80 when unknown or under `--no-default-features`.
+/// The single shared width probe — the startup header (`header_env`) and the
+/// overlay surfaces both read width through here so detection lives in one place.
+#[cfg(feature = "tui")]
+pub(crate) fn term_cols() -> u16 {
+    ratatui::crossterm::terminal::size()
+        .map(|(c, _)| c)
+        .unwrap_or(80)
+}
+#[cfg(not(feature = "tui"))]
+pub(crate) fn term_cols() -> u16 {
+    80
+}
+
 /// The non-overlay path: a plain header + the content on the scrolling
 /// terminal. Used when paging is impossible (piped / dumb / headless), when the
 /// content fits one screen, or in `--no-default-features` (no `tui`) builds.
 fn print_in_place(title: &str, content: &str) {
     if !title.is_empty() {
-        println!("── {title} ──");
+        println!(
+            "{}",
+            crate::header::slim_title_bar(crate::header::APP_ICON, title, term_cols())
+        );
     }
     print!("{content}");
     if !content.ends_with('\n') {
@@ -139,6 +156,7 @@ fn highlighted_text<'a>(body: &'a str, query: &str) -> ratatui::text::Text<'a> {
 #[cfg(feature = "tui")]
 fn draw_view(
     terminal: &mut Tui,
+    title: &str,
     body: &str,
     offset: usize,
     query: &str,
@@ -151,15 +169,23 @@ fn draw_view(
 
     let mut viewport_h = 1usize;
     terminal.draw(|f| {
-        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-        viewport_h = (chunks[0].height as usize).max(1);
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(f.area());
+        // Title row: the shared slim title bar (icon + box style).
+        let bar = crate::header::slim_title_bar(crate::header::APP_ICON, title, f.area().width);
+        f.render_widget(Paragraph::new(bar), chunks[0]);
+        viewport_h = (chunks[1].height as usize).max(1);
         f.render_widget(
             Paragraph::new(highlighted_text(body, query)).scroll((offset as u16, 0)),
-            chunks[0],
+            chunks[1],
         );
         let footer = Line::from(footer_fn(viewport_h))
             .style(Style::default().add_modifier(Modifier::REVERSED));
-        f.render_widget(Paragraph::new(footer), chunks[1]);
+        f.render_widget(Paragraph::new(footer), chunks[2]);
     })?;
     Ok(viewport_h)
 }
@@ -170,6 +196,7 @@ fn draw_view(
 #[cfg(feature = "tui")]
 fn read_search_query(
     terminal: &mut Tui,
+    title: &str,
     body: &str,
     offset: usize,
 ) -> std::io::Result<Option<String>> {
@@ -178,7 +205,7 @@ fn read_search_query(
     let mut input = String::new();
     loop {
         // Highlight live as the query is typed.
-        draw_view(terminal, body, offset, &input, |_vh| {
+        draw_view(terminal, title, body, offset, &input, |_vh| {
             format!(" /{input}   Enter 确认 · Esc 取消 ")
         })?;
         let Event::Key(k) = event::read()? else {
@@ -221,7 +248,7 @@ fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
     };
 
     loop {
-        let viewport_h = draw_view(&mut terminal, &body, offset, &query, |vh| {
+        let viewport_h = draw_view(&mut terminal, title, &body, offset, &query, |vh| {
             let end = (offset + vh).min(total);
             let status = if query.is_empty() {
                 String::new()
@@ -249,7 +276,7 @@ fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('/') => {
-                if let Some(q) = read_search_query(&mut terminal, &body, offset)? {
+                if let Some(q) = read_search_query(&mut terminal, title, &body, offset)? {
                     query = q;
                     last_match = find_match(lines, &query, offset, true);
                     jump_to(last_match, &mut offset, max);
@@ -302,7 +329,7 @@ pub enum PagerKey {
 /// in place instead. `term` is `$TERM` (None when unset → treated as capable,
 /// since Windows leaves it unset yet supports VT sequences via crossterm).
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-pub fn overlay_capable(is_tty: bool, term: Option<&str>) -> bool {
+pub(crate) fn overlay_capable(is_tty: bool, term: Option<&str>) -> bool {
     is_tty && term.is_none_or(|t| !t.eq_ignore_ascii_case("dumb"))
 }
 
