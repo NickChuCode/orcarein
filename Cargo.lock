@@ -1051,13 +1051,16 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "directories",
  "futures-util",
  "orcarein-core",
  "ratatui",
  "rustyline",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

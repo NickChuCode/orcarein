@@ -2,13 +2,6 @@
 //! replaces the old multi-line startup banner, plus a slim title bar shared by
 //! overlay surfaces. Pure string rendering — no terminal I/O — so it is fully
 //! unit-tested. See the v02-22 design spec.
-//!
-//! NOTE (v02-22, Tasks 1–4): the public API below is fully built and unit-tested
-//! here, but the call sites that consume it live in the startup banner (Task 5)
-//! and the overlay surfaces (Task 6). Until those land, the bin target sees these
-//! items as dead code. The module-level allow keeps the lint clean during the
-//! incremental build-up and is removed once the wiring tasks consume the API.
-#![allow(dead_code)]
 
 use unicode_width::UnicodeWidthStr;
 

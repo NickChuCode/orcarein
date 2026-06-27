@@ -184,7 +184,6 @@ struct Resolved {
     model: String,
     system_prompt: String,
     tools_allowlist: Option<Vec<String>>,
-    config_path: Option<PathBuf>,
 }
 
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
@@ -248,7 +247,6 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         model,
         system_prompt,
         tools_allowlist,
-        config_path: Config::config_path(),
     })
 }
 
@@ -842,6 +840,21 @@ async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path
     }
 }
 
+/// Terminal width + whether we can draw the fancy box. crossterm is tui-only,
+/// so the non-tui build returns a safe default without referencing it. Width is
+/// read through the single shared `overlay::term_cols` probe.
+#[cfg(feature = "tui")]
+fn header_env() -> (u16, bool) {
+    use std::io::IsTerminal;
+    let term = std::env::var("TERM").ok();
+    let fancy = std::io::stdout().is_terminal() && overlay::overlay_capable(true, term.as_deref());
+    (overlay::term_cols(), fancy)
+}
+#[cfg(not(feature = "tui"))]
+fn header_env() -> (u16, bool) {
+    (80, false)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -954,7 +967,6 @@ async fn main() -> Result<()> {
         model,
         system_prompt,
         tools_allowlist,
-        config_path,
     } = resolved;
 
     // Either continue the resumed session (keeping its id + creation time so
@@ -985,30 +997,33 @@ async fn main() -> Result<()> {
     };
     let tool_defs = registry.definitions();
 
-    println!("OrcaRein — chat with {model}. /help for commands, Ctrl+D to quit.");
-    println!("Provider: {}", provider.name());
-    println!(
-        "Config: {}",
-        config_path
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".to_owned())
-    );
-    println!("Tools: {}", registry.names().join(", "));
-    println!(
-        "Session: {session_id} (auto-saved to {})",
-        store.path_for(&session_id).display()
-    );
-    if cli.no_permission {
-        println!("Permissions: DISABLED (--no-permission)\n");
-    } else {
-        println!(
-            "Permissions: prompt on Risky tools (use --no-permission with piped input to skip)\n"
-        );
-    }
-
-    if cli.no_economy {
-        println!("Cache: economy OFF (benchmark — prefix cache deliberately defeated)\n");
+    {
+        use header::{render_header, status_chips, HeaderModel, APP_ICON};
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let (cols, fancy) = header_env();
+        let model_line = format!("{model} · {}", provider.name());
+        let session_line = format!("{} · auto-saved", header::short_id(&session_id));
+        let hm = HeaderModel {
+            icon: APP_ICON,
+            title: "OrcaRein",
+            identity: vec![
+                ("model", model_line),
+                ("cwd", header::abbreviate_home(&cwd)),
+                ("session", session_line),
+            ],
+            tips: vec![
+                ("/help", "commands"),
+                ("/init", "make AGENTS.md"),
+                ("/compact", "shrink context"),
+            ],
+        };
+        for line in render_header(&hm, cols, fancy) {
+            println!("{line}");
+        }
+        for chip in status_chips(cli.no_permission, cli.no_economy) {
+            println!("{chip}");
+        }
+        println!();
     }
 
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
