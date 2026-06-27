@@ -28,6 +28,34 @@ pub fn compaction_boundary(messages: &[Message], keep: usize) -> Option<usize> {
     Some(user_idxs[user_idxs.len() - keep])
 }
 
+/// Flattens a message span to plain text for the summary call. Deliberately
+/// drops `reasoning_content` and never replays structured `tool_calls`/`tool`
+/// messages (replaying either can 400 DeepSeek V4 / OpenAI-compatible APIs).
+pub fn render_span(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        match m.role.as_str() {
+            "assistant" if !m.tool_calls.is_empty() => {
+                let names: Vec<&str> =
+                    m.tool_calls.iter().map(|c| c.function.name.as_str()).collect();
+                let tools = names.join(", ");
+                if m.content.is_empty() {
+                    out.push_str(&format!("assistant: [called tool: {tools}]"));
+                } else {
+                    out.push_str(&format!("assistant: {} [called tool: {tools}]", m.content));
+                }
+            }
+            "tool" => {
+                let id = m.tool_call_id.as_deref().unwrap_or("");
+                out.push_str(&format!("tool({id}): {}", m.content));
+            }
+            other => out.push_str(&format!("{other}: {}", m.content)),
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +91,39 @@ mod tests {
             .map(|r| msg(r))
             .collect();
         assert_eq!(compaction_boundary(&exactly, 2), None);
+    }
+
+    use crate::{FunctionCall, ToolCall};
+
+    fn asst_with_tool(content: &str, tool: &str) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: content.into(),
+            reasoning_content: Some("SECRET THINKING".into()),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: tool.into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn render_span_flattens_without_reasoning() {
+        let span = vec![
+            Message::user("hello"),
+            asst_with_tool("", "search"),                // tool-only
+            asst_with_tool("thinking out loud", "edit"), // content + tool
+        ];
+        let out = super::render_span(&span);
+        assert!(out.contains("user: hello"));
+        assert!(out.contains("assistant: [called tool: search]"));
+        assert!(out.contains("assistant: thinking out loud [called tool: edit]"));
+        // reasoning_content must NEVER leak into the summary input (V4 400 risk).
+        assert!(!out.contains("SECRET THINKING"));
     }
 }
