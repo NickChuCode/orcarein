@@ -194,6 +194,19 @@ fn render_double_col(m: &HeaderModel, inner: usize) -> Vec<String> {
     out
 }
 
+/// A single-line title bar `╭─ <icon> <title> ─…─╮` exactly `width` wide.
+pub fn slim_title_bar(icon: &str, title: &str, width: u16) -> String {
+    let w = width as usize;
+    if w < 4 {
+        return rule('─', w);
+    }
+    let inner = w - 2; // corners
+    let label = truncate_to_width(&format!("{icon} {title}"), inner.saturating_sub(2));
+    let seg = format!("─ {label} ");
+    let fill = rule('─', inner.saturating_sub(disp_width(&seg)));
+    format!("╭{seg}{fill}╮")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +404,14 @@ mod tests {
             "╰──────────────────────────────────────╯",
         ];
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn slim_title_bar_fills_width_with_corners() {
+        let bar = super::slim_title_bar(APP_ICON, "对话记录", 40);
+        assert_eq!(disp_width(&bar), 40);
+        assert!(bar.starts_with('╭'));
+        assert!(bar.ends_with('╮'));
+        assert!(bar.contains("对话记录"));
     }
 }
