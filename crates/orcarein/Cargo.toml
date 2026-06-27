@@ -28,6 +28,8 @@ rustyline = { workspace = true }
 futures-util = { workspace = true }
 # Ch14: derive-based CLI parsing — `Parser`, subcommands, `--flags`.
 clap = { workspace = true }
+# v02-22: home-dir resolution for abbreviate_home (~ collapse in the header).
+directories = { workspace = true }
 # Ch16: diagnostic logging facade + a stderr subscriber driven by RUST_LOG.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
