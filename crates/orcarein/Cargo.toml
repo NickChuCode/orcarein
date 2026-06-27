@@ -35,6 +35,8 @@ tracing-subscriber = { workspace = true }
 # Optional + behind the `tui` feature (default-on). `--no-default-features`
 # drops it for a lean headless build; pager then degrades to plain printing.
 ratatui = { workspace = true, optional = true }
+# v02-22 TUI 头部：显示宽度计算（CJK 全角=2），CJK 路径/标题对齐。
+unicode-width = { workspace = true }
 
 [features]
 default = ["tui", "mcp"]

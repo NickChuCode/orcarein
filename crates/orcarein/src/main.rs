@@ -23,6 +23,7 @@ use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+mod header;
 #[cfg(feature = "hardware")]
 mod hwmon;
 mod overlay;

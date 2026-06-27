@@ -69,3 +69,5 @@ csv = "1"
 # MSRV 1.85 held via Cargo.lock pins if a transitive crate ships a newer floor.
 ignore = "0.4"
 regex = "1"
+# v02-22 TUI 头部：显示宽度计算（CJK 全角=2）。已在依赖树（ratatui 0.29 拉 0.2.0），tui 开时零新 crate。
+unicode-width = "0.2"
