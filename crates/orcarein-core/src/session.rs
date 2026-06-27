@@ -106,6 +106,22 @@ impl Session {
         self.messages.push(self.system.clone());
     }
 
+    /// Replaces `messages[1..boundary]` with a single summary message, keeping
+    /// the system prompt (index 0) and `messages[boundary..]` verbatim. Used by
+    /// `/compact`. `boundary` must come from `compact::compaction_boundary`.
+    pub fn compact_at(&mut self, boundary: usize, summary: &str) {
+        // boundary always comes from `compaction_boundary` — a real user index
+        // strictly inside the vec (never 0/1, never == len), so there is always
+        // a recent block after the summary.
+        debug_assert!(boundary > 1 && boundary < self.messages.len());
+        let recent = self.messages.split_off(boundary);
+        self.messages.truncate(1); // keep only the system message
+        self.messages.push(Message::user(format!(
+            "[Summary of earlier conversation]\n{summary}"
+        )));
+        self.messages.extend(recent);
+    }
+
     /// Cumulative usage across every successful turn this session has made.
     pub fn usage(&self) -> TokenUsage {
         self.usage
@@ -310,6 +326,27 @@ mod tests {
         assert_eq!(s.messages()[0].role, "system");
         assert_eq!(s.messages()[0].content, "be helpful");
         assert_eq!(s.turn_count(), 0);
+    }
+
+    #[test]
+    fn compact_at_replaces_old_span_keeps_system_and_recent() {
+        let mut s = Session::new("SYS");
+        s.push_user("u1");
+        s.push_assistant(Message::assistant("a1"));
+        s.push_user("u2");
+        s.push_assistant(Message::assistant("a2"));
+        // messages: [sys, u1, a1, u2, a2]; compact at boundary 3 (keep u2,a2).
+        s.compact_at(3, "SUMMARY");
+
+        let m = s.messages();
+        assert_eq!(m.len(), 4); // system + summary + u2 + a2
+        assert_eq!(m[0].role, "system");
+        assert_eq!(m[0].content, "SYS");
+        assert_eq!(m[1].role, "user");
+        assert!(m[1].content.starts_with("[Summary of earlier conversation]"));
+        assert!(m[1].content.contains("SUMMARY"));
+        assert_eq!(m[2].content, "u2");
+        assert_eq!(m[3].content, "a2");
     }
 
     #[test]
