@@ -4,6 +4,7 @@
 //! shared between the binary and external embedders.
 
 pub mod agent;
+pub mod compact;
 pub mod config;
 pub mod cost;
 pub mod doctor;
