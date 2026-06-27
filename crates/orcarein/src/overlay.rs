@@ -43,10 +43,7 @@ pub(crate) fn term_cols() -> u16 {
 /// content fits one screen, or in `--no-default-features` (no `tui`) builds.
 fn print_in_place(title: &str, content: &str) {
     if !title.is_empty() {
-        println!(
-            "{}",
-            crate::header::slim_title_bar(crate::header::APP_ICON, title, term_cols())
-        );
+        println!("{}", crate::header::slim_title_bar(title, term_cols()));
     }
     print!("{content}");
     if !content.ends_with('\n') {
@@ -176,7 +173,7 @@ fn draw_view(
         ])
         .split(f.area());
         // Title row: the shared slim title bar (icon + box style).
-        let bar = crate::header::slim_title_bar(crate::header::APP_ICON, title, f.area().width);
+        let bar = crate::header::slim_title_bar(title, f.area().width);
         f.render_widget(Paragraph::new(bar), chunks[0]);
         viewport_h = (chunks[1].height as usize).max(1);
         f.render_widget(

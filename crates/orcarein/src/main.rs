@@ -998,13 +998,13 @@ async fn main() -> Result<()> {
     let tool_defs = registry.definitions();
 
     {
-        use header::{render_header, status_chips, HeaderModel, APP_ICON};
+        use header::{paint_borders, render_header, status_chips, HeaderModel};
+        use std::io::IsTerminal;
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let (cols, fancy) = header_env();
         let model_line = format!("{model} · {}", provider.name());
         let session_line = format!("{} · auto-saved", header::short_id(&session_id));
         let hm = HeaderModel {
-            icon: APP_ICON,
             title: "OrcaRein",
             identity: vec![
                 ("model", model_line),
@@ -1017,7 +1017,11 @@ async fn main() -> Result<()> {
                 ("/compact", "shrink context"),
             ],
         };
-        for line in render_header(&hm, cols, fancy) {
+        // Paint the box border DeepSeek-blue only on a real, color-permitting tty
+        // and only for the fancy box (the one-liner is never colored).
+        let color =
+            fancy && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        for line in paint_borders(&render_header(&hm, cols, fancy), color) {
             println!("{line}");
         }
         for chip in status_chips(cli.no_permission, cli.no_economy) {

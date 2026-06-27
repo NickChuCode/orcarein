@@ -5,8 +5,30 @@
 
 use unicode_width::UnicodeWidthStr;
 
-/// Inline ASCII fish — 1 column per char, aligns on any terminal.
-pub const APP_ICON: &str = "><(((°>";
+/// Pixel-art whale mascot (faceless, traced from the project logo): a plump
+/// whale with its head to the left and tail flukes flicking up at the right.
+/// Rendered centered at the top of the left column in the double-column header.
+/// Every line is a verified, equal display width (`MASCOT_W`); only width-1
+/// solid-block glyphs are used — no box-drawing chars, which [`paint_borders`]
+/// would dye blue — so the box never skews and the silhouette stays uncolored.
+pub const MASCOT: &[&str] = &[
+    "                ▗▟▘",
+    "  ▄▄▄▄▄▄       ▄▟▛ ",
+    "▗█████████▄▄▄▟██▛  ",
+    "▟███████████████▖  ",
+    "▜██████████████▛   ",
+    " ▝▀▀████████▀▀     ",
+];
+
+/// Display width of every [`MASCOT`] line (all lines share this width).
+pub const MASCOT_W: usize = 19;
+
+/// The box-drawing glyphs we paint when coloring the border.
+const BORDER_GLYPHS: &[char] = &['╭', '╮', '╰', '╯', '─', '│', '┬', '┴'];
+
+/// DeepSeek blue (#4D6BFE) truecolor SGR prefix, paired with the reset below.
+const BLUE: &str = "\x1b[38;2;77;107;254m";
+const RESET: &str = "\x1b[0m";
 
 /// Display width (CJK full-width counts as 2).
 pub fn disp_width(s: &str) -> usize {
@@ -82,7 +104,6 @@ const MIN_LEFT: usize = 16;
 const MIN_RIGHT: usize = 16;
 
 pub struct HeaderModel<'a> {
-    pub icon: &'a str,
     pub title: &'a str,
     pub identity: Vec<(&'a str, String)>,
     pub tips: Vec<(&'a str, &'a str)>,
@@ -103,11 +124,21 @@ fn rule(c: char, n: usize) -> String {
     std::iter::repeat_n(c, n).collect()
 }
 
+/// Center `s` within `w` display columns by padding both sides with spaces
+/// (extra column, if any, goes to the right). Truncates first if longer, so the
+/// result always has `disp_width == w`.
+fn center_to(s: &str, w: usize) -> String {
+    let t = truncate_to_width(s, w);
+    let pad = w.saturating_sub(disp_width(&t));
+    let lhs = pad / 2;
+    let rhs = pad - lhs;
+    format!("{}{}{}", " ".repeat(lhs), t, " ".repeat(rhs))
+}
+
 pub fn render_header(m: &HeaderModel, width: u16, fancy: bool) -> Vec<String> {
     if !fancy || width < MIN_BOX_WIDTH {
         let summary = format!(
-            "{} {} · {} · /help",
-            m.icon,
+            "{} · {} · /help",
             m.title,
             m.identity.first().map(|(_, v)| v.as_str()).unwrap_or("")
         );
@@ -126,7 +157,7 @@ fn render_single_col(m: &HeaderModel, inner: usize) -> Vec<String> {
     // Visible: ╭(1) ─(1) space(1) label space(1) fill ╮(1) = 5 + W(label) + fill.
     // Want 5 + W(label) + fill == inner+2  =>  fill = inner - W(label) - 3.
     // Truncate label to inner-3 so fill never underflows.
-    let label = truncate_to_width(&format!("{} {}", m.icon, m.title), inner.saturating_sub(3));
+    let label = truncate_to_width(m.title, inner.saturating_sub(3));
     let fill = inner.saturating_sub(disp_width(&label) + 3);
     out.push(format!("╭─ {label} {}╮", rule('─', fill)));
     for (k, v) in &m.identity {
@@ -150,10 +181,10 @@ fn render_double_col(m: &HeaderModel, inner: usize) -> Vec<String> {
     let right = inner.saturating_sub(left + 1);
 
     let mut out = Vec::new();
-    // top line: ╭─ icon title ─...─┬─ getting started ─...─╮
+    // top line: ╭─ OrcaRein ─...─┬─ getting started ─...─╮
     // l_seg = "─ {l_label} " has width W(l_label)+3; need it <= left so the
     // fill never underflows and disp_width(l_top) == left. So budget = left-3.
-    let l_label = truncate_to_width(&format!("{} {}", m.icon, m.title), left.saturating_sub(3));
+    let l_label = truncate_to_width(m.title, left.saturating_sub(3));
     let l_seg = format!("─ {l_label} ");
     let l_top = format!(
         "{}{}",
@@ -168,33 +199,78 @@ fn render_double_col(m: &HeaderModel, inner: usize) -> Vec<String> {
     );
     out.push(format!("╭{l_top}┬{r_top}╮"));
 
-    // body rows: zip identity (left) with tips (right), padding the shorter.
-    let rows = m.identity.len().max(m.tips.len());
+    // Left column = mascot lines (centered, only when it fits) + identity rows.
+    let mut left_cells: Vec<String> = Vec::new();
+    if MASCOT_W <= left {
+        for art in MASCOT {
+            left_cells.push(center_to(art, left));
+        }
+    }
+    for (_, v) in &m.identity {
+        left_cells.push(pad_to(v, left));
+    }
+    // Right column = tips.
+    let right_cells: Vec<String> = m
+        .tips
+        .iter()
+        .map(|(k, d)| pad_to(&format!("{k}  {d}"), right))
+        .collect();
+
+    // body rows: zip the two columns, padding the shorter with blank cells.
+    let rows = left_cells.len().max(right_cells.len());
+    let blank_l = pad_to("", left);
+    let blank_r = pad_to("", right);
     for i in 0..rows {
-        let lc = m
-            .identity
-            .get(i)
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-        let rc = m
-            .tips
-            .get(i)
-            .map(|(k, d)| format!("{k}  {d}"))
-            .unwrap_or_default();
-        out.push(format!("│{}│{}│", pad_to(&lc, left), pad_to(&rc, right)));
+        let lc = left_cells.get(i).unwrap_or(&blank_l);
+        let rc = right_cells.get(i).unwrap_or(&blank_r);
+        out.push(format!("│{lc}│{rc}│"));
     }
     out.push(format!("╰{}┴{}╯", rule('─', left), rule('─', right)));
     out
 }
 
-/// A single-line title bar `╭─ <icon> <title> ─…─╮` exactly `width` wide.
-pub fn slim_title_bar(icon: &str, title: &str, width: u16) -> String {
+/// Wrap the box-drawing border glyphs of each line in the DeepSeek-blue SGR
+/// escape (content/mascot/text left untouched), when `enabled`. With `enabled`
+/// false this is a passthrough — identical strings — so the uncolored
+/// `render_header` output (and its width tests/goldens) stay authoritative.
+/// Coloring is applied *after* layout, so the escape sequences never enter the
+/// `disp_width` math that built the box.
+pub fn paint_borders(lines: &[String], enabled: bool) -> Vec<String> {
+    if !enabled {
+        return lines.to_vec();
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len() + 16);
+            let mut in_span = false;
+            for ch in line.chars() {
+                let is_border = BORDER_GLYPHS.contains(&ch);
+                if is_border && !in_span {
+                    out.push_str(BLUE);
+                    in_span = true;
+                } else if !is_border && in_span {
+                    out.push_str(RESET);
+                    in_span = false;
+                }
+                out.push(ch);
+            }
+            if in_span {
+                out.push_str(RESET);
+            }
+            out
+        })
+        .collect()
+}
+
+/// A single-line title bar `╭─ <title> ─…─╮` exactly `width` wide.
+pub fn slim_title_bar(title: &str, width: u16) -> String {
     let w = width as usize;
     if w < 4 {
         return rule('─', w);
     }
     let inner = w - 2; // corners
-    let label = truncate_to_width(&format!("{icon} {title}"), inner.saturating_sub(2));
+    let label = truncate_to_width(title, inner.saturating_sub(2));
     let seg = format!("─ {label} ");
     let fill = rule('─', inner.saturating_sub(disp_width(&seg)));
     format!("╭{seg}{fill}╮")
@@ -271,7 +347,6 @@ mod tests {
 
     fn demo_model() -> HeaderModel<'static> {
         HeaderModel {
-            icon: APP_ICON,
             title: "OrcaRein",
             identity: vec![
                 ("model", "deepseek-v4-flash · deepseek".to_string()),
@@ -342,6 +417,8 @@ mod tests {
         assert!(!lines[0].contains('╭'));
         assert!(lines[0].contains("OrcaRein"));
         assert!(lines[0].contains("/help"));
+        // The inline fish is retired everywhere.
+        assert!(!lines[0].contains("><((("));
     }
 
     #[test]
@@ -373,10 +450,16 @@ mod tests {
     fn double_col_golden() {
         let lines = render_header(&demo_model(), 100, true);
         let expected = vec![
-            "╭─ ><(((°> OrcaRein ──────────────────────────────────┬ getting started ───────────────────────────╮",
-            "│deepseek-v4-flash · deepseek                         │/help  commands                             │",
-            "│~/projects/foo                                       │/init  make AGENTS.md                       │",
-            "│0a1b2c3d · auto-saved                                │/compact  shrink context                    │",
+            "╭─ OrcaRein ──────────────────────────────────────────┬ getting started ───────────────────────────╮",
+            "│                                 ▗▟▘                 │/help  commands                             │",
+            "│                   ▄▄▄▄▄▄       ▄▟▛                  │/init  make AGENTS.md                       │",
+            "│                 ▗█████████▄▄▄▟██▛                   │/compact  shrink context                    │",
+            "│                 ▟███████████████▖                   │                                            │",
+            "│                 ▜██████████████▛                    │                                            │",
+            "│                  ▝▀▀████████▀▀                      │                                            │",
+            "│deepseek-v4-flash · deepseek                         │                                            │",
+            "│~/projects/foo                                       │                                            │",
+            "│0a1b2c3d · auto-saved                                │                                            │",
             "╰─────────────────────────────────────────────────────┴────────────────────────────────────────────╯",
         ];
         assert_eq!(lines, expected);
@@ -386,7 +469,7 @@ mod tests {
     fn single_col_golden() {
         let lines = render_header(&demo_model(), 40, true);
         let expected = vec![
-            "╭─ ><(((°> OrcaRein ───────────────────╮",
+            "╭─ OrcaRein ───────────────────────────╮",
             "│model  deepseek-v4-flash · deepseek   │",
             "│cwd  ~/projects/foo                   │",
             "│session  0a1b2c3d · auto-saved        │",
@@ -401,10 +484,77 @@ mod tests {
 
     #[test]
     fn slim_title_bar_fills_width_with_corners() {
-        let bar = super::slim_title_bar(APP_ICON, "对话记录", 40);
+        let bar = super::slim_title_bar("对话记录", 40);
         assert_eq!(disp_width(&bar), 40);
         assert!(bar.starts_with('╭'));
         assert!(bar.ends_with('╮'));
         assert!(bar.contains("对话记录"));
+    }
+
+    #[test]
+    fn mascot_lines_all_equal_width() {
+        // Load-bearing: any width-2 or ragged glyph would skew the left column.
+        assert!(!MASCOT.is_empty());
+        for l in MASCOT {
+            assert_eq!(
+                disp_width(l),
+                MASCOT_W,
+                "mascot line not {MASCOT_W} wide: {l:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_col_shows_mascot_above_identity() {
+        let lines = render_header(&demo_model(), 100, true);
+        // The whale's solid body row appears in some body line's left cell,
+        // and it sits above the first identity value.
+        let mascot_row = lines.iter().position(|l| l.contains("██████████████"));
+        let id_row = lines.iter().position(|l| l.contains("deepseek-v4-flash"));
+        assert!(mascot_row.is_some(), "mascot missing from double-col box");
+        assert!(id_row.is_some());
+        assert!(
+            mascot_row.unwrap() < id_row.unwrap(),
+            "mascot must be above identity"
+        );
+    }
+
+    #[test]
+    fn paint_borders_disabled_is_passthrough() {
+        let lines = render_header(&demo_model(), 100, true);
+        assert_eq!(paint_borders(&lines, false), lines);
+    }
+
+    #[test]
+    fn paint_borders_wraps_only_border_glyphs() {
+        let lines = render_header(&demo_model(), 100, true);
+        let painted = paint_borders(&lines, true);
+        const BLUE: &str = "\x1b[38;2;77;107;254m";
+        const RESET: &str = "\x1b[0m";
+        // Top line starts with a colored corner.
+        assert!(painted[0].starts_with(&format!("{BLUE}╭")));
+        // The colored top line carries the product name uncolored: the blue
+        // escape never sits immediately before a content char like 'O'.
+        assert!(painted[0].contains("OrcaRein"));
+        assert!(
+            !painted[0].contains(&format!("{BLUE}O")),
+            "title text must not be colored"
+        );
+        // Find the body line carrying the model value and verify its content is
+        // not inside a color span, while its leading border is.
+        let (i, body) = painted
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.contains("deepseek-v4-flash"))
+            .expect("model line present");
+        assert!(
+            !body.contains(&format!("{BLUE}d")),
+            "content must not be colored"
+        );
+        // The reset closes the leading border before content begins.
+        assert!(body.starts_with(&format!("{BLUE}│{RESET}")));
+        // Original visible text survives (strip escapes → equals plain line).
+        let stripped: String = body.replace(BLUE, "").replace(RESET, "");
+        assert_eq!(stripped, lines[i]);
     }
 }
