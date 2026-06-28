@@ -99,12 +99,28 @@ impl Provider for MockProvider {
             .unwrap_or_else(|| vec![StreamEvent::Content("(mock: no scripted response)".into())]);
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        // Static catalog (no network). Keeps the default model present so the
+        // "current model is always selectable" invariant holds in tests.
+        Ok(vec![self.default_model.clone(), "mock-large".to_string()])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn mock_list_models_includes_default() {
+        let m = MockProvider::new();
+        let got = m.list_models().await.unwrap();
+        // The current/default model must always be present (the picker/validation
+        // "current model present" invariant relies on it).
+        assert!(got.iter().any(|x| x == m.default_model()));
+        assert!(got.len() >= 2);
+    }
 
     #[tokio::test]
     async fn plays_back_a_text_response() {

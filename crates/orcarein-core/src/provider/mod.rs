@@ -78,6 +78,14 @@ pub trait Provider: Send + Sync {
         tools: &[ToolDefinition],
         opts: &ChatOptions,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<StreamEvent>>>;
+
+    /// List the model ids available to this provider/account, so the REPL can
+    /// offer a `/model` picker and validate switches. The default returns just
+    /// [`Provider::default_model`]; network-backed providers override it to query
+    /// their catalog (`GET /v1/models`).
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec![self.default_model().to_string()])
+    }
 }
 
 #[cfg(test)]
