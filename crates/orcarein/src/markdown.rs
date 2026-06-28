@@ -490,6 +490,45 @@ fn char_w(c: char) -> usize {
 /// fits `first_avail` display columns, every continuation fits `cont_avail`
 /// (the gutters differ: `▏ ` for the first line, `▏ ↳ ` for continuations).
 /// Always returns at least one (possibly empty) segment.
+/// Hard-wrap styled `runs` to display width, carrying each char's style across
+/// wrap boundaries. The first segment fits `first_avail` columns, continuations
+/// `cont_avail` (CJK=2, never splits a char). Returns content-only spans per
+/// segment (gutter/prefix are added by the caller); always ≥1 segment (possibly
+/// empty). Coalesces adjacent same-style chars within a segment.
+fn wrap_styled_code(
+    runs: &[(String, Style)],
+    first_avail: usize,
+    cont_avail: usize,
+) -> Vec<Vec<(String, Style)>> {
+    let first_avail = first_avail.max(1);
+    let cont_avail = cont_avail.max(1);
+    let mut chars: Vec<(char, Style)> = Vec::new();
+    for (t, st) in runs {
+        for c in t.chars() {
+            chars.push((c, *st));
+        }
+    }
+    let mut segs: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut cur: Vec<(char, Style)> = Vec::new();
+    let mut w = 0usize;
+    for (c, st) in chars {
+        let cap = if segs.is_empty() {
+            first_avail
+        } else {
+            cont_avail
+        };
+        let cw = char_w(c);
+        if w + cw > cap && !cur.is_empty() {
+            segs.push(std::mem::take(&mut cur));
+            w = 0;
+        }
+        cur.push((c, st));
+        w += cw;
+    }
+    segs.push(cur); // always at least one (possibly empty) segment
+    segs.into_iter().map(|chs| coalesce(&chs)).collect()
+}
+
 fn wrap_code_line(line: &str, first_avail: usize, cont_avail: usize) -> Vec<String> {
     let first_avail = first_avail.max(1);
     let cont_avail = cont_avail.max(1);
@@ -872,6 +911,27 @@ mod tests {
         assert!(p.iter().any(|l| l.contains('…')));
         // No column-drop marker (both columns fit after shrinking).
         assert!(!p.iter().any(|l| l.contains('╌')));
+    }
+
+    #[test]
+    fn wrap_styled_code_hard_breaks_carrying_styles() {
+        use ratatui::style::{Color, Style};
+        let kw = Style::default().fg(Color::Rgb(1, 2, 3));
+        let pl = Style::default();
+        // "let " keyword-styled, "abcdef" plain — wrap to width 4.
+        let runs = vec![("let ".to_string(), kw), ("abcdef".to_string(), pl)];
+        let segs = wrap_styled_code(&runs, 4, 4);
+        for seg in &segs {
+            let w: usize = seg.iter().map(|(s, _)| disp_width(s)).sum();
+            assert!(w <= 4, "segment too wide: {seg:?}");
+        }
+        let joined: String = segs
+            .iter()
+            .flat_map(|seg| seg.iter().map(|(s, _)| s.as_str()))
+            .collect();
+        assert_eq!(joined, "let abcdef");
+        // The keyword style survives on the "let" portion.
+        assert!(segs[0].iter().any(|(s, st)| s.starts_with("let") && *st == kw));
     }
 
     #[test]
