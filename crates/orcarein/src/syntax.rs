@@ -41,41 +41,135 @@ fn profile_for(lang: &str) -> Profile {
             line_comments: C_LINE,
             block_comment: C_BLOCK,
             keywords: &[
-                "async", "await", "break", "case", "catch", "class", "const", "continue", "default",
-                "delete", "do", "else", "export", "extends", "false", "finally", "for", "function",
-                "if", "import", "in", "instanceof", "let", "new", "null", "return", "super",
-                "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "yield",
+                "async",
+                "await",
+                "break",
+                "case",
+                "catch",
+                "class",
+                "const",
+                "continue",
+                "default",
+                "delete",
+                "do",
+                "else",
+                "export",
+                "extends",
+                "false",
+                "finally",
+                "for",
+                "function",
+                "if",
+                "import",
+                "in",
+                "instanceof",
+                "let",
+                "new",
+                "null",
+                "return",
+                "super",
+                "switch",
+                "this",
+                "throw",
+                "true",
+                "try",
+                "typeof",
+                "var",
+                "void",
+                "while",
+                "yield",
             ],
         },
         "go" => Profile {
             line_comments: C_LINE,
             block_comment: C_BLOCK,
             keywords: &[
-                "break", "case", "chan", "const", "continue", "default", "defer", "else",
-                "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
-                "package", "range", "return", "select", "struct", "switch", "type", "var", "nil",
-                "true", "false",
+                "break",
+                "case",
+                "chan",
+                "const",
+                "continue",
+                "default",
+                "defer",
+                "else",
+                "fallthrough",
+                "for",
+                "func",
+                "go",
+                "goto",
+                "if",
+                "import",
+                "interface",
+                "map",
+                "package",
+                "range",
+                "return",
+                "select",
+                "struct",
+                "switch",
+                "type",
+                "var",
+                "nil",
+                "true",
+                "false",
             ],
         },
         "c" | "cpp" | "c++" => Profile {
             line_comments: C_LINE,
             block_comment: C_BLOCK,
             keywords: &[
-                "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
-                "else", "enum", "extern", "float", "for", "goto", "if", "int", "long", "return",
-                "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
-                "unsigned", "void", "volatile", "while", "class", "namespace", "template", "public",
-                "private", "protected", "new", "delete", "true", "false", "nullptr",
+                "auto",
+                "break",
+                "case",
+                "char",
+                "const",
+                "continue",
+                "default",
+                "do",
+                "double",
+                "else",
+                "enum",
+                "extern",
+                "float",
+                "for",
+                "goto",
+                "if",
+                "int",
+                "long",
+                "return",
+                "short",
+                "signed",
+                "sizeof",
+                "static",
+                "struct",
+                "switch",
+                "typedef",
+                "union",
+                "unsigned",
+                "void",
+                "volatile",
+                "while",
+                "class",
+                "namespace",
+                "template",
+                "public",
+                "private",
+                "protected",
+                "new",
+                "delete",
+                "true",
+                "false",
+                "nullptr",
             ],
         },
         "python" | "py" => Profile {
             line_comments: HASH,
             block_comment: None,
             keywords: &[
-                "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
-                "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in",
-                "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
-                "with", "yield", "True", "False", "None",
+                "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
+                "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
+                "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return",
+                "try", "while", "with", "yield", "True", "False", "None",
             ],
         },
         "bash" | "sh" | "shell" => Profile {
@@ -181,7 +275,8 @@ pub fn highlight(line: &str, lang: &str) -> Vec<(String, SynKind)> {
         // 4. number (only when the cursor char is a digit)
         if c.is_ascii_digit() {
             let mut j = i + 1;
-            while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '.' || chars[j] == '_') {
+            while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '.' || chars[j] == '_')
+            {
                 j += 1;
             }
             push(&mut runs, i, j, SynKind::Number);
@@ -245,7 +340,9 @@ mod tests {
     #[test]
     fn comment_markers_inside_strings_are_not_comments() {
         let r = kinds("let s = \"a // b\";", "rust");
-        assert!(r.iter().any(|(s, k)| s == "\"a // b\"" && *k == SynKind::Str));
+        assert!(r
+            .iter()
+            .any(|(s, k)| s == "\"a // b\"" && *k == SynKind::Str));
         assert!(!r.iter().any(|(_, k)| *k == SynKind::Comment));
         let p = kinds("x = \"# y\"", "python");
         assert!(p.iter().any(|(s, k)| s == "\"# y\"" && *k == SynKind::Str));
@@ -264,7 +361,9 @@ mod tests {
             .map(|(s, _)| s.as_str())
             .collect();
         assert_eq!(nums, vec!["2"]);
-        assert!(r.iter().any(|(s, k)| s.starts_with("x1") && *k == SynKind::Plain));
+        assert!(r
+            .iter()
+            .any(|(s, k)| s.starts_with("x1") && *k == SynKind::Plain));
     }
 
     #[test]

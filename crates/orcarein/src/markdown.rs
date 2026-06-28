@@ -940,7 +940,9 @@ mod tests {
             .collect();
         assert_eq!(joined, "let abcdef");
         // The keyword style survives on the "let" portion.
-        assert!(segs[0].iter().any(|(s, st)| s.starts_with("let") && *st == kw));
+        assert!(segs[0]
+            .iter()
+            .any(|(s, st)| s.starts_with("let") && *st == kw));
     }
 
     #[test]
