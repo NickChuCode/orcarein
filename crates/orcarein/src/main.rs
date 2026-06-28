@@ -1741,9 +1741,17 @@ fn render_transcript(session: &Session) -> String {
     out
 }
 
+/// Normalize a `/show` path argument: trim, and strip a leading `@` left by the
+/// mention popup's autocompletion, so `@path` and `path` both show `path`.
+fn show_arg_path(arg: &str) -> &str {
+    let a = arg.trim();
+    a.strip_prefix('@').unwrap_or(a)
+}
+
 /// `/show <path>`: reads a file and shows it through the pager. Read failures
 /// are reported, not fatal.
 fn run_show(path: &str) {
+    let path = show_arg_path(path);
     if path.is_empty() {
         eprintln!("用法：/show <文件路径>");
         return;
@@ -2274,6 +2282,17 @@ mod tests {
         assert_eq!(super::ctx_token(79.9), Token::Warning);
         assert_eq!(super::ctx_token(80.0), Token::Error);
         assert_eq!(super::ctx_token(100.0), Token::Error);
+    }
+
+    #[test]
+    fn show_arg_path_strips_mention_at_and_trims() {
+        // Mention popup autocompletes `@path`; /show must read `path`.
+        assert_eq!(super::show_arg_path("@crates/a.rs"), "crates/a.rs");
+        assert_eq!(super::show_arg_path("  @crates/a.rs  "), "crates/a.rs");
+        // Plain path unchanged.
+        assert_eq!(super::show_arg_path("crates/a.rs"), "crates/a.rs");
+        // Only the leading @ is stripped.
+        assert_eq!(super::show_arg_path("a@b.rs"), "a@b.rs");
     }
 
     #[test]
