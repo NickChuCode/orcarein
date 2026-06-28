@@ -32,9 +32,11 @@ pub type History = Vec<String>;
 #[cfg(feature = "tui")]
 use crate::color;
 #[cfg(feature = "tui")]
-use crate::modal::buffer::{EditBuffer, Mode, VisualKind};
+use crate::modal::buffer::{Cursor, EditBuffer, Mode, VisualKind};
 #[cfg(feature = "tui")]
 use crate::modal::command::{apply, CommandParser, Effect, KeyAction};
+#[cfg(feature = "tui")]
+use crate::modal::mention::MentionState;
 
 /// Restores the terminal's default cursor shape on drop, so leaving the modal
 /// editor never strands the user with a block/bar cursor we set per mode.
@@ -109,15 +111,26 @@ pub fn modal_readline(
     buf.enter_insert_before();
     let mut parser = CommandParser::new();
 
+    // @-mention popup state + its (cwd-relative) candidate source.
+    const POPUP_MAX: u16 = 8;
+    const MENTION_CAP: usize = 2000;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let mut mention = MentionState::default();
+
     // The inline viewport height currently baked into `terminal`. `None` until
     // the first build; recreated only when `desired_h` differs (see header).
     let mut terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>> = None;
     let mut current_h: u16 = 0;
 
     let outcome = loop {
-        // 1. Desired inline height: body lines + 1 status row, clamped.
+        // 1. Desired inline height: body lines + popup rows + 1 status row, clamped.
         let body_lines = buf.lines.len() as u16;
-        let desired_h = (body_lines + 1).clamp(2, max_rows);
+        let popup_h = if mention.active {
+            (mention.filtered.len() as u16).min(POPUP_MAX)
+        } else {
+            0
+        };
+        let desired_h = (body_lines + popup_h + 1).clamp(2, max_rows);
 
         // (Re)create the terminal only on a height change.
         if terminal.is_none() || desired_h != current_h {
@@ -170,8 +183,14 @@ pub fn modal_readline(
             Style::default().add_modifier(Modifier::REVERSED)
         };
         term.draw(|f| {
-            let chunks =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
+            // Body (grows) / mention popup band / status row. popup_h == 0 → the
+            // middle chunk takes no rows.
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(popup_h),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
 
             const GUTTER: &str = "▌ ";
             let body: Vec<Line> = view
@@ -190,6 +209,39 @@ pub fn modal_readline(
                 })
                 .collect();
             f.render_widget(Paragraph::new(body), chunks[0]);
+
+            // Mention popup band (below the body): filtered project files, the
+            // selected row highlighted. Tolerates a band shorter than the list
+            // (short terminals) by scrolling the selection into view.
+            if popup_h > 0 {
+                let avail = chunks[1].height as usize;
+                let sel_bg = if rgb {
+                    Style::default()
+                        .bg(color::rt(color::Token::Accent))
+                        .fg(Color::Black)
+                } else {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                };
+                let dim = if rgb {
+                    Style::default().fg(color::rt(color::Token::Dim))
+                } else {
+                    Style::default()
+                };
+                let start = mention.selected.saturating_sub(avail.saturating_sub(1));
+                let rows: Vec<Line> = mention
+                    .filtered
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(avail)
+                    .map(|(i, &ci)| {
+                        let path = mention.candidates[ci].clone();
+                        let style = if i == mention.selected { sel_bg } else { dim };
+                        Line::from(Span::styled(format!(" {path} "), style))
+                    })
+                    .collect();
+                f.render_widget(Paragraph::new(rows), chunks[1]);
+            }
 
             // Status bar: ` BADGE ` (mode bg) + position + hint, on the status
             // ground. Narrow terminals drop the hint. NO_COLOR / 16-color reverse
@@ -246,7 +298,7 @@ pub fn modal_readline(
                 }
                 Line::from(s).style(Style::default().add_modifier(Modifier::REVERSED))
             };
-            f.render_widget(Paragraph::new(status_line), chunks[1]);
+            f.render_widget(Paragraph::new(status_line), chunks[2]);
 
             // The inline viewport is positioned ABSOLUTELY in the terminal and
             // `set_cursor_position` takes absolute coordinates — so the render's
@@ -302,13 +354,78 @@ pub fn modal_readline(
             _ => continue, // other keys: skip
         };
 
+        // 5b. Mention popup intercept: while active, these keys drive the popup,
+        // not the buffer. Everything else (char/Backspace/Left/Right) falls
+        // through to `apply`, after which the popup state is refreshed.
+        if mention.active {
+            match action {
+                KeyAction::Up => {
+                    mention.selected = mention.selected.saturating_sub(1);
+                    continue;
+                }
+                KeyAction::Down => {
+                    if mention.selected + 1 < mention.filtered.len() {
+                        mention.selected += 1;
+                    }
+                    continue;
+                }
+                KeyAction::Enter | KeyAction::Tab if !mention.filtered.is_empty() => {
+                    if let Some((at, end_excl, ins)) = mention.accept() {
+                        if end_excl > at.col {
+                            // Capture row before moving `at` (Cursor: not Copy).
+                            let r = at.row;
+                            buf.delete_range(at, Cursor { row: r, col: end_excl - 1 });
+                        }
+                        for c in ins.chars() {
+                            buf.insert_char(c);
+                        }
+                    }
+                    mention.active = false;
+                    mention.filtered.clear();
+                    mention.selected = 0;
+                    continue;
+                }
+                KeyAction::Esc => {
+                    mention.active = false;
+                    mention.filtered.clear();
+                    mention.selected = 0;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         // 6. Apply to the buffer and handle the resulting effect.
-        match apply(&mut buf, &mut parser, action, history) {
+        let effect = apply(&mut buf, &mut parser, action, history);
+        match effect {
             Effect::Submit => break ReadOutcome::Submitted(buf.text()),
             Effect::Cancel => break ReadOutcome::Cancelled,
             Effect::Eof => break ReadOutcome::Eof,
             Effect::Yank(reg) => clipboard::write_osc52(&reg.text),
             Effect::None => {}
+        }
+
+        // 6b. Refresh the mention popup from the new buffer state (Insert only).
+        if buf.mode == Mode::Insert {
+            let was = mention.active;
+            let now = mention.update_from_buffer(&buf);
+            if now && !was {
+                mention.candidates = orcarein_core::mention::list_project_files(&cwd, MENTION_CAP);
+            }
+            if now {
+                mention.filtered =
+                    crate::modal::mention::filter(&mention.query, &mention.candidates);
+                if mention.selected >= mention.filtered.len() {
+                    mention.selected = mention.filtered.len().saturating_sub(1);
+                }
+            } else {
+                mention.filtered.clear();
+                mention.selected = 0;
+            }
+        } else if mention.active {
+            mention.active = false;
+            mention.filtered.clear();
+            mention.selected = 0;
         }
     };
 
