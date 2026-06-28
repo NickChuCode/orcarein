@@ -10,7 +10,8 @@
 
 pub mod buffer;
 pub mod command;
-// render/clipboard added in later tasks.
+pub mod render;
+// clipboard added in a later task.
 
 /// In-process, non-persisted input history (spec §5/§9). Owned by main.rs.
 pub type History = Vec<String>;
