@@ -73,18 +73,51 @@ fn paged_overlay(title: &str, content: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Raw-mode RAII guard: disables raw mode on drop. Shared by the pager
+/// (via the alternate-screen overlay) and the modal editor (raw only).
+// consumed by modal in Task 13
+#[cfg(feature = "tui")]
+#[allow(dead_code)]
+pub(crate) struct RawModeGuard;
+
+#[cfg(feature = "tui")]
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        use ratatui::crossterm::terminal::disable_raw_mode;
+        let _ = disable_raw_mode();
+    }
+}
+
+/// Enter raw mode and hand back a guard that restores it on drop. Does NOT
+/// touch the alternate screen — the modal editor renders inline.
+// consumed by modal in Task 13
+#[cfg(feature = "tui")]
+#[allow(dead_code)]
+pub(crate) fn enter_raw() -> std::io::Result<RawModeGuard> {
+    ratatui::crossterm::terminal::enable_raw_mode()?;
+    Ok(RawModeGuard)
+}
+
 /// Shared overlay primitive: enter raw mode + the alternate screen and hand
 /// back a ratatui `Terminal`. The returned guard restores the terminal on drop
 /// (even on panic / early return). Both the pager and the GPIO live monitor
 /// build their loops on top of this.
+///
+/// Composition: `OverlayGuard` owns a [`RawModeGuard`]. Its own `Drop` body
+/// leaves the alternate screen; afterwards the owned `RawModeGuard` field's
+/// drop disables raw mode. End state is identical to the old single-guard:
+/// alt screen left + raw mode off, with no double-disable.
 #[cfg(feature = "tui")]
-pub(crate) struct OverlayGuard;
+pub(crate) struct OverlayGuard {
+    // Field drop runs AFTER OverlayGuard::drop's body → raw mode is disabled
+    // after the alternate screen is left. Held only for its Drop side effect.
+    _raw: RawModeGuard,
+}
 
 #[cfg(feature = "tui")]
 impl Drop for OverlayGuard {
     fn drop(&mut self) {
-        use ratatui::crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-        let _ = disable_raw_mode();
+        use ratatui::crossterm::terminal::LeaveAlternateScreen;
         let _ = ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
     }
 }
@@ -96,12 +129,12 @@ pub(crate) fn enter_overlay() -> std::io::Result<(
     OverlayGuard,
 )> {
     use ratatui::backend::CrosstermBackend;
-    use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+    use ratatui::crossterm::terminal::EnterAlternateScreen;
     use ratatui::Terminal;
 
-    enable_raw_mode()?;
+    let raw = enter_raw()?;
     ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
-    let guard = OverlayGuard;
+    let guard = OverlayGuard { _raw: raw };
     let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     Ok((terminal, guard))
 }
