@@ -252,7 +252,7 @@ impl EditBuffer {
         self.clamp_cursor();
     }
 
-    // ---- Undo bookkeeping (real, not a stub). redo() comes in Task 7. ----
+    // ---- Undo bookkeeping. undo()/redo() consume these stacks (see below). ----
 
     /// Snapshot the current state before a mutation and invalidate redo.
     fn push_undo(&mut self) {
@@ -261,6 +261,36 @@ impl EditBuffer {
             cursor: self.cursor.clone(),
         });
         self.redo.clear();
+    }
+
+    /// `u` — undo the last mutation. No-op on an empty undo stack. Pushes the
+    /// current state onto the redo stack, then restores the popped snapshot.
+    /// Manages the stacks directly (does NOT call `push_undo`).
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(Snapshot {
+                lines: self.lines.clone(),
+                cursor: self.cursor.clone(),
+            });
+            self.lines = prev.lines;
+            self.cursor = prev.cursor;
+            self.clamp_cursor();
+        }
+    }
+
+    /// `Ctrl-r` — redo the last undone mutation. Symmetric to `undo`. No-op on
+    /// an empty redo stack. `push_undo` (called by mutators) clears redo, so a
+    /// fresh edit invalidates the redo history.
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(Snapshot {
+                lines: self.lines.clone(),
+                cursor: self.cursor.clone(),
+            });
+            self.lines = next.lines;
+            self.cursor = next.cursor;
+            self.clamp_cursor();
+        }
     }
 
     // ---- Mode entry (NOT mutations — no undo push). ----
@@ -999,5 +1029,37 @@ mod tests {
         b.delete_selection();
         assert_eq!(b.lines, vec!["def".to_string()]);
         assert!(matches!(b.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn undo_restores_prior_state_redo_reapplies() {
+        let mut b = EditBuffer::from_str("ab");
+        b.mode = Mode::Insert;
+        b.cursor.col = 2;
+        b.insert_char('c'); // "abc"
+        assert_eq!(b.lines, vec!["abc".to_string()]);
+        b.undo();
+        assert_eq!(b.lines, vec!["ab".to_string()]);
+        b.redo();
+        assert_eq!(b.lines, vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn new_change_clears_redo() {
+        let mut b = EditBuffer::from_str("a");
+        b.mode = Mode::Insert;
+        b.cursor.col = 1;
+        b.insert_char('b'); // "ab"
+        b.undo(); // "a"
+        b.insert_char('c'); // "ac" — clears redo
+        b.redo(); // no-op
+        assert_eq!(b.lines, vec!["ac".to_string()]);
+    }
+
+    #[test]
+    fn undo_on_empty_stack_is_noop() {
+        let mut b = EditBuffer::from_str("a");
+        b.undo();
+        assert_eq!(b.lines, vec!["a".to_string()]);
     }
 }
