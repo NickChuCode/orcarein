@@ -304,10 +304,10 @@ impl Md {
             _ => ("▒ ", Token::Dim),
         };
         let runs = std::mem::take(&mut self.runs);
-        let first = (glyph.to_string(), self.fg(tok));
-        let cont = ("  ".to_string(), Style::default());
+        let first = [(glyph.to_string(), self.fg(tok))];
+        let cont = [("  ".to_string(), Style::default())];
         self.blank();
-        self.push_wrapped(runs, first, cont);
+        self.push_wrapped(runs, &first, &cont);
         self.blank();
     }
 
@@ -328,7 +328,7 @@ impl Md {
                 (String::new(), Style::default()),
             )
         };
-        self.push_wrapped(runs, first, cont);
+        self.push_wrapped(runs, &[first], &[cont]);
         if self.quote > 0 || self.lists.is_empty() {
             // top-level paragraphs get trailing space; list items stay tight
         }
@@ -392,10 +392,10 @@ impl Md {
     fn push_wrapped(
         &mut self,
         runs: Vec<(String, Style)>,
-        first: (String, Style),
-        cont: (String, Style),
+        first: &[(String, Style)],
+        cont: &[(String, Style)],
     ) {
-        for line in wrap_runs(&runs, self.width, &first, &cont) {
+        for line in wrap_runs(&runs, self.width, first, cont) {
             self.out.push(line);
         }
     }
@@ -454,10 +454,11 @@ fn char_w(c: char) -> usize {
 fn wrap_runs(
     runs: &[(String, Style)],
     width: usize,
-    first: &(String, Style),
-    cont: &(String, Style),
+    first: &[(String, Style)],
+    cont: &[(String, Style)],
 ) -> Vec<RenderedLine> {
-    let avail = width.saturating_sub(disp_width(&first.0)).max(1);
+    let first_w: usize = first.iter().map(|(s, _)| disp_width(s)).sum();
+    let avail = width.saturating_sub(first_w).max(1);
     let mut chars: Vec<(char, Style)> = Vec::new();
     for (t, st) in runs {
         for c in t.chars() {
@@ -499,10 +500,8 @@ fn wrap_runs(
         .enumerate()
         .map(|(i, chs)| {
             let pfx = if i == 0 { first } else { cont };
-            let mut spans = Vec::new();
-            if !pfx.0.is_empty() {
-                spans.push(pfx.clone());
-            }
+            let mut spans: Vec<(String, Style)> =
+                pfx.iter().filter(|(s, _)| !s.is_empty()).cloned().collect();
             spans.extend(coalesce(&chs));
             let plain: String = spans.iter().map(|(s, _)| s.as_str()).collect();
             RenderedLine { spans, plain }
