@@ -5,7 +5,7 @@ use std::path::Path;
 
 /// Recursively list project files from `cwd`, gitignore-aware (same `ignore`
 /// walker the search tool uses), `/`-separated relative paths, sorted, capped.
-pub fn list_project_files(cwd: &Path, cap: usize) -> Vec<String> {
+pub fn list_project_files(cwd: &Path, cap: usize, include_dirs: bool) -> Vec<String> {
     let mut builder = ignore::WalkBuilder::new(cwd);
     builder.require_git(false); // honor .gitignore even outside a git repo
     let mut out = Vec::new();
@@ -14,12 +14,23 @@ pub fn list_project_files(cwd: &Path, cap: usize) -> Vec<String> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
+        let ft = match entry.file_type() {
+            Some(ft) => ft,
+            None => continue,
+        };
+        let is_file = ft.is_file();
+        let is_dir = ft.is_dir();
+        if !is_file && !(is_dir && include_dirs) {
+            continue; // skip non-files unless we're including dirs
         }
         if let Ok(rel) = entry.path().strip_prefix(cwd) {
             let s = rel.to_string_lossy().replace('\\', "/");
-            if !s.is_empty() {
+            if s.is_empty() {
+                continue; // the root entry — never emit "" or "/"
+            }
+            if is_dir {
+                out.push(format!("{s}/"));
+            } else {
                 out.push(s);
             }
         }
@@ -89,7 +100,7 @@ mod tests {
         let mut gi = std::fs::File::create(root.join(".gitignore")).unwrap();
         writeln!(gi, "target/").unwrap();
 
-        let files = list_project_files(root, 100);
+        let files = list_project_files(root, 100, false);
         assert!(files.contains(&"src/a.rs".to_string()));
         assert!(files.contains(&"b.txt".to_string()));
         // gitignore honored: no target/ entries
@@ -99,7 +110,26 @@ mod tests {
         sorted.sort();
         assert_eq!(files, sorted);
         // cap
-        assert!(list_project_files(root, 1).len() <= 1);
+        assert!(list_project_files(root, 1, false).len() <= 1);
+    }
+
+    #[test]
+    fn include_dirs_adds_trailing_slash_dirs_and_skips_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "x").unwrap();
+
+        let with = list_project_files(root, 100, true);
+        // The directory appears with a trailing slash.
+        assert!(with.contains(&"src/".to_string()));
+        // Files still present, no slash.
+        assert!(with.contains(&"src/a.rs".to_string()));
+        // Root never yields a bare "/" or empty entry.
+        assert!(!with.iter().any(|s| s == "/" || s.is_empty()));
+        // include_dirs=false has no trailing-slash dirs.
+        let without = list_project_files(root, 100, false);
+        assert!(!without.iter().any(|s| s.ends_with('/')));
     }
 
     #[test]

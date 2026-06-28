@@ -416,7 +416,8 @@ pub fn modal_readline(
             let was = mention.active;
             let now = mention.update_from_buffer(&buf);
             if now && !was {
-                mention.candidates = orcarein_core::mention::list_project_files(&cwd, MENTION_CAP);
+                mention.candidates =
+                    orcarein_core::mention::list_project_files(&cwd, MENTION_CAP, true);
             }
             if now {
                 mention.filtered =
