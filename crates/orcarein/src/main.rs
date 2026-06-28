@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 mod header;
 #[cfg(feature = "hardware")]
 mod hwmon;
+#[cfg(feature = "tui")]
+mod modal;
 mod overlay;
 
 /// Demo pins watched by `hw monitor` when `--pins` is omitted.
