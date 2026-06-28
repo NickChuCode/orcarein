@@ -1875,6 +1875,32 @@ fn expand_model_alias(name: &str, provider: &str) -> String {
     name.to_string()
 }
 
+/// Built-in model list when a live `/v1/models` fetch fails: the two deepseek V4
+/// ids, else just the current model so `/model` can still echo it. Pure.
+// `allow(dead_code)`: the consumer (startup fetch) is wired in the next commit.
+#[allow(dead_code)]
+fn fallback_models(provider: &str, current: &str) -> Vec<String> {
+    match provider {
+        "deepseek" => vec![
+            "deepseek-v4-flash".to_string(),
+            "deepseek-v4-pro".to_string(),
+        ],
+        _ => vec![current.to_string()],
+    }
+}
+
+/// Guarantee `current` is in `choices` (so validation never rejects the running
+/// model), then sort + dedup for a stable popup order. Pure.
+// `allow(dead_code)`: the consumer (startup fetch) is wired in the next commit.
+#[allow(dead_code)]
+fn ensure_current_present(choices: &mut Vec<String>, current: &str) {
+    if !choices.iter().any(|m| m == current) {
+        choices.push(current.to_string());
+    }
+    choices.sort();
+    choices.dedup();
+}
+
 /// The models we know are valid for `provider`, so `/model` can reject typos
 /// (e.g. `flas`) before switching. For `deepseek` this is the two V4 ids; for
 /// other providers we have no static list, so we allow anything (a live
@@ -2399,6 +2425,31 @@ mod tests {
             "deepseek-v4-pro"
         );
         assert_eq!(super::expand_model_alias("pro", "openai"), "pro");
+    }
+
+    #[test]
+    fn fallback_models_lists_known_deepseek_else_current() {
+        assert_eq!(
+            super::fallback_models("deepseek", "deepseek-v4-flash"),
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ]
+        );
+        assert_eq!(
+            super::fallback_models("openai", "gpt-4o"),
+            vec!["gpt-4o".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_current_present_inserts_and_sorts() {
+        let mut v = vec!["b".to_string(), "a".to_string()];
+        super::ensure_current_present(&mut v, "c");
+        assert_eq!(v, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        // idempotent when already present
+        super::ensure_current_present(&mut v, "a");
+        assert_eq!(v, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 
     #[test]
