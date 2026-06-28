@@ -39,13 +39,15 @@ tracing-subscriber = { workspace = true }
 ratatui = { workspace = true, optional = true }
 # v02-22 TUI 头部：显示宽度计算（CJK 全角=2），CJK 路径/标题对齐。
 unicode-width = { workspace = true }
+# v02-25 分页器 markdown 渲染：CommonMark 解析器。optional + 并入 `tui` feature。
+pulldown-cmark = { workspace = true, optional = true }
 
 [features]
 default = ["tui", "mcp"]
 # Compile the alt-screen overlay (pager now; GPIO live monitor later). At
 # runtime the overlay is still capability-gated (non-tty / TERM=dumb / serial /
 # headless → plain print), so this only controls whether the code is built in.
-tui = ["dep:ratatui"]
+tui = ["dep:ratatui", "dep:pulldown-cmark"]
 # Enable the hand-rolled MCP client and register MCP-server tools at session
 # startup. Default-on so that a config.toml [mcp_servers] block is picked up
 # out of the box. Turn off with --no-default-features for a lean headless build

@@ -71,3 +71,7 @@ ignore = "0.4"
 regex = "1"
 # v02-22 TUI 头部：显示宽度计算（CJK 全角=2）。已在依赖树（ratatui 0.29 拉 0.2.0），tui 开时零新 crate。
 unicode-width = "0.2"
+# v02-25 分页器 markdown 渲染：CommonMark 解析器（仅 Event 解析，不要自带 HTML
+# 渲染器，故 default-features off）。MSRV 1.71 < 我们的 1.85。bin-only，并入 `tui`
+# feature；--no-default-features 不引入、pager 降级纯打印。
+pulldown-cmark = { version = "0.13", default-features = false }
