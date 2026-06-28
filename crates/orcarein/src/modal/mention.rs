@@ -68,6 +68,46 @@ pub fn filter(query: &str, candidates: &[String]) -> Vec<usize> {
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
+impl MentionState {
+    /// Recompute `active`/`at`/`query` from the buffer's current row + cursor.
+    /// Scans left from the cursor to the nearest `@`; active iff that `@` is at
+    /// column 0 or preceded by whitespace, and every char in `(@, cursor]` is
+    /// non-whitespace. Returns the new `active`.
+    pub fn update_from_buffer(&mut self, buf: &EditBuffer) -> bool {
+        let cur = buf.cursor.clone(); // Cursor is Clone, not Copy
+        let line: Vec<char> = buf
+            .lines
+            .get(cur.row)
+            .map(|s| s.chars().collect())
+            .unwrap_or_default();
+        let mut i = cur.col.min(line.len());
+        let mut at = None;
+        while i > 0 {
+            i -= 1;
+            let c = line[i];
+            if c == '@' {
+                at = Some(i);
+                break;
+            }
+            if c.is_whitespace() {
+                break; // hit whitespace before any '@' → no mention
+            }
+        }
+        match at {
+            Some(a) if a == 0 || line[a - 1].is_whitespace() => {
+                self.active = true;
+                self.at = Cursor { row: cur.row, col: a };
+                self.query = line[a + 1..cur.col.min(line.len())].iter().collect();
+                true
+            }
+            _ => {
+                self.active = false;
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +133,36 @@ mod tests {
         assert_eq!(filter("", &c), vec![0, 1, 2, 3]);
         // case-insensitive
         assert!(!filter("README", &c).is_empty());
+    }
+
+    fn buf_at(line: &str, col: usize) -> EditBuffer {
+        let mut b = EditBuffer::from_str(line);
+        b.enter_insert_before();
+        b.cursor = Cursor { row: 0, col };
+        b
+    }
+
+    #[test]
+    fn update_triggers_on_boundary_at_and_extracts_query() {
+        let mut m = MentionState::default();
+        // "@mar" with cursor at end (col 4): @ at col 0 (line start) → active.
+        let b = buf_at("@mar", 4);
+        assert!(m.update_from_buffer(&b));
+        assert_eq!(m.query, "mar");
+        assert_eq!(m.at.col, 0);
+
+        // "see @mo" cursor at 7: @ at col 4, preceded by space → active.
+        let b = buf_at("see @mo", 7);
+        assert!(m.update_from_buffer(&b));
+        assert_eq!(m.query, "mo");
+        assert_eq!(m.at.col, 4);
+
+        // email "a@b" cursor at 3: @ preceded by 'a' (non-space) → inactive.
+        let b = buf_at("a@b", 3);
+        assert!(!m.update_from_buffer(&b));
+
+        // whitespace between @ and cursor tears down: "@mo x" cursor at 5.
+        let b = buf_at("@mo x", 5);
+        assert!(!m.update_from_buffer(&b));
     }
 }
