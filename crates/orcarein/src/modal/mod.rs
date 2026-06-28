@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod clipboard;
 pub mod command;
 pub mod mention;
+pub mod model_picker;
 pub mod render;
 
 /// In-process, non-persisted input history (spec §5/§9). Owned by main.rs.
