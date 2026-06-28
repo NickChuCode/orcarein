@@ -344,24 +344,49 @@ impl Md {
     fn emit_code(&mut self) {
         let bar = self.fg(Token::Brand);
         let body = self.code_body_style();
+        // Inside a blockquote, prefix each code line with the quote bar(s).
+        let qbar = "▌ ".repeat(self.quote);
+        let qstyle = self.fg(Token::Dim);
+        let qw = disp_width(&qbar);
+        // Code content width: gutter "▏ " (2) for the first line, "▏ ↳ " (4) for
+        // continuations, plus the quote bar(s).
+        let first_avail = self.width.saturating_sub(2 + qw);
+        let cont_avail = self.width.saturating_sub(4 + qw);
         self.blank();
         if !self.code_lang.is_empty() {
-            let plain = format!("▏ {}", self.code_lang);
-            self.out.push(RenderedLine {
-                spans: vec![
-                    ("▏ ".to_string(), bar),
-                    (self.code_lang.clone(), self.fg(Token::Dim)),
-                ],
-                plain,
-            });
+            let mut spans = Vec::new();
+            let mut plain = String::new();
+            if !qbar.is_empty() {
+                spans.push((qbar.clone(), qstyle));
+                plain.push_str(&qbar);
+            }
+            spans.push(("▏ ".to_string(), bar));
+            spans.push((self.code_lang.clone(), self.fg(Token::Dim)));
+            plain.push_str("▏ ");
+            plain.push_str(&self.code_lang);
+            self.out.push(RenderedLine { spans, plain });
         }
         let buf = std::mem::take(&mut self.code_buf);
         for line in buf.trim_end_matches('\n').split('\n') {
-            let plain = format!("▏ {line}");
-            self.out.push(RenderedLine {
-                spans: vec![("▏ ".to_string(), bar), (line.to_string(), body)],
-                plain,
-            });
+            for (i, seg) in wrap_code_line(line, first_avail, cont_avail)
+                .into_iter()
+                .enumerate()
+            {
+                let gutter = if i == 0 { "▏ " } else { "▏ ↳ " };
+                let mut spans = Vec::new();
+                let mut plain = String::new();
+                if !qbar.is_empty() {
+                    spans.push((qbar.clone(), qstyle));
+                    plain.push_str(&qbar);
+                }
+                spans.push((gutter.to_string(), bar));
+                plain.push_str(gutter);
+                if !seg.is_empty() {
+                    spans.push((seg.clone(), body));
+                    plain.push_str(&seg);
+                }
+                self.out.push(RenderedLine { spans, plain });
+            }
         }
         self.blank();
     }
@@ -453,6 +478,34 @@ fn coalesce(chs: &[(char, Style)]) -> Vec<(String, Style)> {
 
 fn char_w(c: char) -> usize {
     disp_width(&c.to_string())
+}
+
+/// Hard-wrap one code line, never splitting a char (CJK=2). The first segment
+/// fits `first_avail` display columns, every continuation fits `cont_avail`
+/// (the gutters differ: `▏ ` for the first line, `▏ ↳ ` for continuations).
+/// Always returns at least one (possibly empty) segment.
+fn wrap_code_line(line: &str, first_avail: usize, cont_avail: usize) -> Vec<String> {
+    let first_avail = first_avail.max(1);
+    let cont_avail = cont_avail.max(1);
+    let mut segs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut w = 0usize;
+    for c in line.chars() {
+        let cap = if segs.is_empty() {
+            first_avail
+        } else {
+            cont_avail
+        };
+        let cw = char_w(c);
+        if w + cw > cap && !cur.is_empty() {
+            segs.push(std::mem::take(&mut cur));
+            w = 0;
+        }
+        cur.push(c);
+        w += cw;
+    }
+    segs.push(cur); // always emit at least one segment (possibly empty)
+    segs
 }
 
 /// Word-wrap styled `runs` to `width` columns, prefixing line 0 with `first` and
@@ -752,6 +805,30 @@ mod tests {
             false,
         );
         let _ = render("", 0, false, false);
+    }
+
+    #[test]
+    fn code_block_soft_wraps_with_continuation_marker() {
+        // A long code line wraps at a narrow width.
+        let p = plains("```\nabcdefghij klmnopqrst\n```", 12);
+        // At least one continuation line starts with "▏ ↳ ".
+        assert!(
+            p.iter().any(|l| l.starts_with("▏ ↳ ")),
+            "no continuation: {p:?}"
+        );
+        // No code line exceeds the width.
+        assert!(p
+            .iter()
+            .filter(|l| l.contains('▏'))
+            .all(|l| disp_width(l) <= 12));
+    }
+
+    #[test]
+    fn code_block_inside_blockquote_keeps_quote_bar() {
+        let p = plains("> ```\n> let x = 1;\n> ```", 80);
+        assert!(p
+            .iter()
+            .any(|l| l.contains('▌') && l.contains('▏') && l.contains("let x = 1;")));
     }
 
     #[test]
