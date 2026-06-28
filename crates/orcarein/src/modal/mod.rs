@@ -29,9 +29,22 @@ pub type History = Vec<String>;
 // verified in Task 14).
 
 #[cfg(feature = "tui")]
-use crate::modal::buffer::EditBuffer;
+use crate::modal::buffer::{EditBuffer, Mode};
 #[cfg(feature = "tui")]
 use crate::modal::command::{apply, CommandParser, Effect, KeyAction};
+
+/// Restores the terminal's default cursor shape on drop, so leaving the modal
+/// editor never strands the user with a block/bar cursor we set per mode.
+#[cfg(feature = "tui")]
+struct CursorStyleGuard;
+
+#[cfg(feature = "tui")]
+impl Drop for CursorStyleGuard {
+    fn drop(&mut self) {
+        use ratatui::crossterm::cursor::SetCursorStyle;
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
+    }
+}
 
 /// Outcome of one `modal_readline` call (the I/O loop's terminal states).
 #[cfg(feature = "tui")]
@@ -71,6 +84,9 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
 
     // RAII: restores raw mode on return/panic. Inline — NO alternate screen.
     let _raw = crate::overlay::enter_raw()?;
+    // RAII: restores the default cursor shape on return/panic (we swap block vs
+    // bar per mode below).
+    let _cursor_style = CursorStyleGuard;
 
     let (term_width, term_height) = size().unwrap_or((80, 24));
     // Cap so the inline box never eats more than half the screen (min 3 rows).
@@ -152,6 +168,18 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
             let cy = (body_area.y + view.cursor_screen.0).min(body_area.bottom().saturating_sub(1));
             f.set_cursor_position((cx, cy));
         })?;
+
+        // 3b. Cursor shape reflects the mode: a steady bar between chars while
+        // inserting, a steady block sitting on a char in Normal/Visual (vim feel).
+        // Emitted after draw so ratatui's own cursor handling doesn't override it.
+        {
+            use ratatui::crossterm::cursor::SetCursorStyle;
+            let style = match buf.mode {
+                Mode::Insert => SetCursorStyle::SteadyBar,
+                _ => SetCursorStyle::SteadyBlock,
+            };
+            let _ = ratatui::crossterm::execute!(std::io::stdout(), style);
+        }
 
         // 4. Read one event; skip non-key and key-release events.
         let Event::Key(k) = event::read()? else {
