@@ -8,6 +8,9 @@
 //! rendering) lives behind the `tui` feature; the decision logic below is pure
 //! and always compiled, so it is unit-tested without a terminal.
 
+#[cfg(feature = "tui")]
+use crate::color::{self, Token};
+
 /// Shows `content` to the user, paging it through an alternate-screen overlay
 /// when that is both possible (capable tty) and warranted (doesn't fit one
 /// screen); otherwise prints it in place. This is the single choke point for
@@ -138,18 +141,63 @@ pub(crate) fn enter_overlay() -> std::io::Result<(
 #[cfg(feature = "tui")]
 type Tui = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
-/// Builds the body as ratatui `Text`, painting every `query` match with a
-/// high-contrast highlight so the jumped-to term is visible. With an empty
-/// query it's a plain borrowed `Text` (no per-line allocation). Span splitting
-/// is the pure [`highlight_segments`].
+/// A transcript role-bar line (`▌ 你` / `▌ OrcaRein` / `▌ OrcaRein → tool(…)` /
+/// `▌ 工具结果`) colored by role: `▌` brand, `你` orca-white, `OrcaRein` accent,
+/// everything else (tool calls, 工具结果) dim. With `rgb` off it stays plain.
 #[cfg(feature = "tui")]
-fn highlighted_text<'a>(body: &'a str, query: &str) -> ratatui::text::Text<'a> {
+fn role_bar_line(line: &str, rgb: bool) -> ratatui::text::Line<'_> {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    if !rgb {
+        return Line::from(line);
+    }
+    let fg = |t: Token| Style::default().fg(color::rt(t));
+    let rest = &line[4..]; // after "▌ " (▌ is 3 bytes + space)
+    let mut spans = vec![Span::styled("▌ ", fg(Token::Brand))];
+    if rest == "你" {
+        spans.push(Span::styled(rest, fg(Token::OrcaWhite)));
+    } else if let Some(after) = rest.strip_prefix("OrcaRein") {
+        spans.push(Span::styled("OrcaRein", fg(Token::Accent)));
+        if !after.is_empty() {
+            spans.push(Span::styled(after, fg(Token::Dim)));
+        }
+    } else {
+        spans.push(Span::styled(rest, fg(Token::Dim)));
+    }
+    Line::from(spans)
+}
+
+/// A brand-framed slim title bar with an accent title (`╭─ <title> ─…─╮`),
+/// exactly `width` wide. Falls back to the plain [`crate::header::slim_title_bar`]
+/// string when color is off.
+#[cfg(feature = "tui")]
+fn title_bar(title: &str, width: u16, rgb: bool) -> ratatui::text::Line<'static> {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    let w = width as usize;
+    if !rgb || w < 4 {
+        return Line::from(crate::header::slim_title_bar(title, width));
+    }
+    let label = crate::header::truncate_to_width(title, w.saturating_sub(4));
+    let fill = w.saturating_sub(5 + crate::header::disp_width(&label));
+    let fg = |t: Token| Style::default().fg(color::rt(t));
+    Line::from(vec![
+        Span::styled("╭─ ", fg(Token::Brand)),
+        Span::styled(label, fg(Token::Accent)),
+        Span::styled(" ", fg(Token::Brand)),
+        Span::styled("─".repeat(fill), fg(Token::Brand)),
+        Span::styled("╮", fg(Token::Brand)),
+    ])
+}
+
+/// Builds the body as ratatui `Text`: transcript role bars (`▌ …`) are colored
+/// by role, every `query` match gets a high-contrast highlight, and plain lines
+/// pass through. Span splitting for matches is the pure [`highlight_segments`].
+#[cfg(feature = "tui")]
+fn highlighted_text<'a>(body: &'a str, query: &str, rgb: bool) -> ratatui::text::Text<'a> {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span, Text};
 
-    if query.is_empty() {
-        return Text::raw(body);
-    }
     let hl = Style::default()
         .fg(Color::Black)
         .bg(Color::Yellow)
@@ -157,18 +205,24 @@ fn highlighted_text<'a>(body: &'a str, query: &str) -> ratatui::text::Text<'a> {
     let lines: Vec<Line> = body
         .split('\n')
         .map(|line| {
-            Line::from(
-                highlight_segments(line, query)
-                    .into_iter()
-                    .map(|(s, hit)| {
-                        if hit {
-                            Span::styled(s, hl)
-                        } else {
-                            Span::raw(s)
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            if line.starts_with("▌ ") {
+                role_bar_line(line, rgb)
+            } else if query.is_empty() {
+                Line::from(line)
+            } else {
+                Line::from(
+                    highlight_segments(line, query)
+                        .into_iter()
+                        .map(|(s, hit)| {
+                            if hit {
+                                Span::styled(s, hl)
+                            } else {
+                                Span::raw(s)
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
         })
         .collect();
     Text::from(lines)
@@ -193,6 +247,7 @@ fn draw_view(
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
 
+    let rgb = color::use_rgb(color::detect(true));
     let mut viewport_h = 1usize;
     terminal.draw(|f| {
         let chunks = Layout::vertical([
@@ -201,16 +256,32 @@ fn draw_view(
             Constraint::Length(1),
         ])
         .split(f.area());
-        // Title row: the shared slim title bar (icon + box style).
-        let bar = crate::header::slim_title_bar(title, f.area().width);
-        f.render_widget(Paragraph::new(bar), chunks[0]);
+        // Title row: brand-framed bar with an accent title (plain when no color).
+        f.render_widget(
+            Paragraph::new(title_bar(title, f.area().width, rgb)),
+            chunks[0],
+        );
         viewport_h = (chunks[1].height as usize).max(1);
         f.render_widget(
-            Paragraph::new(highlighted_text(body, query)).scroll((offset as u16, 0)),
+            Paragraph::new(highlighted_text(body, query, rgb)).scroll((offset as u16, 0)),
             chunks[1],
         );
-        let footer = Line::from(footer_fn(viewport_h))
-            .style(Style::default().add_modifier(Modifier::REVERSED));
+        // Footer: padded to a full bar, on the status ground (reverse if no color).
+        let mut ft = footer_fn(viewport_h);
+        let total = f.area().width as usize;
+        let used = crate::header::disp_width(&ft);
+        if used < total {
+            ft.push_str(&" ".repeat(total - used));
+        }
+        let footer = if rgb {
+            Line::from(ft).style(
+                Style::default()
+                    .bg(color::STATUS_BG)
+                    .fg(color::rt(Token::Fg)),
+            )
+        } else {
+            Line::from(ft).style(Style::default().add_modifier(Modifier::REVERSED))
+        };
         f.render_widget(Paragraph::new(footer), chunks[2]);
     })?;
     Ok(viewport_h)

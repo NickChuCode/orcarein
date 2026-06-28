@@ -29,7 +29,9 @@ pub type History = Vec<String>;
 // verified in Task 14).
 
 #[cfg(feature = "tui")]
-use crate::modal::buffer::{EditBuffer, Mode};
+use crate::color;
+#[cfg(feature = "tui")]
+use crate::modal::buffer::{EditBuffer, Mode, VisualKind};
 #[cfg(feature = "tui")]
 use crate::modal::command::{apply, CommandParser, Effect, KeyAction};
 
@@ -76,12 +78,16 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal::size;
     use ratatui::layout::{Constraint, Layout};
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     let _ = prompt; // not rendered (see doc comment)
+
+    // Color capability (we're on a tty — modal is only used when overlay-capable).
+    // Honors NO_COLOR / COLORTERM; RGB on capable terminals, reverse video else.
+    let cmode = color::detect(true);
 
     // RAII: restores raw mode on return/panic. Inline — NO alternate screen.
     let _raw = crate::overlay::enter_raw()?;
@@ -134,46 +140,107 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
         // 2. Pure render of the buffer into the inline viewport.
         let view = render::render(&buf, term_width, desired_h);
 
-        // 3. Draw: body lines in the top rows, status (reversed) as the last row.
+        // 3. Draw: body lines (mode-colored gutter + content) on top, the status
+        // bar (mode badge + position + hint) as the last row.
+        let rgb = color::use_rgb(cmode);
+        // The gutter / badge / selection share the mode's color.
+        let mode_tok = match view.mode {
+            Mode::Normal => color::Token::Brand,
+            Mode::Insert => color::Token::Success,
+            Mode::Visual(VisualKind::Char) => color::Token::Warning,
+            Mode::Visual(VisualKind::Line) => color::Token::Accent,
+        };
+        let gutter_style = if rgb {
+            Style::default().fg(color::rt(mode_tok))
+        } else {
+            Style::default()
+        };
+        let sel_style = if rgb {
+            let bg = match view.mode {
+                Mode::Visual(VisualKind::Line) => color::rt(color::Token::Accent),
+                _ => color::rt(color::Token::Warning),
+            };
+            Style::default().bg(bg).fg(Color::Black)
+        } else {
+            Style::default().add_modifier(Modifier::REVERSED)
+        };
         term.draw(|f| {
             let chunks =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
 
+            const GUTTER: &str = "▌ ";
             let body: Vec<Line> = view
                 .lines
                 .iter()
                 .map(|rl| {
-                    Line::from(
-                        rl.spans
-                            .iter()
-                            .map(|(s, hl)| {
-                                if *hl {
-                                    // Visual selection: reversed for a vim feel.
-                                    Span::styled(
-                                        s.clone(),
-                                        Style::default().add_modifier(Modifier::REVERSED),
-                                    )
-                                } else {
-                                    Span::raw(s.clone())
-                                }
-                            })
-                            .collect::<Vec<_>>(),
-                    )
+                    let mut spans = vec![Span::styled(GUTTER, gutter_style)];
+                    for (s, hl) in &rl.spans {
+                        if *hl {
+                            spans.push(Span::styled(s.clone(), sel_style));
+                        } else {
+                            spans.push(Span::raw(s.clone()));
+                        }
+                    }
+                    Line::from(spans)
                 })
                 .collect();
             f.render_widget(Paragraph::new(body), chunks[0]);
 
-            let status = Line::from(view.status.clone())
-                .style(Style::default().add_modifier(Modifier::REVERSED));
-            f.render_widget(Paragraph::new(status), chunks[1]);
+            // Status bar: ` BADGE ` (mode bg) + position + hint, on the status
+            // ground. Narrow terminals drop the hint. NO_COLOR / 16-color reverse
+            // the whole bar instead, telling the mode apart by the badge text.
+            let show_hint = term_width >= crate::header::NARROW;
+            let w = crate::header::disp_width;
+            let status_line: Line = if rgb {
+                let badge = format!(" {} ", view.badge);
+                let badge_style = Style::default()
+                    .fg(Color::Black)
+                    .bg(color::rt(mode_tok))
+                    .add_modifier(Modifier::BOLD);
+                let bg = Style::default().bg(color::STATUS_BG);
+                let mut spans = vec![Span::styled(badge.clone(), badge_style)];
+                let mut used = w(&badge);
+                spans.push(Span::styled("  ", bg));
+                spans.push(Span::styled(
+                    view.pos.clone(),
+                    bg.fg(color::rt(color::Token::Fg)),
+                ));
+                used += 2 + w(&view.pos);
+                if show_hint {
+                    spans.push(Span::styled("   ", bg));
+                    spans.push(Span::styled(
+                        view.hint.clone(),
+                        bg.fg(color::rt(color::Token::Dim)),
+                    ));
+                    used += 3 + w(&view.hint);
+                }
+                if (used as u16) < term_width {
+                    spans.push(Span::styled(" ".repeat(term_width as usize - used), bg));
+                }
+                Line::from(spans)
+            } else {
+                let mut s = if show_hint {
+                    format!(" {}  {}   {} ", view.badge, view.pos, view.hint)
+                } else {
+                    format!(" {}  {} ", view.badge, view.pos)
+                };
+                let used = w(&s);
+                if (used as u16) < term_width {
+                    s.push_str(&" ".repeat(term_width as usize - used));
+                }
+                Line::from(s).style(Style::default().add_modifier(Modifier::REVERSED))
+            };
+            f.render_widget(Paragraph::new(status_line), chunks[1]);
 
             // The inline viewport is positioned ABSOLUTELY in the terminal and
             // `set_cursor_position` takes absolute coordinates — so the render's
             // viewport-relative (row, col) must be offset by the body chunk's
-            // origin, else the cursor jumps to the terminal's top-left. Clamp
-            // into the body area so a long line can't push it off-screen.
+            // origin AND the gutter width, else the cursor jumps off. Clamp into
+            // the body area so a long line can't push it off-screen.
+            const GUTTER_W: u16 = 2;
             let body_area = chunks[0];
-            let cx = (body_area.x + view.cursor_screen.1).min(body_area.right().saturating_sub(1));
+            let cx = (body_area.x + GUTTER_W + view.cursor_screen.1)
+                .min(body_area.right().saturating_sub(1));
             let cy = (body_area.y + view.cursor_screen.0).min(body_area.bottom().saturating_sub(1));
             f.set_cursor_position((cx, cy));
         })?;

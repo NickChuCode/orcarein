@@ -4,7 +4,7 @@
 //! and a status line. No terminal I/O — fully unit-tested. The raw-mode I/O loop
 //! (a later task) consumes this view to paint the inline viewport.
 
-use crate::header::{disp_width, truncate_to_width};
+use crate::header::disp_width;
 use crate::modal::buffer::{Cursor, EditBuffer, Mode, VisualKind};
 
 /// One visible body line, split into `(segment, highlighted)` spans. A plain
@@ -15,11 +15,16 @@ pub struct RenderLine {
 }
 
 /// The pure result of rendering: visible lines, the cursor's screen position
-/// within the inline viewport, and the status line.
+/// within the inline viewport (text-relative; the I/O layer offsets it by the
+/// gutter), and the structured status fields the I/O layer styles (mode badge,
+/// position, key hint). `mode` drives the gutter / badge / selection color.
 pub struct RenderView {
     pub lines: Vec<RenderLine>,
     pub cursor_screen: (u16, u16), // (row, col) within the inline viewport
-    pub status: String,
+    pub mode: Mode,
+    pub badge: &'static str, // mode word for the status badge
+    pub pos: String,         // "row,col" / "row,c1-c2" / "r1-r2"
+    pub hint: String,        // per-mode key hint
 }
 
 /// Split `line` (the row at `row`) into highlighted/plain segments per the
@@ -109,13 +114,47 @@ fn byte_at(line: &str, col: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-/// Human label for the status line.
+/// Human label for the status badge.
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Visual(VisualKind::Char) => "VISUAL",
         Mode::Visual(VisualKind::Line) => "V-LINE",
+    }
+}
+
+/// Cursor / selection position text for the status line.
+fn position_text(buf: &EditBuffer) -> String {
+    match buf.mode {
+        Mode::Visual(VisualKind::Line) => {
+            let (lo, hi) = buf.selection_range();
+            format!("{}-{}", lo.row + 1, hi.row + 1)
+        }
+        Mode::Visual(VisualKind::Char) => {
+            let (lo, hi) = buf.selection_range();
+            if lo.row == hi.row {
+                format!("{},{}-{}", lo.row + 1, lo.col + 1, hi.col + 1)
+            } else {
+                format!(
+                    "{},{}-{},{}",
+                    lo.row + 1,
+                    lo.col + 1,
+                    hi.row + 1,
+                    hi.col + 1
+                )
+            }
+        }
+        _ => format!("{},{}", buf.cursor.row + 1, buf.cursor.col + 1),
+    }
+}
+
+/// Per-mode key hint (kept to keys the editor actually honors).
+fn mode_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "i 插入 · v 选择 · u 撤销 · Enter 发送",
+        Mode::Insert => "Enter 发送 · Esc 普通模式",
+        Mode::Visual(_) => "y 复制 · d 删除 · Esc 取消",
     }
 }
 
@@ -171,19 +210,15 @@ pub fn render(buf: &EditBuffer, width: u16, height: u16) -> RenderView {
 
     let cursor_row = buf.cursor.row.saturating_sub(scroll) as u16;
     let cursor_col = cursor_disp_col(buf) as u16;
-
-    let status_raw = format!(
-        "-- {} --  {},{}  Enter发送·Esc回normal",
-        mode_label(buf.mode),
-        buf.cursor.row + 1,
-        buf.cursor.col + 1,
-    );
-    let status = truncate_to_width(&status_raw, width as usize);
+    let _ = width; // body width is governed by the I/O layer's Paragraph clipping
 
     RenderView {
         lines,
         cursor_screen: (cursor_row, cursor_col),
-        status,
+        mode: buf.mode,
+        badge: mode_label(buf.mode),
+        pos: position_text(buf),
+        hint: mode_hint(buf.mode).to_string(),
     }
 }
 
@@ -202,10 +237,23 @@ mod tests {
     }
 
     #[test]
-    fn status_line_shows_mode() {
+    fn status_shows_mode_and_position() {
         let b = EditBuffer::new();
         let v = render(&b, 40, 5);
-        assert!(v.status.contains("NORMAL"));
+        assert_eq!(v.badge, "NORMAL");
+        assert_eq!(v.pos, "1,1");
+        assert!(!v.hint.is_empty());
+    }
+
+    #[test]
+    fn visual_position_shows_column_range() {
+        let mut b = EditBuffer::from_str("abcdef");
+        b.mode = Mode::Visual(VisualKind::Char);
+        b.anchor = Some(Cursor { row: 0, col: 1 });
+        b.cursor = Cursor { row: 0, col: 4 };
+        let v = render(&b, 40, 5);
+        assert_eq!(v.badge, "VISUAL");
+        assert_eq!(v.pos, "1,2-5");
     }
 
     #[test]
@@ -323,13 +371,6 @@ mod tests {
         // body_h clamps to >=1, so at least one line is produced.
         let v = render(&b, 1, 1);
         assert!(!v.lines.is_empty());
-    }
-
-    #[test]
-    fn status_truncates_to_width() {
-        let b = EditBuffer::new();
-        let v = render(&b, 10, 5);
-        assert!(disp_width(&v.status) <= 10);
     }
 
     #[test]
