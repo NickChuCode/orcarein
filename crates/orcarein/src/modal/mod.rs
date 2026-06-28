@@ -73,7 +73,11 @@ pub enum ReadOutcome {
 /// viewport (ratatui's `Terminal` drop restores the cursor but does NOT wipe the
 /// drawn frame), so the editor's last frame never collides with REPL output.
 #[cfg(feature = "tui")]
-pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOutcome> {
+pub fn modal_readline(
+    prompt: &str,
+    history: &History,
+    ctx: Option<(String, color::Token)>,
+) -> std::io::Result<ReadOutcome> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal::size;
@@ -214,8 +218,14 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
                     ));
                     used += 3 + w(&view.hint);
                 }
-                if (used as u16) < term_width {
-                    spans.push(Span::styled(" ".repeat(term_width as usize - used), bg));
+                // Right-aligned ctx readout (colored by threshold), then pad the gap.
+                let ctx_w = ctx.as_ref().map(|(l, _)| w(l)).unwrap_or(0);
+                let target = (term_width as usize).saturating_sub(ctx_w);
+                if used < target {
+                    spans.push(Span::styled(" ".repeat(target - used), bg));
+                }
+                if let Some((label, tok)) = ctx.as_ref() {
+                    spans.push(Span::styled(label.clone(), bg.fg(color::rt(*tok))));
                 }
                 Line::from(spans)
             } else {
@@ -224,9 +234,14 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
                 } else {
                     format!(" {}  {} ", view.badge, view.pos)
                 };
+                let ctx_w = ctx.as_ref().map(|(l, _)| w(l)).unwrap_or(0);
+                let target = (term_width as usize).saturating_sub(ctx_w);
                 let used = w(&s);
-                if (used as u16) < term_width {
-                    s.push_str(&" ".repeat(term_width as usize - used));
+                if used < target {
+                    s.push_str(&" ".repeat(target - used));
+                }
+                if let Some((label, _)) = ctx.as_ref() {
+                    s.push_str(label);
                 }
                 Line::from(s).style(Style::default().add_modifier(Modifier::REVERSED))
             };

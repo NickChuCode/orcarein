@@ -55,6 +55,12 @@ enum CommandAction {
     Quit,
     RunInit,
     RunCompact,
+    /// `/model <name>` — switch the active model (same provider) at runtime.
+    SwitchModel(String),
+    /// `/resume <id|prefix>` — switch the live session at runtime.
+    SwitchSession(String),
+    /// `/new` — start a fresh session (new id/file, empty history) at runtime.
+    NewSession,
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -967,14 +973,19 @@ async fn main() -> Result<()> {
     let resolved = resolve(&cli)?;
     let Resolved {
         provider,
-        model,
+        mut model,
         system_prompt,
         tools_allowlist,
     } = resolved;
 
+    // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
+    // build a fresh session that re-reads the current project memory.
+    let base_system = system_prompt.clone();
+
     // Either continue the resumed session (keeping its id + creation time so
-    // auto-save writes back to the same file) or start a fresh one.
-    let (mut session, session_id, created_at_ms) = match resumed {
+    // auto-save writes back to the same file) or start a fresh one. `mut` so
+    // `/model` and `/resume`/`/new` can switch them at runtime.
+    let (mut session, mut session_id, mut created_at_ms) = match resumed {
         Some((loaded, id, created)) => {
             println!("Resumed session {id} ({} turns).", loaded.turn_count());
             (loaded, id, created)
@@ -1057,7 +1068,18 @@ async fn main() -> Result<()> {
                 let is_tty = std::io::stdout().is_terminal();
                 let term = std::env::var("TERM").ok();
                 if crate::overlay::overlay_capable(is_tty, term.as_deref()) {
-                    match modal::modal_readline("> ", &history) {
+                    // A persistent (per-input) context readout for the modal status
+                    // bar: current fill as of the last turn, colored by threshold.
+                    let ctx_label: Option<(String, color::Token)> = cost::context_window(&model)
+                        .map(|w| {
+                            let pct = if w > 0 {
+                                last_prompt_tokens as f64 / w as f64 * 100.0
+                            } else {
+                                0.0
+                            };
+                            (format!("ctx {pct:.0}%"), ctx_token(pct))
+                        });
+                    match modal::modal_readline("> ", &history, ctx_label) {
                         Ok(modal::ReadOutcome::Submitted(s)) => s,
                         Ok(modal::ReadOutcome::Cancelled) => continue,
                         Ok(modal::ReadOutcome::Eof) => break,
@@ -1113,6 +1135,68 @@ async fn main() -> Result<()> {
                     }
                     continue;
                 }
+                CommandAction::SwitchModel(n) => {
+                    let new = expand_model_alias(&n, provider.name());
+                    if new == model {
+                        println!("已经是 model {model} 了。");
+                    } else {
+                        model = new;
+                        println!("已切换 model → {model}");
+                        println!("（下次请求 cache 一次性 miss：前缀缓存按 model 隔离。）");
+                    }
+                    continue;
+                }
+                CommandAction::SwitchSession(needle) => {
+                    // The current session auto-saves each turn; save once more to be
+                    // safe before swapping the live state.
+                    let _ = store.save(&session_id, created_at_ms, &session);
+                    let ids: Vec<String> = store
+                        .list()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|s| s.id)
+                        .collect();
+                    match resolve_id_prefix(&needle, &ids) {
+                        IdMatch::One(id) => match store.load(&id) {
+                            Ok(loaded) => {
+                                let created = store
+                                    .created_at(&id)
+                                    .unwrap_or_else(|_| SessionStore::now_ms());
+                                let turns = loaded.turn_count();
+                                session = loaded;
+                                session_id = id.clone();
+                                created_at_ms = created;
+                                last_prompt_tokens = 0;
+                                println!("已切到 session {id}（{turns} turns）。");
+                            }
+                            Err(e) => eprintln!("加载 session 失败：{e}"),
+                        },
+                        IdMatch::None => {
+                            eprintln!("没有这个 session：{}（用 /sessions 看列表）", needle.trim())
+                        }
+                        IdMatch::Many(hits) => {
+                            eprintln!("前缀 '{}' 匹配多个，请加长：", needle.trim());
+                            for h in &hits {
+                                eprintln!("  {h}");
+                            }
+                        }
+                    }
+                    continue;
+                }
+                CommandAction::NewSession => {
+                    // Save the current session, then swap in a fresh one (new id =
+                    // creation timestamp, project memory re-read).
+                    let _ = store.save(&session_id, created_at_ms, &session);
+                    let created = SessionStore::now_ms();
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                    let prompt = fresh_session_prompt(base_system.clone(), &cwd);
+                    session = Session::new(&prompt);
+                    session_id = created.to_string();
+                    created_at_ms = created;
+                    last_prompt_tokens = 0;
+                    println!("已新建 session {session_id}（空白对话）。");
+                    continue;
+                }
             }
         }
 
@@ -1145,8 +1229,10 @@ async fn main() -> Result<()> {
                         color::paint(mode, Token::Accent, &format!("+{turn} tok this turn"))
                     );
                     l.push_str(&color::paint(mode, Token::Dim, &format!(" · {tot} total")));
-                    if let Some(c) = ctx_raw {
-                        l.push_str(&color::paint(mode, Token::Dim, &format!(" · {c}")));
+                    // ctx colored by threshold (≥50% warn / ≥80% err).
+                    if let Some(c) = ctx_colored(last_prompt_tokens, &model, mode) {
+                        l.push_str(&color::paint(mode, Token::Dim, " · "));
+                        l.push_str(&c);
                     }
                     if let Some(m) = meter_raw {
                         l.push_str(&color::paint(mode, Token::Dim, &format!(" · {m}")));
@@ -1600,6 +1686,45 @@ fn format_tool_list(names: &[&str]) -> String {
     )
 }
 
+/// Color token for a context-fill percentage: `>=80%` error, `>=50%` warning,
+/// otherwise accent. Pure — unit-tested.
+fn ctx_token(pct: f64) -> color::Token {
+    if pct >= 80.0 {
+        color::Token::Error
+    } else if pct >= 50.0 {
+        color::Token::Warning
+    } else {
+        color::Token::Accent
+    }
+}
+
+/// Expand short model aliases for the active provider: under `deepseek`,
+/// `pro` → `deepseek-v4-pro` and `flash` → `deepseek-v4-flash`; anything else
+/// (and other providers) is returned unchanged. Pure — unit-tested.
+fn expand_model_alias(name: &str, provider: &str) -> String {
+    if provider == "deepseek" {
+        match name {
+            "pro" => return "deepseek-v4-pro".to_string(),
+            "flash" => return "deepseek-v4-flash".to_string(),
+            _ => {}
+        }
+    }
+    name.to_string()
+}
+
+/// The context-occupancy line (`ctx 2.4% (24k/1.0M)`), colored by threshold.
+/// `None` when the model's window is unknown (caller omits / falls back).
+fn ctx_colored(prompt_tokens: u64, model: &str, mode: color::ColorMode) -> Option<String> {
+    let window = cost::context_window(model)?;
+    let line = cost::context_line(prompt_tokens, model)?;
+    let pct = if window > 0 {
+        prompt_tokens as f64 / window as f64 * 100.0
+    } else {
+        0.0
+    };
+    Some(color::paint(mode, ctx_token(pct), &line))
+}
+
 /// Renders the `/help` command list as a two-column block (REPL-only, so always
 /// interactive; color degrades via `mode`). Pure — the column alignment is
 /// unit-tested. Columns align on a fixed left-block width; CJK 说明 counts as 2
@@ -1609,13 +1734,16 @@ fn render_help(mode: color::ColorMode) -> String {
     use header::disp_width;
     let p = |t: Token, s: &str| color::paint(mode, t, s);
 
-    // (command, 说明): left column then right column, row-major.
+    // (command, 说明): left column then right column, row-major. An empty right
+    // command ("","") renders left-only.
     const ROWS: &[[(&str, &str); 2]] = &[
         [("/help", "显示帮助"), ("/init", "生成 AGENTS.md")],
         [("/clear", "清空对话"), ("/compact", "压缩上下文")],
         [("/save", "保存会话"), ("/usage", "用量与花费")],
         [("/tools", "列出工具"), ("/show", "查看文件（分页）")],
-        [("/history", "浏览记录"), ("/exit", "退出会话")],
+        [("/history", "浏览记录"), ("/model", "切换模型")],
+        [("/sessions", "列出会话"), ("/resume", "切换会话")],
+        [("/new", "新建会话"), ("/exit", "退出会话")],
     ];
     const LCMD: usize = 11; // left command field width
     const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
@@ -1632,6 +1760,16 @@ fn render_help(mode: color::ColorMode) -> String {
         let (lc, ld) = row[0];
         let (rc, rd) = row[1];
         let lcmd_fill = LCMD.saturating_sub(disp_width(lc));
+        if rc.is_empty() {
+            // Left-only row.
+            out.push_str(&format!(
+                "  {}{}{}\n",
+                p(Token::Accent, lc),
+                " ".repeat(lcmd_fill),
+                p(Token::Dim, ld),
+            ));
+            continue;
+        }
         let mid_fill = LBLOCK.saturating_sub(2 + LCMD + disp_width(ld));
         let rcmd_fill = RCMD.saturating_sub(disp_width(rc));
         out.push_str(&format!(
@@ -1694,8 +1832,8 @@ fn handle_command(
                 session.turn_count()
             );
             // Context fill (last turn's prompt ≈ current window use) + cost,
-            // when the model is known.
-            match cost::context_line(last_prompt_tokens, model) {
+            // when the model is known. ctx colored by threshold (≥50% warn / ≥80% err).
+            match ctx_colored(last_prompt_tokens, model, mode) {
                 Some(c) => println!("[{c}]"),
                 None => println!("[ctx: 模型 {model} 的上下文窗口未知]"),
             }
@@ -1716,6 +1854,30 @@ fn handle_command(
         }
         "init" => CommandAction::RunInit,
         "compact" => CommandAction::RunCompact,
+        "model" => {
+            if arg.is_empty() {
+                println!("当前 model：{model}");
+                println!("用法：/model <name>（deepseek 可用简写 flash / pro）");
+                CommandAction::Continue
+            } else {
+                CommandAction::SwitchModel(arg.to_string())
+            }
+        }
+        "sessions" => {
+            if let Err(e) = run_session_list() {
+                eprintln!("列出 session 失败：{e}");
+            }
+            CommandAction::Continue
+        }
+        "resume" => {
+            if arg.is_empty() {
+                eprintln!("用法：/resume <session id 或前缀>（用 /sessions 看列表）");
+                CommandAction::Continue
+            } else {
+                CommandAction::SwitchSession(arg.to_string())
+            }
+        }
+        "new" => CommandAction::NewSession,
         "history" => {
             let transcript = render_transcript(session);
             if let Err(e) = overlay::show_paged("对话记录", &transcript) {
@@ -1947,8 +2109,20 @@ mod tests {
         // Plain (no color) so we can measure display columns directly.
         let out = super::render_help(crate::color::ColorMode::None);
         for cmd in [
-            "/help", "/clear", "/save", "/tools", "/history", "/init", "/compact", "/usage",
-            "/show", "/exit",
+            "/help",
+            "/clear",
+            "/save",
+            "/tools",
+            "/history",
+            "/init",
+            "/compact",
+            "/usage",
+            "/show",
+            "/exit",
+            "/model",
+            "/sessions",
+            "/resume",
+            "/new",
         ] {
             assert!(out.contains(cmd), "help missing {cmd}");
         }
@@ -1956,7 +2130,9 @@ mod tests {
         for (line, rcmd) in out
             .lines()
             .skip(2) // title + rule
-            .zip(["/init", "/compact", "/usage", "/show", "/exit"])
+            .zip([
+                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/exit",
+            ])
         {
             let pos = line.find(rcmd).expect("right command present");
             assert_eq!(
@@ -1965,6 +2141,35 @@ mod tests {
                 "right column misaligned in {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn ctx_token_thresholds() {
+        use crate::color::Token;
+        assert_eq!(super::ctx_token(0.0), Token::Accent);
+        assert_eq!(super::ctx_token(49.9), Token::Accent);
+        assert_eq!(super::ctx_token(50.0), Token::Warning);
+        assert_eq!(super::ctx_token(79.9), Token::Warning);
+        assert_eq!(super::ctx_token(80.0), Token::Error);
+        assert_eq!(super::ctx_token(100.0), Token::Error);
+    }
+
+    #[test]
+    fn expand_model_alias_only_for_deepseek() {
+        assert_eq!(
+            super::expand_model_alias("pro", "deepseek"),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(
+            super::expand_model_alias("flash", "deepseek"),
+            "deepseek-v4-flash"
+        );
+        // Full names and other providers pass through unchanged.
+        assert_eq!(
+            super::expand_model_alias("deepseek-v4-pro", "deepseek"),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(super::expand_model_alias("pro", "openai"), "pro");
     }
 
     #[test]
