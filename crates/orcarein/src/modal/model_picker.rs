@@ -4,9 +4,6 @@
 //! for ranking. Pure — no ratatui/terminal types; the I/O shell (`mod.rs`) drives
 //! it. Always compiled and unit-tested, like `buffer`/`mention`.
 
-// `allow(dead_code)`: the consumer (mod.rs popup wiring) lands in the next commit.
-#![allow(dead_code)]
-
 use crate::modal::buffer::{Cursor, EditBuffer};
 
 /// The command prefix that arms the picker. The arg starts at `PREFIX.len()`.

@@ -1119,6 +1119,7 @@ async fn main() -> Result<()> {
                         &history,
                         ctx_label,
                         Some(short_model(&model)),
+                        &model_choices,
                     ) {
                         Ok(modal::ReadOutcome::Submitted(s)) => s,
                         Ok(modal::ReadOutcome::Cancelled) => continue,

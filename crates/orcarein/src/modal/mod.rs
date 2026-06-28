@@ -81,7 +81,8 @@ pub fn modal_readline(
     prompt: &str,
     history: &History,
     ctx: Option<(String, color::Token)>,
-    model: Option<&str>,
+    model_name: Option<&str>,
+    models: &[String],
 ) -> std::io::Result<ReadOutcome> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -113,10 +114,12 @@ pub fn modal_readline(
     buf.enter_insert_before();
     let mut parser = CommandParser::new();
 
-    // @-mention popup state + its (cwd-relative) candidate source.
+    // @-mention popup state + its (cwd-relative) candidate source, and the
+    // parallel `/model` picker (candidate source = the passed `models` list).
     const POPUP_MAX: u16 = 8;
     const MENTION_CAP: usize = 2000;
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let mut picker = crate::modal::model_picker::ModelPickerState::default();
     let mut mention = MentionState::default();
 
     // The inline viewport height currently baked into `terminal`. `None` until
@@ -126,12 +129,16 @@ pub fn modal_readline(
 
     let outcome = loop {
         // 1. Desired inline height: body lines + popup rows + 1 status row, clamped.
+        // Whichever popup is active (mention or /model picker) contributes rows.
         let body_lines = buf.lines.len() as u16;
-        let popup_h = if mention.active {
-            (mention.filtered.len() as u16).min(POPUP_MAX)
+        let popup_count = if mention.active {
+            mention.filtered.len()
+        } else if picker.active {
+            picker.filtered.len()
         } else {
             0
         };
+        let popup_h = (popup_count as u16).min(POPUP_MAX);
         let desired_h = (body_lines + popup_h + 1).clamp(2, max_rows);
 
         // (Re)create the terminal only on a height change.
@@ -212,10 +219,16 @@ pub fn modal_readline(
                 .collect();
             f.render_widget(Paragraph::new(body), chunks[0]);
 
-            // Mention popup band (below the body): filtered project files, the
-            // selected row highlighted. Tolerates a band shorter than the list
-            // (short terminals) by scrolling the selection into view.
+            // Popup band (below the body): the active popup's filtered candidates,
+            // the selected row highlighted. Tolerates a band shorter than the list
+            // (short terminals) by scrolling the selection into view. Mention and
+            // the /model picker share this render; only one is active at a time.
             if popup_h > 0 {
+                let (pcands, pfilt, psel): (&[String], &[usize], usize) = if mention.active {
+                    (&mention.candidates, &mention.filtered, mention.selected)
+                } else {
+                    (&picker.candidates, &picker.filtered, picker.selected)
+                };
                 let avail = chunks[1].height as usize;
                 let sel_bg = if rgb {
                     Style::default()
@@ -229,16 +242,15 @@ pub fn modal_readline(
                 } else {
                     Style::default()
                 };
-                let start = mention.selected.saturating_sub(avail.saturating_sub(1));
-                let rows: Vec<Line> = mention
-                    .filtered
+                let start = psel.saturating_sub(avail.saturating_sub(1));
+                let rows: Vec<Line> = pfilt
                     .iter()
                     .enumerate()
                     .skip(start)
                     .take(avail)
                     .map(|(i, &ci)| {
-                        let path = mention.candidates[ci].clone();
-                        let style = if i == mention.selected { sel_bg } else { dim };
+                        let path = pcands[ci].clone();
+                        let style = if i == psel { sel_bg } else { dim };
                         Line::from(Span::styled(format!(" {path} "), style))
                     })
                     .collect();
@@ -254,7 +266,7 @@ pub fn modal_readline(
             // model is the compact label (accent), ctx keeps its threshold color.
             let sep = " · ";
             let mut right: Vec<(String, color::Token)> = Vec::new();
-            if let Some(m) = model {
+            if let Some(m) = model_name {
                 right.push((m.to_string(), color::Token::Accent));
             }
             if let Some((label, tok)) = ctx.as_ref() {
@@ -422,6 +434,55 @@ pub fn modal_readline(
             }
         }
 
+        // 5c. /model picker intercept (mutually exclusive with mention). Same nav
+        // and accept; the one difference is an empty match + Enter force-submits
+        // the line (e.g. `/model zzz`) so it reaches the "unknown model" rejection
+        // rather than getting stuck in an empty popup.
+        if picker.active {
+            match action {
+                KeyAction::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                    continue;
+                }
+                KeyAction::Down => {
+                    if picker.selected + 1 < picker.filtered.len() {
+                        picker.selected += 1;
+                    }
+                    continue;
+                }
+                KeyAction::Enter | KeyAction::Tab if !picker.filtered.is_empty() => {
+                    if let Some((at, end_excl, ins)) = picker.accept() {
+                        if end_excl > at.col {
+                            let r = at.row;
+                            buf.delete_range(
+                                at,
+                                Cursor {
+                                    row: r,
+                                    col: end_excl - 1,
+                                },
+                            );
+                        }
+                        for c in ins.chars() {
+                            buf.insert_char(c);
+                        }
+                    }
+                    picker.active = false;
+                    picker.filtered.clear();
+                    picker.selected = 0;
+                    continue;
+                }
+                KeyAction::Enter => break ReadOutcome::Submitted(buf.text()),
+                KeyAction::Tab => continue, // empty match: swallow, no-op
+                KeyAction::Esc => {
+                    picker.active = false;
+                    picker.filtered.clear();
+                    picker.selected = 0;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         // 6. Apply to the buffer and handle the resulting effect.
         let effect = apply(&mut buf, &mut parser, action, history);
         match effect {
@@ -454,6 +515,26 @@ pub fn modal_readline(
             mention.active = false;
             mention.filtered.clear();
             mention.selected = 0;
+        }
+
+        // 6c. Refresh the /model picker (Insert only, and only when mention isn't
+        // active — the two are mutually exclusive). Candidates = the passed list.
+        if buf.mode == Mode::Insert && !mention.active {
+            let now = picker.update_from_buffer(&buf);
+            if now {
+                picker.candidates = models.to_vec();
+                picker.filtered = crate::modal::mention::filter(&picker.query, &picker.candidates);
+                if picker.selected >= picker.filtered.len() {
+                    picker.selected = picker.filtered.len().saturating_sub(1);
+                }
+            } else {
+                picker.filtered.clear();
+                picker.selected = 0;
+            }
+        } else if picker.active {
+            picker.active = false;
+            picker.filtered.clear();
+            picker.selected = 0;
         }
     };
 
