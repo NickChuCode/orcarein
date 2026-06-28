@@ -28,6 +28,8 @@ mod header;
 #[cfg(feature = "hardware")]
 mod hwmon;
 #[cfg(feature = "tui")]
+mod markdown;
+#[cfg(feature = "tui")]
 mod modal;
 mod overlay;
 
@@ -1608,9 +1610,62 @@ fn prompt_permission(name: &str, args: &str, fancy: bool, mode: color::ColorMode
     }
 }
 
+/// Build the `/history` pager doc: each message becomes a colored role bar plus
+/// its content rendered as Markdown (tool calls/results stay plain). `tui` only —
+/// the headless build uses the plain-text [`render_transcript`] instead.
+#[cfg(feature = "tui")]
+fn history_doc(session: &Session, width: u16, rgb: bool) -> Vec<overlay::RenderedLine> {
+    let mut doc: Vec<overlay::RenderedLine> = Vec::new();
+    let blank = |d: &mut Vec<overlay::RenderedLine>| d.push(overlay::styled_line("", rgb));
+    for m in session.messages() {
+        match m.role.as_str() {
+            "system" => continue, // not part of the visible chat
+            "user" => {
+                doc.push(overlay::styled_line("▌ 你", rgb));
+                doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                blank(&mut doc);
+            }
+            "assistant" => {
+                for tc in &m.tool_calls {
+                    doc.push(overlay::styled_line(
+                        &format!(
+                            "▌ OrcaRein → {}({})",
+                            tc.function.name, tc.function.arguments
+                        ),
+                        rgb,
+                    ));
+                }
+                if !m.content.trim().is_empty() {
+                    doc.push(overlay::styled_line("▌ OrcaRein", rgb));
+                    doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                }
+                blank(&mut doc);
+            }
+            "tool" => {
+                doc.push(overlay::styled_line("▌ 工具结果", rgb));
+                for line in m.content.trim_end().split('\n') {
+                    doc.push(overlay::styled_line(line, rgb));
+                }
+                blank(&mut doc);
+            }
+            other => {
+                doc.push(overlay::styled_line(&format!("▌ {other}"), rgb));
+                doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                blank(&mut doc);
+            }
+        }
+    }
+    if doc.is_empty() {
+        doc.push(overlay::styled_line("(对话为空)", rgb));
+    }
+    doc
+}
+
 /// Renders a session's messages to plain text for the `/history` pager. Pure
 /// and read-only — viewing history must never *become* history: the persisted
-/// `Vec<Message>` (and thus the model's cache prefix) is left untouched.
+/// `Vec<Message>` (and thus the model's cache prefix) is left untouched. Used by
+/// the headless (`--no-default-features`) build; `tui` uses [`history_doc`].
+#[cfg(not(feature = "tui"))]
 fn render_transcript(session: &Session) -> String {
     let mut out = String::new();
     for m in session.messages() {
@@ -1647,7 +1702,13 @@ fn run_show(path: &str) {
     }
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            if let Err(e) = overlay::show_paged(path, &content) {
+            let lower = path.to_lowercase();
+            let kind = if lower.ends_with(".md") || lower.ends_with(".markdown") {
+                overlay::DocKind::Markdown
+            } else {
+                overlay::DocKind::Plain
+            };
+            if let Err(e) = overlay::show_paged(path, &content, kind) {
                 eprintln!("显示失败：{e}");
             }
         }
@@ -1879,9 +1940,22 @@ fn handle_command(
         }
         "new" => CommandAction::NewSession,
         "history" => {
-            let transcript = render_transcript(session);
-            if let Err(e) = overlay::show_paged("对话记录", &transcript) {
-                eprintln!("显示失败：{e}");
+            #[cfg(feature = "tui")]
+            {
+                let rgb = color::use_rgb(mode);
+                let doc = history_doc(session, overlay::term_cols(), rgb);
+                if let Err(e) = overlay::show_doc("对话记录", doc) {
+                    eprintln!("显示失败：{e}");
+                }
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                let transcript = render_transcript(session);
+                if let Err(e) =
+                    overlay::show_paged("对话记录", &transcript, overlay::DocKind::Plain)
+                {
+                    eprintln!("显示失败：{e}");
+                }
             }
             CommandAction::Continue
         }
@@ -2644,6 +2718,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "tui"))]
     #[test]
     fn render_transcript_shows_turns_but_not_system_prompt() {
         let mut s = Session::new("be a helpful secret system prompt");
@@ -2656,10 +2731,29 @@ mod tests {
         assert!(!t.contains("secret system prompt"));
     }
 
+    #[cfg(not(feature = "tui"))]
     #[test]
     fn render_transcript_marks_an_empty_session() {
         let s = Session::new("sys");
         assert!(render_transcript(&s).contains("空"));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn history_doc_shows_turns_but_not_system_prompt() {
+        let mut s = Session::new("be a helpful secret system prompt");
+        s.push_user("hello");
+        s.push_assistant(Message::assistant("hi **there**"));
+        let doc = super::history_doc(&s, 80, false);
+        let joined: String = doc
+            .iter()
+            .map(|l| l.plain.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("hello"));
+        assert!(joined.contains("hi there")); // markdown bold markers stripped in plain
+        assert!(!joined.contains("secret system prompt"));
+        assert!(joined.contains("▌ 你") && joined.contains("▌ OrcaRein"));
     }
 
     #[cfg(feature = "hardware")]

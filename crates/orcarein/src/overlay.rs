@@ -11,17 +11,26 @@
 #[cfg(feature = "tui")]
 use crate::color::{self, Token};
 
+/// Whether pager content is plain text or Markdown to be rendered.
+pub enum DocKind {
+    Plain,
+    Markdown,
+}
+
 /// Shows `content` to the user, paging it through an alternate-screen overlay
 /// when that is both possible (capable tty) and warranted (doesn't fit one
-/// screen); otherwise prints it in place. This is the single choke point for
-/// "show a lot of text" — a future `$PAGER` escape hatch would slot in right
-/// here, ahead of the built-in overlay.
-pub fn show_paged(title: &str, content: &str) -> std::io::Result<()> {
+/// screen); otherwise prints it in place. `kind` selects plain vs Markdown
+/// rendering. This is the single choke point for "show a lot of text".
+pub fn show_paged(title: &str, content: &str, kind: DocKind) -> std::io::Result<()> {
     #[cfg(feature = "tui")]
     {
-        if paged_overlay(title, content)? {
+        if paged_overlay(title, content, kind)? {
             return Ok(());
         }
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = kind;
     }
     print_in_place(title, content);
     Ok(())
@@ -57,7 +66,7 @@ fn print_in_place(title: &str, content: &str) {
 /// Decides whether to page, and if so runs the overlay. Returns `Ok(true)` when
 /// the overlay handled the content, `Ok(false)` to fall through to plain print.
 #[cfg(feature = "tui")]
-fn paged_overlay(title: &str, content: &str) -> std::io::Result<bool> {
+fn paged_overlay(title: &str, content: &str, kind: DocKind) -> std::io::Result<bool> {
     use ratatui::crossterm::terminal;
     use std::io::IsTerminal;
 
@@ -66,14 +75,47 @@ fn paged_overlay(title: &str, content: &str) -> std::io::Result<bool> {
     if !overlay_capable(is_tty, term.as_deref()) {
         return Ok(false);
     }
-    let (_cols, rows) = terminal::size().unwrap_or((80, 24));
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let usable = rows.saturating_sub(1); // reserve one row for the footer
-    let lines: Vec<&str> = content.lines().collect();
-    if !needs_pager(lines.len(), usable) {
+    let rgb = color::use_rgb(color::detect(true));
+    let doc = match kind {
+        DocKind::Markdown => crate::markdown::render(content, cols, rgb, false),
+        DocKind::Plain => plain_doc(content, rgb),
+    };
+    if !needs_pager(doc.len(), usable) {
         return Ok(false);
     }
-    run_pager(title, &lines)?;
+    run_pager(title, doc)?;
     Ok(true)
+}
+
+/// Build a single [`RenderedLine`] from a plain (or role-bar) line — exposed so
+/// `/history` can assemble a doc of role bars + Markdown-rendered content.
+#[cfg(feature = "tui")]
+pub(crate) fn styled_line(line: &str, rgb: bool) -> RenderedLine {
+    plain_line(line, rgb)
+}
+
+/// Page a pre-built doc (role bars + rendered content), or print it in place
+/// when it fits a screen / isn't a capable tty.
+#[cfg(feature = "tui")]
+pub(crate) fn show_doc(title: &str, doc: Vec<RenderedLine>) -> std::io::Result<()> {
+    use std::io::IsTerminal;
+    let is_tty = std::io::stdout().is_terminal();
+    let term = std::env::var("TERM").ok();
+    let rows = ratatui::crossterm::terminal::size()
+        .map(|(_, r)| r)
+        .unwrap_or(24);
+    if overlay_capable(is_tty, term.as_deref()) && needs_pager(doc.len(), rows.saturating_sub(1)) {
+        return run_pager(title, doc);
+    }
+    if !title.is_empty() {
+        println!("{}", crate::header::slim_title_bar(title, term_cols()));
+    }
+    for l in &doc {
+        println!("{}", l.plain);
+    }
+    Ok(())
 }
 
 /// Raw-mode RAII guard: disables raw mode on drop. Shared by the pager
@@ -141,30 +183,122 @@ pub(crate) fn enter_overlay() -> std::io::Result<(
 #[cfg(feature = "tui")]
 type Tui = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
-/// A transcript role-bar line (`▌ 你` / `▌ OrcaRein` / `▌ OrcaRein → tool(…)` /
-/// `▌ 工具结果`) colored by role: `▌` brand, `你` orca-white, `OrcaRein` accent,
-/// everything else (tool calls, 工具结果) dim. With `rgb` off it stays plain.
+/// One pre-rendered pager line: styled spans plus the plain-text shadow
+/// (`plain` == the concatenation of the span texts) used for search and width.
 #[cfg(feature = "tui")]
-fn role_bar_line(line: &str, rgb: bool) -> ratatui::text::Line<'_> {
+pub(crate) struct RenderedLine {
+    pub spans: Vec<(String, ratatui::style::Style)>,
+    pub plain: String,
+}
+
+/// Build a doc from plain text: each line one default-styled span, except
+/// transcript role bars (`▌ …`) which are colored by role (when `rgb`). This is
+/// the non-markdown path (`.md`-less `/show`, and the fallback).
+#[cfg(feature = "tui")]
+pub(crate) fn plain_doc(content: &str, rgb: bool) -> Vec<RenderedLine> {
+    content.split('\n').map(|l| plain_line(l, rgb)).collect()
+}
+
+/// One plain (or role-bar) line → [`RenderedLine`].
+#[cfg(feature = "tui")]
+fn plain_line(line: &str, rgb: bool) -> RenderedLine {
     use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
-    if !rgb {
-        return Line::from(line);
-    }
-    let fg = |t: Token| Style::default().fg(color::rt(t));
-    let rest = &line[4..]; // after "▌ " (▌ is 3 bytes + space)
-    let mut spans = vec![Span::styled("▌ ", fg(Token::Brand))];
-    if rest == "你" {
-        spans.push(Span::styled(rest, fg(Token::OrcaWhite)));
-    } else if let Some(after) = rest.strip_prefix("OrcaRein") {
-        spans.push(Span::styled("OrcaRein", fg(Token::Accent)));
-        if !after.is_empty() {
-            spans.push(Span::styled(after, fg(Token::Dim)));
+    let st = |t: Token| {
+        if rgb {
+            Style::default().fg(color::rt(t))
+        } else {
+            Style::default()
         }
+    };
+    let spans = if let Some(rest) = line.strip_prefix("▌ ") {
+        let mut spans = vec![("▌ ".to_string(), st(Token::Brand))];
+        if rest == "你" {
+            spans.push((rest.to_string(), st(Token::OrcaWhite)));
+        } else if let Some(after) = rest.strip_prefix("OrcaRein") {
+            spans.push(("OrcaRein".to_string(), st(Token::Accent)));
+            if !after.is_empty() {
+                spans.push((after.to_string(), st(Token::Dim)));
+            }
+        } else {
+            spans.push((rest.to_string(), st(Token::Dim)));
+        }
+        spans
     } else {
-        spans.push(Span::styled(rest, fg(Token::Dim)));
+        vec![(line.to_string(), Style::default())]
+    };
+    RenderedLine {
+        spans,
+        plain: line.to_string(),
     }
-    Line::from(spans)
+}
+
+/// Overlay search-hit styling onto a line's spans: every case-insensitive match
+/// of `query` in `plain` becomes yellow-on-near-black, keeping the span's own
+/// modifiers (so a hit on bold/code/link stays bold/underlined, only the color
+/// is taken over). `plain` must equal the concatenation of the span texts.
+#[cfg(feature = "tui")]
+fn apply_query_highlight(
+    spans: &[(String, ratatui::style::Style)],
+    plain: &str,
+    query: &str,
+) -> Vec<(String, ratatui::style::Style)> {
+    if query.is_empty() {
+        return spans.to_vec();
+    }
+    // Hit byte-ranges in `plain` via the pure segmenter.
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    let mut b = 0usize;
+    for (seg, hit) in highlight_segments(plain, query) {
+        let n = seg.len();
+        if hit {
+            hits.push((b, b + n));
+        }
+        b += n;
+    }
+    if hits.is_empty() {
+        return spans.to_vec();
+    }
+    let is_hit = |pos: usize| hits.iter().any(|&(s, e)| pos >= s && pos < e);
+
+    let mut out = Vec::new();
+    let mut cur = 0usize; // byte offset into `plain`
+    for (text, st) in spans {
+        let mut run_start = 0usize;
+        let mut run_hit = is_hit(cur);
+        for (bo, _ch) in text.char_indices() {
+            let h = is_hit(cur + bo);
+            if h != run_hit {
+                push_run(&mut out, &text[run_start..bo], run_hit, *st);
+                run_start = bo;
+                run_hit = h;
+            }
+        }
+        push_run(&mut out, &text[run_start..], run_hit, *st);
+        cur += text.len();
+    }
+    out
+}
+
+/// Push a sub-run with hit styling (or the base style) — empty runs skipped.
+#[cfg(feature = "tui")]
+fn push_run(
+    out: &mut Vec<(String, ratatui::style::Style)>,
+    s: &str,
+    hit: bool,
+    base: ratatui::style::Style,
+) {
+    use ratatui::style::{Color, Modifier};
+    if s.is_empty() {
+        return;
+    }
+    let style = if hit {
+        base.fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        base
+    };
+    out.push((s.to_string(), style));
 }
 
 /// A brand-framed slim title bar with an accent title (`╭─ <title> ─…─╮`),
@@ -190,62 +324,26 @@ fn title_bar(title: &str, width: u16, rgb: bool) -> ratatui::text::Line<'static>
     ])
 }
 
-/// Builds the body as ratatui `Text`: transcript role bars (`▌ …`) are colored
-/// by role, every `query` match gets a high-contrast highlight, and plain lines
-/// pass through. Span splitting for matches is the pure [`highlight_segments`].
+/// Render one pager frame — the scrolled body window plus a footer bar — and
+/// hand back the body viewport height. `footer_fn` is called with that height so
+/// callers can show the visible line range. `offset`/`xoff` scroll the body
+/// vertically/horizontally; `query` overlays search hits; `wrap` soft-wraps.
 #[cfg(feature = "tui")]
-fn highlighted_text<'a>(body: &'a str, query: &str, rgb: bool) -> ratatui::text::Text<'a> {
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span, Text};
-
-    let hl = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let lines: Vec<Line> = body
-        .split('\n')
-        .map(|line| {
-            if line.starts_with("▌ ") {
-                role_bar_line(line, rgb)
-            } else if query.is_empty() {
-                Line::from(line)
-            } else {
-                Line::from(
-                    highlight_segments(line, query)
-                        .into_iter()
-                        .map(|(s, hit)| {
-                            if hit {
-                                Span::styled(s, hl)
-                            } else {
-                                Span::raw(s)
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            }
-        })
-        .collect();
-    Text::from(lines)
-}
-
-/// Render one pager frame — the scrolled body window plus a reversed footer —
-/// and hand back the body viewport height. `footer_fn` is called with that
-/// height inside the draw, so callers can show the exact visible line range.
-/// `query` (when non-empty) highlights matches in the body. Shared by the
-/// scroll loop and the `/`-search input prompt.
-#[cfg(feature = "tui")]
+#[allow(clippy::too_many_arguments)]
 fn draw_view(
     terminal: &mut Tui,
     title: &str,
-    body: &str,
+    doc: &[RenderedLine],
     offset: usize,
+    xoff: u16,
     query: &str,
+    wrap: bool,
     footer_fn: impl Fn(usize) -> String,
 ) -> std::io::Result<usize> {
     use ratatui::layout::{Constraint, Layout};
     use ratatui::style::{Modifier, Style};
-    use ratatui::text::Line;
-    use ratatui::widgets::Paragraph;
+    use ratatui::text::{Line, Span, Text};
+    use ratatui::widgets::{Paragraph, Wrap};
 
     let rgb = color::use_rgb(color::detect(true));
     let mut viewport_h = 1usize;
@@ -262,10 +360,26 @@ fn draw_view(
             chunks[0],
         );
         viewport_h = (chunks[1].height as usize).max(1);
-        f.render_widget(
-            Paragraph::new(highlighted_text(body, query, rgb)).scroll((offset as u16, 0)),
-            chunks[1],
-        );
+
+        // Body: pre-styled spans + per-line search overlay; ratatui handles the
+        // vertical/horizontal scroll (and soft-wrap when enabled).
+        let lines: Vec<Line> = doc
+            .iter()
+            .map(|rl| {
+                Line::from(
+                    apply_query_highlight(&rl.spans, &rl.plain, query)
+                        .into_iter()
+                        .map(|(s, st)| Span::styled(s, st))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let mut para = Paragraph::new(Text::from(lines)).scroll((offset as u16, xoff));
+        if wrap {
+            para = para.wrap(Wrap { trim: false });
+        }
+        f.render_widget(para, chunks[1]);
+
         // Footer: padded to a full bar, on the status ground (reverse if no color).
         let mut ft = footer_fn(viewport_h);
         let total = f.area().width as usize;
@@ -294,15 +408,17 @@ fn draw_view(
 fn read_search_query(
     terminal: &mut Tui,
     title: &str,
-    body: &str,
+    doc: &[RenderedLine],
     offset: usize,
+    xoff: u16,
+    wrap: bool,
 ) -> std::io::Result<Option<String>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
     let mut input = String::new();
     loop {
         // Highlight live as the query is typed.
-        draw_view(terminal, title, body, offset, &input, |_vh| {
+        draw_view(terminal, title, doc, offset, xoff, &input, wrap, |_vh| {
             format!(" /{input}   Enter 确认 · Esc 取消 ")
         })?;
         let Event::Key(k) = event::read()? else {
@@ -327,13 +443,16 @@ fn read_search_query(
 /// footer, loop on keystrokes until `q`. Terminal restore is handled by the
 /// overlay guard from [`enter_overlay`].
 #[cfg(feature = "tui")]
-fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
+fn run_pager(title: &str, doc: Vec<RenderedLine>) -> std::io::Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
+    const XSTEP: u16 = 8;
     let (mut terminal, _guard) = enter_overlay()?;
-    let body = lines.join("\n");
-    let total = lines.len();
+    let total = doc.len();
+    let plains: Vec<&str> = doc.iter().map(|l| l.plain.as_str()).collect();
     let mut offset = 0usize;
+    let mut xoff: u16 = 0;
+    let mut wrap = false;
     let mut query = String::new();
     let mut last_match: Option<usize> = None;
 
@@ -345,23 +464,41 @@ fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
     };
 
     loop {
-        let viewport_h = draw_view(&mut terminal, title, &body, offset, &query, |vh| {
-            let end = (offset + vh).min(total);
-            let status = if query.is_empty() {
-                String::new()
-            } else {
-                match last_match {
-                    Some(m) => format!("  /{query}→行{}", m + 1),
-                    None => format!("  /{query} 无匹配"),
-                }
-            };
-            format!(
-                " {title}  行 {}-{}/{}   j/k · /搜索 n/N · g/G · q 退出{status} ",
-                (offset + 1).min(total),
-                end,
-                total
-            )
-        })?;
+        let viewport_h = draw_view(
+            &mut terminal,
+            title,
+            &doc,
+            offset,
+            xoff,
+            &query,
+            wrap,
+            |vh| {
+                let end = (offset + vh).min(total);
+                let status = if query.is_empty() {
+                    String::new()
+                } else {
+                    match last_match {
+                        Some(m) => format!("  /{query}→行{}", m + 1),
+                        None => format!("  /{query} 无匹配"),
+                    }
+                };
+                let xinfo = if xoff > 0 {
+                    format!(" ↔{xoff}")
+                } else {
+                    String::new()
+                };
+                let wmark = if wrap { " ⤶换行" } else { "" };
+                format!(
+                    " {title}  行 {}-{}/{}{}{}   j/k · ←/→ · z · /搜索 n/N · g/G · q 退出{} ",
+                    (offset + 1).min(total),
+                    end,
+                    total,
+                    xinfo,
+                    wmark,
+                    status
+                )
+            },
+        )?;
         let max = total.saturating_sub(viewport_h);
 
         let Event::Key(k) = event::read()? else {
@@ -373,21 +510,32 @@ fn run_pager(title: &str, lines: &[&str]) -> std::io::Result<()> {
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('/') => {
-                if let Some(q) = read_search_query(&mut terminal, title, &body, offset)? {
+                if let Some(q) = read_search_query(&mut terminal, title, &doc, offset, xoff, wrap)?
+                {
                     query = q;
-                    last_match = find_match(lines, &query, offset, true);
+                    last_match = find_match(&plains, &query, offset, true);
                     jump_to(last_match, &mut offset, max);
                 }
             }
             KeyCode::Char('n') if !query.is_empty() => {
                 let from = last_match.map_or(offset, |m| (m + 1) % total);
-                last_match = find_match(lines, &query, from, true);
+                last_match = find_match(&plains, &query, from, true);
                 jump_to(last_match, &mut offset, max);
             }
             KeyCode::Char('N') if !query.is_empty() => {
                 let from = last_match.map_or(offset, |m| (m + total - 1) % total);
-                last_match = find_match(lines, &query, from, false);
+                last_match = find_match(&plains, &query, from, false);
                 jump_to(last_match, &mut offset, max);
+            }
+            // Horizontal scroll (no-op when soft-wrap is on).
+            KeyCode::Left => xoff = xoff.saturating_sub(XSTEP),
+            KeyCode::Right => xoff = xoff.saturating_add(XSTEP),
+            // Toggle soft-wrap; wrap removes horizontal overflow, so reset xoff.
+            KeyCode::Char('z') => {
+                wrap = !wrap;
+                if wrap {
+                    xoff = 0;
+                }
             }
             _ => {
                 let pk = match k.code {
