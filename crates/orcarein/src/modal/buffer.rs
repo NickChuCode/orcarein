@@ -522,8 +522,15 @@ impl EditBuffer {
     /// Charwise inclusive delete of the range `[start, end]` (charwise
     /// register). Cursor lands on the start of the deleted range.
     pub fn delete_range(&mut self, start: Cursor, end: Cursor) {
-        let (start, end) = Self::ordered(start, end);
         self.push_undo();
+        self.delete_range_no_undo(start, end);
+    }
+
+    /// Charwise inclusive delete without an undo push — the shared core of
+    /// `delete_range` and the Visual charwise delete (which pushes undo once
+    /// itself to guarantee a single snapshot per operation).
+    fn delete_range_no_undo(&mut self, start: Cursor, end: Cursor) {
+        let (start, end) = Self::ordered(start, end);
         let text = self.collect_range(&start, &end);
         if start.row == end.row {
             let line = &mut self.lines[start.row];
@@ -585,6 +592,102 @@ impl EditBuffer {
             self.cursor.col = insert_col + pasted.saturating_sub(1);
         }
         self.clamp_cursor();
+    }
+
+    // ---- Visual mode (v / V) + selection operators. ----
+
+    /// `v` — enter charwise Visual mode, anchoring at the current cursor.
+    pub fn enter_visual_char(&mut self) {
+        self.anchor = Some(self.cursor.clone());
+        self.mode = Mode::Visual(VisualKind::Char);
+    }
+
+    /// `V` — enter linewise Visual mode, anchoring at the current cursor.
+    pub fn enter_visual_line(&mut self) {
+        self.anchor = Some(self.cursor.clone());
+        self.mode = Mode::Visual(VisualKind::Line);
+    }
+
+    /// The selection extent as (lo, hi) in document order (lo <= hi). Pure
+    /// (read-only). With no anchor, both ends are the current cursor.
+    pub fn selection_range(&self) -> (Cursor, Cursor) {
+        match &self.anchor {
+            Some(a) => Self::ordered(a.clone(), self.cursor.clone()),
+            None => (self.cursor.clone(), self.cursor.clone()),
+        }
+    }
+
+    /// `y` in Visual mode. Charwise → inclusive charwise yank of the selection;
+    /// linewise → the selected whole rows joined by '\n' (no trailing newline),
+    /// linewise register. Buffer unchanged; returns to Normal and clears anchor.
+    pub fn yank_selection(&mut self) {
+        let (lo, hi) = self.selection_range();
+        match self.mode {
+            Mode::Visual(VisualKind::Line) => {
+                let text = self.lines[lo.row..=hi.row.min(self.lines.len() - 1)].join("\n");
+                self.register = Register {
+                    text,
+                    linewise: true,
+                };
+            }
+            _ => {
+                // Charwise inclusive (also the fallback if not in Visual).
+                self.yank_range(lo, hi);
+            }
+        }
+        self.mode = Mode::Normal;
+        self.anchor = None;
+        self.clamp_cursor();
+    }
+
+    /// `d`/`x` in Visual mode. Charwise → inclusive charwise delete; linewise →
+    /// remove the selected whole rows (linewise register, keep >=1 line). Pushes
+    /// one undo snapshot, returns to Normal and clears anchor.
+    pub fn delete_selection(&mut self) {
+        self.push_undo();
+        self.delete_selection_inner();
+        self.mode = Mode::Normal;
+        self.anchor = None;
+        self.clamp_cursor();
+    }
+
+    /// `c`/`s` in Visual mode: delete the selection, then enter Insert mode.
+    /// Exactly one undo snapshot is pushed.
+    pub fn change_selection(&mut self) {
+        self.push_undo();
+        self.delete_selection_inner();
+        self.anchor = None;
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// Shared delete logic for the selection. Does NOT push undo, set mode, or
+    /// clear the anchor — callers own that to guarantee a single snapshot.
+    fn delete_selection_inner(&mut self) {
+        let (lo, hi) = self.selection_range();
+        match self.mode {
+            Mode::Visual(VisualKind::Line) => {
+                let last = hi.row.min(self.lines.len() - 1);
+                let text = self.lines[lo.row..=last].join("\n");
+                self.lines.drain(lo.row..=last);
+                if self.lines.is_empty() {
+                    self.lines.push(String::new());
+                }
+                self.register = Register {
+                    text,
+                    linewise: true,
+                };
+                self.cursor = Cursor {
+                    row: lo.row,
+                    col: 0,
+                };
+            }
+            _ => {
+                // Charwise inclusive delete via the shared no-undo core (the
+                // caller already pushed exactly one snapshot).
+                self.delete_range_no_undo(lo, hi);
+            }
+        }
     }
 
     /// `P` — paste before the cursor. Linewise → new line(s) above the cursor
@@ -849,5 +952,52 @@ mod tests {
         assert_eq!(b.lines, vec!["abc".to_string(), "def".to_string()]);
         assert_eq!(b.register.text, "bc\nd");
         assert!(!b.register.linewise);
+    }
+
+    #[test]
+    fn visual_char_selection_range_normalizes() {
+        let mut b = EditBuffer::from_str("abcdef");
+        b.cursor.col = 4;
+        b.enter_visual_char(); // anchor at col4
+        b.cursor.col = 1; // move left
+        let (lo, hi) = b.selection_range();
+        assert_eq!((lo.col, hi.col), (1, 4));
+    }
+
+    #[test]
+    fn visual_char_yank_is_charwise() {
+        let mut b = EditBuffer::from_str("abcdef");
+        b.enter_visual_char(); // anchor col0
+        b.cursor.col = 2; // select a,b,c (inclusive)
+        b.yank_selection();
+        assert_eq!(
+            b.register,
+            Register {
+                text: "abc".into(),
+                linewise: false
+            }
+        );
+        assert!(matches!(b.mode, Mode::Normal));
+        assert!(b.anchor.is_none());
+    }
+
+    #[test]
+    fn visual_line_yank_is_linewise() {
+        let mut b = EditBuffer::from_str("a\nb\nc");
+        b.enter_visual_line(); // anchor row0
+        b.cursor.row = 1; // select rows 0..=1
+        b.yank_selection();
+        assert!(b.register.linewise);
+        assert_eq!(b.register.text, "a\nb");
+    }
+
+    #[test]
+    fn visual_delete_removes_selection() {
+        let mut b = EditBuffer::from_str("abcdef");
+        b.enter_visual_char();
+        b.cursor.col = 2; // select abc
+        b.delete_selection();
+        assert_eq!(b.lines, vec!["def".to_string()]);
+        assert!(matches!(b.mode, Mode::Normal));
     }
 }
