@@ -297,6 +297,7 @@ pub fn modal_readline(
             KeyCode::Down => KeyAction::Down,
             KeyCode::Left => KeyAction::Left,
             KeyCode::Right => KeyAction::Right,
+            KeyCode::Tab => KeyAction::Tab,
             _ => continue, // other keys: skip
         };
 

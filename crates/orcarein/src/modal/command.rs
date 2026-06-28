@@ -26,6 +26,7 @@ pub enum KeyAction {
     Down,
     Left,
     Right,
+    Tab,
 }
 
 /// Cursor motions, 1:1 with `EditBuffer` motion methods (Task 3 / Task 9).
