@@ -82,10 +82,11 @@ fn paged_overlay(title: &str, content: &str, kind: DocKind) -> std::io::Result<b
     }
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let usable = rows.saturating_sub(1); // reserve one row for the footer
-    let rgb = color::use_rgb(color::detect(true));
+    let mode = color::detect(true);
+    let rgb = color::use_rgb(mode);
     let doc = match kind {
-        DocKind::Markdown => crate::markdown::render(content, cols, rgb, false),
-        DocKind::Code(lang) => code_doc(content, &lang, rgb),
+        DocKind::Markdown => crate::markdown::render(content, cols, mode, false),
+        DocKind::Code(lang) => code_doc(content, &lang, mode),
         DocKind::Plain => plain_doc(content, rgb),
     };
     if !needs_pager(doc.len(), usable) {
@@ -206,22 +207,22 @@ pub(crate) fn plain_doc(content: &str, rgb: bool) -> Vec<RenderedLine> {
 }
 
 /// Build a doc from a standalone code file: each line syntax-highlighted by
-/// `lang` (when `rgb`), full-width with no gutter (a `bat`/`less`-style viewer).
-/// `rgb` off → plain lines. `plain == spans concat` holds (search/scroll rely
-/// on it), since the lexer's runs reconstruct each line exactly.
+/// `lang` (tiered for `mode`), full-width with no gutter (a `bat`/`less`-style
+/// viewer). NO_COLOR → plain lines. `plain == spans concat` holds (search/scroll
+/// rely on it), since the lexer's runs reconstruct each line exactly.
 #[cfg(feature = "tui")]
-fn code_doc(content: &str, lang: &str, rgb: bool) -> Vec<RenderedLine> {
+fn code_doc(content: &str, lang: &str, mode: color::ColorMode) -> Vec<RenderedLine> {
     use ratatui::style::Style;
     content
         .split('\n')
         .map(|line| {
-            if !rgb {
+            if mode == color::ColorMode::None {
                 return plain_line(line, false);
             }
             let spans: Vec<(String, Style)> = crate::syntax::highlight(line, lang)
                 .into_iter()
                 .map(|(s, kind)| {
-                    let st = match color::syn_color(kind) {
+                    let st = match color::syn_color(kind, mode) {
                         Some(c) => Style::default().fg(c),
                         None => Style::default(),
                     };

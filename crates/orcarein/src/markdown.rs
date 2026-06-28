@@ -25,8 +25,8 @@ const INLINE_BG: Color = Color::Rgb(22, 34, 60); // #16223C
 /// no color (structure kept via glyphs/bold). `wrap` is accepted for symmetry
 /// with the pager toggle; prose is always wrapped to `width`, while code lines
 /// are kept intact (the pager scrolls/​wraps them) regardless.
-pub fn render(src: &str, width: u16, rgb: bool, _wrap: bool) -> Vec<RenderedLine> {
-    let mut md = Md::new(width.max(8) as usize, rgb);
+pub fn render(src: &str, width: u16, mode: color::ColorMode, _wrap: bool) -> Vec<RenderedLine> {
+    let mut md = Md::new(width.max(8) as usize, mode);
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     for ev in Parser::new_ext(src, opts) {
         md.event(ev);
@@ -41,6 +41,9 @@ struct ListCtx {
 
 struct Md {
     width: usize,
+    /// Resolved terminal color capability — drives syntax tiering directly and the
+    /// boolean `rgb` (= `use_rgb(mode)`) the rest of the renderer keys off.
+    mode: color::ColorMode,
     rgb: bool,
     out: Vec<RenderedLine>,
     runs: Vec<(String, Style)>, // inline runs for the active block
@@ -69,10 +72,11 @@ struct Table {
 }
 
 impl Md {
-    fn new(width: usize, rgb: bool) -> Self {
+    fn new(width: usize, mode: color::ColorMode) -> Self {
         Md {
             width,
-            rgb,
+            mode,
+            rgb: color::use_rgb(mode),
             out: Vec::new(),
             runs: Vec::new(),
             bold: false,
@@ -375,8 +379,9 @@ impl Md {
         let lang_lc = self.code_lang.to_lowercase();
         let buf = std::mem::take(&mut self.code_buf);
         for line in buf.trim_end_matches('\n').split('\n') {
-            // Styled runs: syntax-highlighted when rgb, else a single body run.
-            let runs: Vec<(String, Style)> = if self.rgb {
+            // Styled runs: syntax-highlighted in every colored mode (the lexer
+            // tiers per `self.mode`), a single body run only under NO_COLOR.
+            let runs: Vec<(String, Style)> = if self.mode != color::ColorMode::None {
                 crate::syntax::highlight(line, &lang_lc)
                     .into_iter()
                     .map(|(s, kind)| (s, self.code_token_style(kind, body)))
@@ -408,9 +413,9 @@ impl Md {
     }
 
     /// The style for a code token: the block body (fg+bg) with the syntax color
-    /// overriding the fg (Plain keeps body). Only applied on the rgb path.
+    /// (tiered for `self.mode`) overriding the fg (Plain keeps body).
     fn code_token_style(&self, kind: crate::syntax::SynKind, body: Style) -> Style {
-        match color::syn_color(kind) {
+        match color::syn_color(kind, self.mode) {
             Some(c) => body.fg(c),
             None => body,
         }
@@ -764,7 +769,7 @@ mod tests {
     use super::*;
 
     fn plains(src: &str, width: u16) -> Vec<String> {
-        render(src, width, false, false)
+        render(src, width, color::ColorMode::None, false)
             .into_iter()
             .map(|l| l.plain)
             .collect()
@@ -837,10 +842,10 @@ mod tests {
         let _ = render(
             "# Hi\n\n| a | b |\n|-|-|\n| 1 | 2 |\n\n```\nx\n```",
             4,
-            true,
+            color::ColorMode::Truecolor,
             false,
         );
-        let _ = render("", 0, false, false);
+        let _ = render("", 0, color::ColorMode::None, false);
     }
 
     #[test]
@@ -906,8 +911,13 @@ mod tests {
 
     #[test]
     fn code_block_highlights_when_rgb() {
-        // rgb=true → keyword/number split into separate styled spans.
-        let lines = render("```rust\nlet x = 1;\n```", 80, true, false);
+        // truecolor → keyword/number split into separate styled spans.
+        let lines = render(
+            "```rust\nlet x = 1;\n```",
+            80,
+            color::ColorMode::Truecolor,
+            false,
+        );
         let code = lines
             .iter()
             .find(|l| l.plain.contains("let x = 1;"))
@@ -919,6 +929,45 @@ mod tests {
             code.spans.len() > 2,
             "expected multiple spans: {:?}",
             code.spans
+        );
+    }
+
+    #[test]
+    fn code_block_highlights_on_16_color_terminal() {
+        // The §09 third tier: syntax now renders on a 16-color terminal too
+        // (previously monochrome). plain stays identical; content splits into spans.
+        let lines = render(
+            "```rust\nlet x = 1;\n```",
+            80,
+            color::ColorMode::Ansi16,
+            false,
+        );
+        let code = lines
+            .iter()
+            .find(|l| l.plain.contains("let x = 1;"))
+            .expect("code line");
+        assert_eq!(code.plain, "▏ let x = 1;");
+        assert!(
+            code.spans.len() > 2,
+            "expected highlighted spans at Ansi16: {:?}",
+            code.spans
+        );
+        // NO_COLOR stays a single content run (gutter + one body span).
+        let mono = render(
+            "```rust\nlet x = 1;\n```",
+            80,
+            color::ColorMode::None,
+            false,
+        );
+        let mono_code = mono
+            .iter()
+            .find(|l| l.plain.contains("let x = 1;"))
+            .expect("code line");
+        assert_eq!(
+            mono_code.spans.len(),
+            2,
+            "NO_COLOR should not highlight: {:?}",
+            mono_code.spans
         );
     }
 

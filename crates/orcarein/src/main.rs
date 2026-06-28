@@ -1662,7 +1662,13 @@ fn prompt_permission(name: &str, args: &str, fancy: bool, mode: color::ColorMode
 /// its content rendered as Markdown (tool calls/results stay plain). `tui` only —
 /// the headless build uses the plain-text [`render_transcript`] instead.
 #[cfg(feature = "tui")]
-fn history_doc(session: &Session, width: u16, rgb: bool) -> Vec<overlay::RenderedLine> {
+fn history_doc(
+    session: &Session,
+    width: u16,
+    mode: color::ColorMode,
+) -> Vec<overlay::RenderedLine> {
+    // Role bars use the boolean `rgb`; Markdown bodies tier per `mode`.
+    let rgb = color::use_rgb(mode);
     let mut doc: Vec<overlay::RenderedLine> = Vec::new();
     let blank = |d: &mut Vec<overlay::RenderedLine>| d.push(overlay::styled_line("", rgb));
     for m in session.messages() {
@@ -1670,7 +1676,7 @@ fn history_doc(session: &Session, width: u16, rgb: bool) -> Vec<overlay::Rendere
             "system" => continue, // not part of the visible chat
             "user" => {
                 doc.push(overlay::styled_line("▌ 你", rgb));
-                doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                doc.extend(markdown::render(m.content.trim_end(), width, mode, false));
                 blank(&mut doc);
             }
             "assistant" => {
@@ -1685,7 +1691,7 @@ fn history_doc(session: &Session, width: u16, rgb: bool) -> Vec<overlay::Rendere
                 }
                 if !m.content.trim().is_empty() {
                     doc.push(overlay::styled_line("▌ OrcaRein", rgb));
-                    doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                    doc.extend(markdown::render(m.content.trim_end(), width, mode, false));
                 }
                 blank(&mut doc);
             }
@@ -1698,7 +1704,7 @@ fn history_doc(session: &Session, width: u16, rgb: bool) -> Vec<overlay::Rendere
             }
             other => {
                 doc.push(overlay::styled_line(&format!("▌ {other}"), rgb));
-                doc.extend(markdown::render(m.content.trim_end(), width, rgb, false));
+                doc.extend(markdown::render(m.content.trim_end(), width, mode, false));
                 blank(&mut doc);
             }
         }
@@ -2019,8 +2025,7 @@ fn handle_command(
         "history" => {
             #[cfg(feature = "tui")]
             {
-                let rgb = color::use_rgb(mode);
-                let doc = history_doc(session, overlay::term_cols(), rgb);
+                let doc = history_doc(session, overlay::term_cols(), mode);
                 if let Err(e) = overlay::show_doc("对话记录", doc) {
                     eprintln!("显示失败：{e}");
                 }
@@ -2843,7 +2848,7 @@ mod tests {
         let mut s = Session::new("be a helpful secret system prompt");
         s.push_user("hello");
         s.push_assistant(Message::assistant("hi **there**"));
-        let doc = super::history_doc(&s, 80, false);
+        let doc = super::history_doc(&s, 80, color::ColorMode::None);
         let joined: String = doc
             .iter()
             .map(|l| l.plain.clone())

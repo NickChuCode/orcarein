@@ -145,18 +145,59 @@ pub fn rt(token: Token) -> ratatui::style::Color {
     ratatui::style::Color::Rgb(r, g, b)
 }
 
-/// Syntax-highlight color for a token kind (drafted to extend the Claude Design
-/// "OrcaRein 终端设计系统" — author finalizes the exact hex). `Plain` → None
-/// (keeps the code-block body fg). Only the fg is overridden; the block bg stays.
+/// Map an ANSI SGR foreground code (`30`–`37` / `90`–`97`) to its 0–15 palette
+/// index. [`Token::spec`] stores the 16-color tier as the final SGR number; a
+/// ratatui `Color::Indexed` wants the palette index, so bright codes `9x` map to
+/// `8..=15` and normal codes `3x` to `0..=7`.
 #[cfg(feature = "tui")]
-pub fn syn_color(kind: crate::syntax::SynKind) -> Option<ratatui::style::Color> {
+const fn sgr_fg_to_index(sgr: u16) -> u8 {
+    if sgr >= 90 {
+        (sgr - 90 + 8) as u8
+    } else {
+        (sgr - 30) as u8
+    }
+}
+
+/// The mode-aware sibling of [`rt`]: tiers `token` explicitly for `mode` on a
+/// ratatui surface — truecolor → `Rgb`, 256 → `Indexed` (design 256 tier), 16 →
+/// `Indexed` (palette index of the design SGR code). `None` returns the truecolor
+/// `Rgb`; callers that distinguish NO_COLOR gate it before calling.
+#[cfg(feature = "tui")]
+pub fn rt_mode(token: Token, mode: ColorMode) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    let (r, g, b, c256, c16) = token.spec();
+    match mode {
+        ColorMode::Truecolor | ColorMode::None => Color::Rgb(r, g, b),
+        ColorMode::Ansi256 => Color::Indexed(c256),
+        ColorMode::Ansi16 => Color::Indexed(sgr_fg_to_index(c16)),
+    }
+}
+
+/// Syntax-highlight color for a token kind, finalized via the Claude Design
+/// "OrcaRein 终端设计系统" §09 (cold lexicon / warm literals on the #16223C code
+/// bg). Tiers explicitly across `mode` so a 256/16-color SBC ssh session gets the
+/// design's chosen approximations rather than ratatui's auto-downgrade. NO_COLOR
+/// retreats every kind to the body fg (`None`); `Plain` is never colored. Only the
+/// fg is overridden — the code-block bg stays.
+#[cfg(feature = "tui")]
+pub fn syn_color(kind: crate::syntax::SynKind, mode: ColorMode) -> Option<ratatui::style::Color> {
     use crate::syntax::SynKind::*;
-    use ratatui::style::Color::Rgb;
+    use ratatui::style::Color;
+    if mode == ColorMode::None {
+        return None; // every syntax color retreats to fg under NO_COLOR
+    }
+    // (truecolor RGB, 256-color index, 16-color palette index) per design §09.
+    let tier = |r: u8, g: u8, b: u8, c256: u8, c16: u8| match mode {
+        ColorMode::Truecolor => Color::Rgb(r, g, b),
+        ColorMode::Ansi256 => Color::Indexed(c256),
+        ColorMode::Ansi16 => Color::Indexed(c16),
+        ColorMode::None => unreachable!("handled above"),
+    };
     Some(match kind {
-        Keyword => Rgb(0xC9, 0x9B, 0xE6),       // soft violet
-        Str => Rgb(0x8F, 0xD9, 0x8F),           // soft green
-        Comment => return Some(rt(Token::Dim)), // delegate → stays in sync if Dim retunes
-        Number => Rgb(0xE0, 0xA6, 0x6B),        // warm amber
+        Keyword => tier(0xB7, 0x9B, 0xE6, 140, 13), // lavender violet
+        Str => tier(0x8F, 0xD9, 0xB0, 115, 10),     // mint green
+        Number => tier(0xE8, 0xA9, 0x74, 179, 11),  // warm peach
+        Comment => rt_mode(Token::Dim, mode),       // delegate → stays in sync if Dim retunes
         Plain => return None,
     })
 }
@@ -257,6 +298,88 @@ mod tests {
             classify(true, false, Some("24bit"), None),
             ColorMode::Truecolor
         );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn syn_color_tiers_explicitly_by_mode() {
+        use crate::syntax::SynKind;
+        use ratatui::style::Color;
+        // Truecolor → the design's exact RGB (variant-level: hex may retune).
+        assert!(matches!(
+            syn_color(SynKind::Keyword, ColorMode::Truecolor),
+            Some(Color::Rgb(..))
+        ));
+        // Ansi256 → the design §09 explicit 256-color approximations.
+        assert_eq!(
+            syn_color(SynKind::Keyword, ColorMode::Ansi256),
+            Some(Color::Indexed(140))
+        );
+        assert_eq!(
+            syn_color(SynKind::Str, ColorMode::Ansi256),
+            Some(Color::Indexed(115))
+        );
+        assert_eq!(
+            syn_color(SynKind::Number, ColorMode::Ansi256),
+            Some(Color::Indexed(179))
+        );
+        // Ansi16 → the design §09 explicit 16-color palette indices.
+        assert_eq!(
+            syn_color(SynKind::Keyword, ColorMode::Ansi16),
+            Some(Color::Indexed(13))
+        );
+        assert_eq!(
+            syn_color(SynKind::Str, ColorMode::Ansi16),
+            Some(Color::Indexed(10))
+        );
+        assert_eq!(
+            syn_color(SynKind::Number, ColorMode::Ansi16),
+            Some(Color::Indexed(11))
+        );
+        // NO_COLOR → every syntax kind retreats to the body fg.
+        assert_eq!(syn_color(SynKind::Keyword, ColorMode::None), None);
+        assert_eq!(syn_color(SynKind::Str, ColorMode::None), None);
+        // Plain identifiers are never colored, in any mode.
+        assert_eq!(syn_color(SynKind::Plain, ColorMode::Truecolor), None);
+        assert_eq!(syn_color(SynKind::Plain, ColorMode::Ansi16), None);
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn syn_color_comment_delegates_to_dim_across_tiers() {
+        use crate::syntax::SynKind;
+        use ratatui::style::Color;
+        // Comment follows Token::Dim, tiering with the mode (so it stays in sync if
+        // Dim retunes) — colored in every tier, only NO_COLOR retreats to fg.
+        assert_eq!(
+            syn_color(SynKind::Comment, ColorMode::Truecolor),
+            Some(rt(Token::Dim))
+        );
+        assert_eq!(
+            syn_color(SynKind::Comment, ColorMode::Ansi256),
+            Some(rt_mode(Token::Dim, ColorMode::Ansi256))
+        );
+        assert!(matches!(
+            syn_color(SynKind::Comment, ColorMode::Ansi16),
+            Some(Color::Indexed(_))
+        ));
+        assert_eq!(syn_color(SynKind::Comment, ColorMode::None), None);
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn rt_mode_maps_sgr_fg_codes_to_palette_indices() {
+        use ratatui::style::Color;
+        // Token::Dim's 16-color SGR is 90 (bright black) → palette index 8.
+        assert_eq!(rt_mode(Token::Dim, ColorMode::Ansi16), Color::Indexed(8));
+        // Token::Brand's SGR 94 (bright blue) → index 12; 256 tier passes through.
+        assert_eq!(rt_mode(Token::Brand, ColorMode::Ansi16), Color::Indexed(12));
+        assert_eq!(
+            rt_mode(Token::Brand, ColorMode::Ansi256),
+            Color::Indexed(63)
+        );
+        // Token::Fg's SGR 37 (white) → index 7 (the 30-37 range).
+        assert_eq!(rt_mode(Token::Fg, ColorMode::Ansi16), Color::Indexed(7));
     }
 
     #[test]
