@@ -510,6 +510,29 @@ fn wrap_runs(
         .collect()
 }
 
+/// Render `s` into exactly `w` display columns (CJK=2): truncate with a trailing
+/// '…' when too wide, else right-pad with spaces. Always returns exactly `w`
+/// columns (including after '…', and when padding a width-2 CJK char that can't
+/// fit an odd slot). Never splits a char.
+fn fit_cell(s: &str, w: usize) -> String {
+    let s = s.trim();
+    if w == 0 {
+        return String::new();
+    }
+    let sw = disp_width(s);
+    if sw <= w {
+        return format!("{s}{}", " ".repeat(w - sw));
+    }
+    // Too wide: keep w-1 columns + '…' (… is 1 column).
+    let kept = crate::header::truncate_to_width(s, w - 1);
+    let mut out = format!("{kept}…");
+    let ow = disp_width(&out);
+    if ow < w {
+        out.push_str(&" ".repeat(w - ow)); // odd-width CJK slot: pad to w
+    }
+    out
+}
+
 /// Render a parsed table to box-drawn lines. Columns are sized by display width
 /// (CJK = 2); if the total exceeds `width`, the rightmost columns are dropped and
 /// a `╌` marker is appended to flag the truncation.
@@ -706,5 +729,25 @@ mod tests {
             false,
         );
         let _ = render("", 0, false, false);
+    }
+
+    #[test]
+    fn fit_cell_pads_truncates_and_keeps_exact_width() {
+        use super::fit_cell;
+        // fits → right-pad to w
+        assert_eq!(fit_cell("ab", 4), "ab  ");
+        // exact → unchanged
+        assert_eq!(fit_cell("abcd", 4), "abcd");
+        // too wide → truncate to w-1 + … (disp_width exactly w)
+        let f = fit_cell("abcdef", 4);
+        assert_eq!(disp_width(&f), 4);
+        assert!(f.ends_with('…'));
+        // w == 0 → empty
+        assert_eq!(fit_cell("x", 0), "");
+        // full-width CJK in an odd slot: can't fit half a glyph → … + pad, exactly w
+        let g = fit_cell("中文", 3);
+        assert_eq!(disp_width(&g), 3);
+        // w == 1 and too wide → a lone …
+        assert_eq!(fit_cell("中", 1), "…");
     }
 }
