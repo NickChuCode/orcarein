@@ -374,7 +374,13 @@ pub fn modal_readline(
                         if end_excl > at.col {
                             // Capture row before moving `at` (Cursor: not Copy).
                             let r = at.row;
-                            buf.delete_range(at, Cursor { row: r, col: end_excl - 1 });
+                            buf.delete_range(
+                                at,
+                                Cursor {
+                                    row: r,
+                                    col: end_excl - 1,
+                                },
+                            );
                         }
                         for c in ins.chars() {
                             buf.insert_char(c);

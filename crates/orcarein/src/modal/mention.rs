@@ -10,8 +10,8 @@ use crate::modal::buffer::{Cursor, EditBuffer};
 #[derive(Default)]
 pub struct MentionState {
     pub active: bool,
-    pub at: Cursor,           // the triggering '@' position (char indices)
-    pub query: String,        // non-whitespace run after '@', up to the cursor
+    pub at: Cursor,    // the triggering '@' position (char indices)
+    pub query: String, // non-whitespace run after '@', up to the cursor
     pub candidates: Vec<String>,
     pub filtered: Vec<usize>, // indices into `candidates`, best-first
     pub selected: usize,      // index into `filtered`
@@ -96,7 +96,10 @@ impl MentionState {
         match at {
             Some(a) if a == 0 || line[a - 1].is_whitespace() => {
                 self.active = true;
-                self.at = Cursor { row: cur.row, col: a };
+                self.at = Cursor {
+                    row: cur.row,
+                    col: a,
+                };
                 self.query = line[a + 1..cur.col.min(line.len())].iter().collect();
                 true
             }
@@ -137,7 +140,7 @@ mod tests {
         // "mar" is a substring of markdown.rs and a subsequence of others.
         let got: Vec<&str> = filter("mar", &c).iter().map(|&i| c[i].as_str()).collect();
         assert_eq!(got.first(), Some(&"src/markdown.rs")); // substring wins
-        // no match
+                                                           // no match
         assert!(filter("zzz", &c).is_empty());
         // empty query → all, candidate order
         assert_eq!(filter("", &c), vec![0, 1, 2, 3]);
