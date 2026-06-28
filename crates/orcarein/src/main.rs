@@ -1218,15 +1218,38 @@ async fn main() -> Result<()> {
         let _ = editor.add_history_entry(input);
         #[cfg(feature = "tui")]
         history.push(input.to_string());
-        // Expand `@path` mentions into file-content blocks for the model. The
+        // Expand `@path` mentions into file/directory blocks for the model. The
         // original `input` (with `@path`) is kept for history/display above; only
-        // the message sent to the model carries the expanded file content. The
-        // blocks land at the tail of the latest user turn, so the cached prefix
-        // (system + prior turns) is untouched.
+        // the message sent to the model carries the expanded content. The blocks
+        // land at the tail of the latest user turn, so the cached prefix (system +
+        // prior turns) is untouched.
+        const DIR_CAP: usize = 500;
+        const BIG_CAP: usize = 5000;
+        // One gitignore-correct repo walk (from cwd), only when there's an @.
+        let mention_cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let all_files = if input.contains('@') {
+            orcarein_core::mention::list_project_files(&mention_cwd, BIG_CAP, false)
+        } else {
+            Vec::new()
+        };
         let expanded = orcarein_core::mention::expand_mentions(input, |p| {
-            std::fs::read_to_string(std::path::Path::new(p))
-                .ok()
-                .map(|s| cap_chars(&s, 32 * 1024))
+            let path = std::path::Path::new(p);
+            if path.is_dir() {
+                // Recursive file tree = repo file list filtered to this subtree.
+                let base = p.trim_end_matches('/');
+                let prefix = format!("{base}/");
+                let tree: Vec<String> = all_files
+                    .iter()
+                    .filter(|f| f.starts_with(&prefix))
+                    .take(DIR_CAP)
+                    .cloned()
+                    .collect();
+                Some(orcarein_core::mention::Resolved::Dir(tree))
+            } else {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .map(|s| orcarein_core::mention::Resolved::File(cap_chars(&s, 32 * 1024)))
+            }
         });
         session.push_user(expanded);
 

@@ -18,9 +18,9 @@ pub fn list_project_files(cwd: &Path, cap: usize, include_dirs: bool) -> Vec<Str
             Some(ft) => ft,
             None => continue,
         };
-        let is_file = ft.is_file();
         let is_dir = ft.is_dir();
-        if !is_file && !(is_dir && include_dirs) {
+        let keep = ft.is_file() || (is_dir && include_dirs);
+        if !keep {
             continue; // skip non-files unless we're including dirs
         }
         if let Ok(rel) = entry.path().strip_prefix(cwd) {
@@ -41,11 +41,20 @@ pub fn list_project_files(cwd: &Path, cap: usize, include_dirs: bool) -> Vec<Str
     out
 }
 
+/// What an `@path` mention resolves to.
+pub enum Resolved {
+    /// File content (already capped by the reader).
+    File(String),
+    /// Recursive file tree under the dir (repo-relative paths, already capped).
+    Dir(Vec<String>),
+}
+
 /// Scan `text` for `@<path>` tokens (path = non-whitespace run after a boundary
 /// `@` — start-of-text or whitespace, which covers `\n`). For each path that
-/// `reader` resolves, append a delimited `<file>` block; leave unresolved ones
-/// as literal text. Dedupe by path; the user's text is preserved verbatim.
-pub fn expand_mentions(text: &str, reader: impl Fn(&str) -> Option<String>) -> String {
+/// `reader` resolves, append a delimited block (`<file>` for content, `<directory>`
+/// for a file tree); leave unresolved ones as literal text. Dedupe by path; the
+/// user's text is preserved verbatim.
+pub fn expand_mentions(text: &str, reader: impl Fn(&str) -> Option<Resolved>) -> String {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut paths: Vec<String> = Vec::new();
@@ -72,8 +81,18 @@ pub fn expand_mentions(text: &str, reader: impl Fn(&str) -> Option<String>) -> S
     }
     let mut blocks = String::new();
     for p in &paths {
-        if let Some(content) = reader(p) {
-            blocks.push_str(&format!("\n\n<file path=\"{p}\">\n{content}\n</file>"));
+        match reader(p) {
+            Some(Resolved::File(content)) => {
+                blocks.push_str(&format!("\n\n<file path=\"{p}\">\n{content}\n</file>"));
+            }
+            Some(Resolved::Dir(tree)) => {
+                let mut body = String::new();
+                for f in &tree {
+                    body.push_str(&format!("  {f}\n"));
+                }
+                blocks.push_str(&format!("\n\n<directory path=\"{p}\">\n{body}</directory>"));
+            }
+            None => {} // unresolved: leave @path as literal
         }
     }
     if blocks.is_empty() {
@@ -135,7 +154,7 @@ mod tests {
     #[test]
     fn expands_resolved_mentions_dedup_and_leaves_unresolved() {
         let reader = |p: &str| match p {
-            "src/a.rs" => Some("CONTENT_A".to_string()),
+            "src/a.rs" => Some(Resolved::File("CONTENT_A".to_string())),
             _ => None,
         };
         // single mention → file block appended, original text kept
@@ -154,5 +173,26 @@ mod tests {
         assert!(!out4.contains("<file"));
         // no mention → unchanged
         assert_eq!(expand_mentions("plain text", reader), "plain text");
+    }
+
+    #[test]
+    fn expands_directory_mentions_to_a_directory_block() {
+        let reader = |p: &str| match p {
+            "src/" => Some(Resolved::Dir(vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+            ])),
+            "empty/" => Some(Resolved::Dir(vec![])),
+            _ => None,
+        };
+        let out = expand_mentions("look at @src/ here", reader);
+        assert!(out.starts_with("look at @src/ here"));
+        assert!(out.contains("<directory path=\"src/\">"));
+        assert!(out.contains("  src/a.rs\n"));
+        assert!(out.contains("  src/b.rs\n"));
+        assert!(out.contains("</directory>"));
+        // Empty directory → exact open/close with one newline between.
+        let e = expand_mentions("@empty/", reader);
+        assert!(e.contains("<directory path=\"empty/\">\n</directory>"));
     }
 }
