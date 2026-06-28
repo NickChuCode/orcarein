@@ -377,6 +377,243 @@ impl EditBuffer {
         }
         self.desired_col = self.cursor.col;
     }
+
+    // ---- Normal-mode operators: delete / change / yank + paste. ----
+
+    /// `x` — delete the char under the cursor (charwise register). No-op on an
+    /// empty line.
+    pub fn delete_char(&mut self) {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        if col >= self.row_chars(row) {
+            return; // empty line or past end: nothing under cursor
+        }
+        self.push_undo();
+        let line = &mut self.lines[row];
+        let start = Self::byte_at(line, col);
+        let removed = line[start..].chars().next().unwrap();
+        line.remove(start);
+        self.register = Register {
+            text: removed.to_string(),
+            linewise: false,
+        };
+        self.clamp_cursor();
+    }
+
+    /// `D` — delete from the cursor to the end of the line (charwise register).
+    pub fn delete_to_line_end(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row;
+        let line = &mut self.lines[row];
+        let start = Self::byte_at(line, self.cursor.col);
+        let tail = line.split_off(start);
+        self.register = Register {
+            text: tail,
+            linewise: false,
+        };
+        self.clamp_cursor();
+    }
+
+    /// `C` — change to end of line: delete to line end, then enter Insert.
+    pub fn change_to_line_end(&mut self) {
+        self.delete_to_line_end();
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `dd` — delete the whole current line (linewise register). Leaves one
+    /// empty line if it was the last remaining line.
+    pub fn delete_line(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row;
+        let removed = self.lines.remove(row);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.register = Register {
+            text: removed,
+            linewise: true,
+        };
+        // Stay on the same row index (now the following line), clamped.
+        self.cursor.col = 0;
+        self.clamp_cursor();
+    }
+
+    /// `cc` — change the whole line: clear it (keep the line), register the old
+    /// content linewise, enter Insert at col 0.
+    pub fn change_line(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row;
+        let old = std::mem::take(&mut self.lines[row]);
+        self.register = Register {
+            text: old,
+            linewise: true,
+        };
+        self.cursor.col = 0;
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `yy` / `Y` — yank the current line into the register (linewise). The
+    /// buffer and cursor are unchanged (no undo push).
+    pub fn yank_line(&mut self) {
+        let row = self.cursor.row;
+        let text = self.lines.get(row).cloned().unwrap_or_default();
+        self.register = Register {
+            text,
+            linewise: true,
+        };
+    }
+
+    /// Normalize a pair of cursors into (start, end) document order.
+    fn ordered(a: Cursor, b: Cursor) -> (Cursor, Cursor) {
+        if (a.row, a.col) <= (b.row, b.col) {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    /// Collect the inclusive charwise text between `start` and `end` (across
+    /// lines). Used by both `yank_range` and `delete_range`.
+    fn collect_range(&self, start: &Cursor, end: &Cursor) -> String {
+        if start.row == end.row {
+            let line = match self.lines.get(start.row) {
+                Some(l) => l,
+                None => return String::new(),
+            };
+            let from = Self::byte_at(line, start.col);
+            let to = Self::byte_at(line, end.col + 1);
+            return line[from..to.min(line.len())].to_string();
+        }
+        let mut out = String::new();
+        // First line: from start.col to its end.
+        if let Some(first) = self.lines.get(start.row) {
+            let from = Self::byte_at(first, start.col);
+            out.push_str(&first[from..]);
+        }
+        out.push('\n');
+        // Whole middle lines.
+        for r in (start.row + 1)..end.row {
+            if let Some(mid) = self.lines.get(r) {
+                out.push_str(mid);
+            }
+            out.push('\n');
+        }
+        // Last line: from its start through end.col (inclusive).
+        if let Some(last) = self.lines.get(end.row) {
+            let to = Self::byte_at(last, end.col + 1);
+            out.push_str(&last[..to.min(last.len())]);
+        }
+        out
+    }
+
+    /// Charwise inclusive yank of the range `[start, end]` (no mutation, no
+    /// undo). Cursors may be given in any order.
+    pub fn yank_range(&mut self, start: Cursor, end: Cursor) {
+        let (start, end) = Self::ordered(start, end);
+        let text = self.collect_range(&start, &end);
+        self.register = Register {
+            text,
+            linewise: false,
+        };
+    }
+
+    /// Charwise inclusive delete of the range `[start, end]` (charwise
+    /// register). Cursor lands on the start of the deleted range.
+    pub fn delete_range(&mut self, start: Cursor, end: Cursor) {
+        let (start, end) = Self::ordered(start, end);
+        self.push_undo();
+        let text = self.collect_range(&start, &end);
+        if start.row == end.row {
+            let line = &mut self.lines[start.row];
+            let from = Self::byte_at(line, start.col);
+            let to = Self::byte_at(line, end.col + 1).min(line.len());
+            line.replace_range(from..to, "");
+        } else {
+            // Head of the first line, tail after end.col on the last line.
+            let head: String = {
+                let first = &self.lines[start.row];
+                first[..Self::byte_at(first, start.col)].to_string()
+            };
+            let tail: String = {
+                let last = &self.lines[end.row];
+                let after = Self::byte_at(last, end.col + 1).min(last.len());
+                last[after..].to_string()
+            };
+            // Remove the inner lines (end.row down to start.row+1), then splice.
+            self.lines.drain((start.row + 1)..=end.row);
+            self.lines[start.row] = head + &tail;
+        }
+        self.register = Register {
+            text,
+            linewise: false,
+        };
+        self.cursor = start;
+        self.clamp_cursor();
+    }
+
+    /// `p` — paste after the cursor. Linewise → new line(s) below the cursor
+    /// row; charwise → inline after the cursor.
+    pub fn paste_after(&mut self) {
+        if self.register.text.is_empty() && !self.register.linewise {
+            return;
+        }
+        self.push_undo();
+        if self.register.linewise {
+            let at = self.cursor.row + 1;
+            let new_lines: Vec<String> =
+                self.register.text.split('\n').map(str::to_string).collect();
+            for (i, l) in new_lines.into_iter().enumerate() {
+                self.lines.insert(at + i, l);
+            }
+            self.cursor = Cursor { row: at, col: 0 };
+        } else {
+            let row = self.cursor.row;
+            // Paste after the cursor char: at col+1 unless the line is empty.
+            let insert_col = if self.row_chars(row) == 0 {
+                0
+            } else {
+                self.cursor.col + 1
+            };
+            let text = self.register.text.clone();
+            let pasted = text.chars().count();
+            let line = &mut self.lines[row];
+            let at = Self::byte_at(line, insert_col);
+            line.insert_str(at, &text);
+            // Cursor lands on the last pasted char.
+            self.cursor.col = insert_col + pasted.saturating_sub(1);
+        }
+        self.clamp_cursor();
+    }
+
+    /// `P` — paste before the cursor. Linewise → new line(s) above the cursor
+    /// row; charwise → inline before the cursor.
+    pub fn paste_before(&mut self) {
+        if self.register.text.is_empty() && !self.register.linewise {
+            return;
+        }
+        self.push_undo();
+        if self.register.linewise {
+            let at = self.cursor.row;
+            let new_lines: Vec<String> =
+                self.register.text.split('\n').map(str::to_string).collect();
+            for (i, l) in new_lines.into_iter().enumerate() {
+                self.lines.insert(at + i, l);
+            }
+            self.cursor = Cursor { row: at, col: 0 };
+        } else {
+            let row = self.cursor.row;
+            let insert_col = self.cursor.col;
+            let text = self.register.text.clone();
+            let pasted = text.chars().count();
+            let line = &mut self.lines[row];
+            let at = Self::byte_at(line, insert_col);
+            line.insert_str(at, &text);
+            self.cursor.col = insert_col + pasted.saturating_sub(1);
+        }
+        self.clamp_cursor();
+    }
 }
 
 impl Default for EditBuffer {
@@ -527,5 +764,90 @@ mod tests {
         b.leave_insert();
         assert!(matches!(b.mode, Mode::Normal));
         assert_eq!(b.cursor.col, 1); // vim behavior
+    }
+
+    #[test]
+    fn x_deletes_char_under_cursor_charwise_register() {
+        let mut b = EditBuffer::from_str("abc");
+        b.cursor.col = 1;
+        b.delete_char();
+        assert_eq!(b.lines, vec!["ac".to_string()]);
+        assert_eq!(
+            b.register,
+            Register {
+                text: "b".into(),
+                linewise: false
+            }
+        );
+    }
+
+    #[test]
+    fn dd_deletes_line_linewise_register() {
+        let mut b = EditBuffer::from_str("a\nb\nc");
+        b.cursor.row = 1;
+        b.delete_line();
+        assert_eq!(b.lines, vec!["a".to_string(), "c".to_string()]);
+        assert!(b.register.linewise);
+        assert_eq!(b.register.text, "b");
+    }
+
+    #[test]
+    fn yy_then_p_opens_new_line_below() {
+        let mut b = EditBuffer::from_str("a\nb");
+        b.yank_line(); // register = "a" linewise
+        b.paste_after(); // p: linewise -> new line below cursor row
+        assert_eq!(
+            b.lines,
+            vec!["a".to_string(), "a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn charwise_p_pastes_inline_after_cursor() {
+        let mut b = EditBuffer::from_str("ac");
+        b.register = Register {
+            text: "b".into(),
+            linewise: false,
+        };
+        // cursor col0 on 'a'; p pastes after -> "abc", cursor on pasted 'b'
+        b.paste_after();
+        assert_eq!(b.lines, vec!["abc".to_string()]);
+        assert_eq!(b.cursor.col, 1);
+    }
+
+    #[test]
+    fn d_deletes_to_line_end_charwise() {
+        let mut b = EditBuffer::from_str("abcd");
+        b.cursor.col = 1;
+        b.delete_to_line_end();
+        assert_eq!(b.lines, vec!["a".to_string()]);
+        assert_eq!(
+            b.register,
+            Register {
+                text: "bcd".into(),
+                linewise: false
+            }
+        );
+    }
+
+    #[test]
+    fn delete_range_cross_line_charwise() {
+        // "abc\ndef\nghi": delete inclusive 'b'..'h' (0,1)..(2,1).
+        // Keeps head "a" + tail after 'h' = "i" -> "ai".
+        let mut b = EditBuffer::from_str("abc\ndef\nghi");
+        b.delete_range(Cursor { row: 0, col: 1 }, Cursor { row: 2, col: 1 });
+        assert_eq!(b.lines, vec!["ai".to_string()]);
+        assert_eq!(b.register.text, "bc\ndef\ngh");
+        assert!(!b.register.linewise);
+        assert_eq!(b.cursor, Cursor { row: 0, col: 1 });
+    }
+
+    #[test]
+    fn yank_range_cross_line_does_not_mutate() {
+        let mut b = EditBuffer::from_str("abc\ndef");
+        b.yank_range(Cursor { row: 0, col: 1 }, Cursor { row: 1, col: 0 });
+        assert_eq!(b.lines, vec!["abc".to_string(), "def".to_string()]);
+        assert_eq!(b.register.text, "bc\nd");
+        assert!(!b.register.linewise);
     }
 }
