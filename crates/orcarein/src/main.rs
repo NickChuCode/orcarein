@@ -1035,6 +1035,18 @@ async fn main() -> Result<()> {
     let (cols, fancy) = header_env();
     let mode = color::detect(fancy);
 
+    // Resolve the selectable model list once (used by `/model` validation and the
+    // picker popup). A short timeout keeps a slow/offline endpoint from stalling
+    // startup. NOT tui-gated — validation reads it on the non-tui path too.
+    let (mut model_choices, models_fell_back) = {
+        use std::time::Duration;
+        match tokio::time::timeout(Duration::from_secs(2), provider.list_models()).await {
+            Ok(Ok(v)) if !v.is_empty() => (v, false),
+            _ => (fallback_models(provider.name(), &model), true),
+        }
+    };
+    ensure_current_present(&mut model_choices, &model);
+
     {
         use header::{header_ansi, render_header, status_line, HeaderModel};
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
@@ -1056,6 +1068,12 @@ async fn main() -> Result<()> {
         }
         if let Some(s) = status_line(cli.no_permission, cli.no_economy) {
             println!("{}", color::paint(mode, color::Token::Warning, &s));
+        }
+        if models_fell_back {
+            println!(
+                "{}",
+                color::paint(mode, color::Token::Dim, "· 模型列表拉取失败，使用内置列表")
+            );
         }
         println!();
     }
@@ -1158,12 +1176,11 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 CommandAction::SwitchModel(n) => {
-                    let new = expand_model_alias(&n, provider.name());
-                    if !is_known_model(provider.name(), &new) {
-                        eprintln!(
-                            "未知 model「{n}」。{} 可用：flash / pro（完整名 deepseek-v4-flash / deepseek-v4-pro）。",
-                            provider.name()
-                        );
+                    // The popup accepts insert a trailing space; trim so the id matches.
+                    let new = expand_model_alias(n.trim(), provider.name());
+                    if !is_known_model(&new, &model_choices) {
+                        let opts = model_choices.join(" / ");
+                        eprintln!("未知 model「{}」。可用：{opts}", n.trim());
                     } else if new == model {
                         println!("已经是 model {model} 了。");
                     } else {
@@ -1877,8 +1894,6 @@ fn expand_model_alias(name: &str, provider: &str) -> String {
 
 /// Built-in model list when a live `/v1/models` fetch fails: the two deepseek V4
 /// ids, else just the current model so `/model` can still echo it. Pure.
-// `allow(dead_code)`: the consumer (startup fetch) is wired in the next commit.
-#[allow(dead_code)]
 fn fallback_models(provider: &str, current: &str) -> Vec<String> {
     match provider {
         "deepseek" => vec![
@@ -1891,8 +1906,6 @@ fn fallback_models(provider: &str, current: &str) -> Vec<String> {
 
 /// Guarantee `current` is in `choices` (so validation never rejects the running
 /// model), then sort + dedup for a stable popup order. Pure.
-// `allow(dead_code)`: the consumer (startup fetch) is wired in the next commit.
-#[allow(dead_code)]
 fn ensure_current_present(choices: &mut Vec<String>, current: &str) {
     if !choices.iter().any(|m| m == current) {
         choices.push(current.to_string());
@@ -1901,15 +1914,11 @@ fn ensure_current_present(choices: &mut Vec<String>, current: &str) {
     choices.dedup();
 }
 
-/// The models we know are valid for `provider`, so `/model` can reject typos
-/// (e.g. `flas`) before switching. For `deepseek` this is the two V4 ids; for
-/// other providers we have no static list, so we allow anything (a live
-/// `list_models` fetch in Phase 2 tightens this and generalizes it).
-fn is_known_model(provider: &str, model: &str) -> bool {
-    match provider {
-        "deepseek" => matches!(model, "deepseek-v4-flash" | "deepseek-v4-pro"),
-        _ => true,
-    }
+/// Whether `model` is one of the resolved `choices` (the live `/v1/models` list,
+/// or the fallback when that fetch failed). Generalizes the Phase 1 hard-coded
+/// deepseek check so `/model` accepts any catalogued model and rejects typos.
+fn is_known_model(model: &str, choices: &[String]) -> bool {
+    choices.iter().any(|m| m == model)
 }
 
 /// The compact model label for the status bar: strip the `deepseek-v4-` prefix
@@ -2453,17 +2462,15 @@ mod tests {
     }
 
     #[test]
-    fn is_known_model_rejects_typos_for_deepseek() {
-        // Real ids pass.
-        assert!(super::is_known_model("deepseek", "deepseek-v4-flash"));
-        assert!(super::is_known_model("deepseek", "deepseek-v4-pro"));
-        // A typo / nonexistent model is rejected (the reported bug: `flas`).
-        assert!(!super::is_known_model("deepseek", "flas"));
-        assert!(!super::is_known_model("deepseek", "deepseek-chat"));
-        // Other providers can't be validated without a live list yet → allow
-        // (Phase 2's list_models tightens this).
-        assert!(super::is_known_model("openai", "gpt-4o"));
-        assert!(super::is_known_model("mock", "anything"));
+    fn is_known_model_checks_membership() {
+        let choices = vec![
+            "deepseek-v4-flash".to_string(),
+            "deepseek-v4-pro".to_string(),
+        ];
+        assert!(super::is_known_model("deepseek-v4-pro", &choices));
+        // Typo / nonexistent model rejected (the reported bug: `flas`).
+        assert!(!super::is_known_model("flas", &choices));
+        assert!(!super::is_known_model("deepseek-chat", &choices));
     }
 
     #[cfg(feature = "tui")]
