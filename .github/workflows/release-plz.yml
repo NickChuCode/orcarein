@@ -1,8 +1,19 @@
 name: release-plz
 
+# DISABLED (2026-06-28): with crates.io publishing off (release-plz.toml
+# `publish = false`) and tags/GitHub Releases owned by release.yml (author-pushed
+# `vX.Y.Z` tag), release-plz's only remaining effect was a perpetual, never-merged
+# "chore: release" Release PR — pure noise. Switched the trigger to manual so the
+# bot no longer runs on every push.
+#
+# To re-enable when you actually want crates.io publishing: restore
+#   on:
+#     push:
+#       branches: [main]
+# and flip `publish = true` in release-plz.toml + add the CARGO_REGISTRY_TOKEN
+# repo secret.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Maintains the Release PR (version bump + CHANGELOG) from Conventional Commits.
