@@ -106,6 +106,16 @@ impl MentionState {
             }
         }
     }
+
+    /// The edit to apply on accept: `(at, end_col_exclusive, "@<path> ")`, where
+    /// the half-open span `[at.col, end_col_exclusive)` on `at.row` is the typed
+    /// `@query`. `None` when nothing is selectable (empty `filtered`).
+    pub fn accept(&self) -> Option<(Cursor, usize, String)> {
+        let idx = *self.filtered.get(self.selected)?;
+        let path = self.candidates.get(idx)?;
+        let end_excl = self.at.col + 1 + self.query.chars().count();
+        Some((self.at.clone(), end_excl, format!("@{path} "))) // Cursor: Clone, not Copy
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +174,24 @@ mod tests {
         // whitespace between @ and cursor tears down: "@mo x" cursor at 5.
         let b = buf_at("@mo x", 5);
         assert!(!m.update_from_buffer(&b));
+    }
+
+    #[test]
+    fn accept_returns_replacement_span_and_string() {
+        let mut m = MentionState {
+            active: true,
+            at: Cursor { row: 0, col: 4 }, // '@' at col 4
+            query: "mo".to_string(),       // "@mo" → cursor at col 7
+            candidates: vec!["src/modal/mod.rs".to_string()],
+            filtered: vec![0],
+            selected: 0,
+        };
+        let (at, end_excl, ins) = m.accept().unwrap();
+        assert_eq!(at, Cursor { row: 0, col: 4 });
+        assert_eq!(end_excl, 7); // at.col(4) + 1('@') + query len(2)
+        assert_eq!(ins, "@src/modal/mod.rs ");
+        // empty filtered → None
+        m.filtered.clear();
+        assert!(m.accept().is_none());
     }
 }
