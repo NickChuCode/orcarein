@@ -67,8 +67,9 @@ pub enum ReadOutcome {
 /// already shows the mode; `let _ = prompt;` silences the unused warning.
 ///
 /// On `Submitted` we do NOT echo the text here: main.rs's existing REPL flow
-/// displays/uses the returned string, and the inline viewport's content vanishes
-/// when the `Terminal` is dropped, so echoing here would double up.
+/// displays/uses the returned string. Before returning we clear the inline
+/// viewport (ratatui's `Terminal` drop restores the cursor but does NOT wipe the
+/// drawn frame), so the editor's last frame never collides with REPL output.
 #[cfg(feature = "tui")]
 pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOutcome> {
     use ratatui::backend::CrosstermBackend;
@@ -102,7 +103,7 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
     let mut terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>> = None;
     let mut current_h: u16 = 0;
 
-    loop {
+    let outcome = loop {
         // 1. Desired inline height: body lines + 1 status row, clamped.
         let body_lines = buf.lines.len() as u16;
         let desired_h = (body_lines + 1).clamp(2, max_rows);
@@ -211,11 +212,21 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
 
         // 6. Apply to the buffer and handle the resulting effect.
         match apply(&mut buf, &mut parser, action, history) {
-            Effect::Submit => return Ok(ReadOutcome::Submitted(buf.text())),
-            Effect::Cancel => return Ok(ReadOutcome::Cancelled),
-            Effect::Eof => return Ok(ReadOutcome::Eof),
+            Effect::Submit => break ReadOutcome::Submitted(buf.text()),
+            Effect::Cancel => break ReadOutcome::Cancelled,
+            Effect::Eof => break ReadOutcome::Eof,
             Effect::Yank(reg) => clipboard::write_osc52(&reg.text),
             Effect::None => {}
         }
+    };
+
+    // Clear the inline viewport before returning: ratatui's Terminal drop only
+    // restores the cursor, it does NOT wipe the drawn frame — so without this the
+    // last editor frame (text + status bar) collides with the REPL's own output
+    // below it. clear() on an inline viewport moves the cursor to the viewport's
+    // top-left and clears from there down, leaving a clean slate for the REPL.
+    if let Some(term) = terminal.as_mut() {
+        let _ = term.clear();
     }
+    Ok(outcome)
 }
