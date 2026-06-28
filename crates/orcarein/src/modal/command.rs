@@ -308,6 +308,13 @@ fn apply_insert(buf: &mut EditBuffer, key: KeyAction) -> Effect {
         KeyAction::Backspace => buf.backspace(),
         KeyAction::Char(c) => buf.insert_char(c),
         KeyAction::Esc => buf.leave_insert(),
+        // Arrow keys move the cursor in Insert mode (vim behavior). h/j/k/l stay
+        // literal text here — only arrows navigate. Insert-mode clamp lets the
+        // cursor sit one past the last char, so Right can reach the line end.
+        KeyAction::Left => buf.move_h(),
+        KeyAction::Right => buf.move_l(),
+        KeyAction::Up => buf.move_k(),
+        KeyAction::Down => buf.move_j(),
         _ => {}
     }
     Effect::None
@@ -633,6 +640,21 @@ mod tests {
         assert_eq!(b.lines.len(), 2); // newline inserted
         b.mode = Mode::Normal;
         assert_eq!(apply(&mut b, &mut p, KeyAction::Enter, &[]), Effect::Submit);
+    }
+
+    #[test]
+    fn insert_mode_arrows_move_cursor() {
+        let mut b = EditBuffer::from_str("ab");
+        let mut p = CommandParser::new();
+        b.mode = Mode::Insert;
+        b.cursor.col = 2; // Insert lets the cursor sit one past the last char.
+        apply(&mut b, &mut p, KeyAction::Left, &[]);
+        assert_eq!(b.cursor.col, 1);
+        apply(&mut b, &mut p, KeyAction::Right, &[]);
+        assert_eq!(b.cursor.col, 2); // back to the end (Insert can sit after last)
+                                     // Plain letters are still inserted as text, not treated as motions.
+        apply(&mut b, &mut p, KeyAction::Char('l'), &[]);
+        assert_eq!(b.lines, vec!["abl".to_string()]);
     }
 
     #[test]
