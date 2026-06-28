@@ -1046,12 +1046,41 @@ async fn main() -> Result<()> {
     // surfaced in the per-turn meter and `/usage`. 0 until the first turn.
     let mut last_prompt_tokens: u64 = 0;
 
+    #[cfg(feature = "tui")]
+    let mut history: modal::History = Vec::new();
+
     loop {
-        let line = match editor.readline("> ") {
-            Ok(line) => line,
-            Err(ReadlineError::Interrupted) => continue,
-            Err(ReadlineError::Eof) => break,
-            Err(e) => return Err(e).context("line editor failed"),
+        let line = {
+            #[cfg(feature = "tui")]
+            {
+                use std::io::IsTerminal;
+                let is_tty = std::io::stdout().is_terminal();
+                let term = std::env::var("TERM").ok();
+                if crate::overlay::overlay_capable(is_tty, term.as_deref()) {
+                    match modal::modal_readline("> ", &history) {
+                        Ok(modal::ReadOutcome::Submitted(s)) => s,
+                        Ok(modal::ReadOutcome::Cancelled) => continue,
+                        Ok(modal::ReadOutcome::Eof) => break,
+                        Err(e) => return Err(e).context("modal editor failed"),
+                    }
+                } else {
+                    match editor.readline("> ") {
+                        Ok(line) => line,
+                        Err(ReadlineError::Interrupted) => continue,
+                        Err(ReadlineError::Eof) => break,
+                        Err(e) => return Err(e).context("line editor failed"),
+                    }
+                }
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                match editor.readline("> ") {
+                    Ok(line) => line,
+                    Err(ReadlineError::Interrupted) => continue,
+                    Err(ReadlineError::Eof) => break,
+                    Err(e) => return Err(e).context("line editor failed"),
+                }
+            }
         };
 
         let input = line.trim();
@@ -1087,6 +1116,8 @@ async fn main() -> Result<()> {
         }
 
         let _ = editor.add_history_entry(input);
+        #[cfg(feature = "tui")]
+        history.push(input.to_string());
         session.push_user(input);
 
         let mut sink = ReplSink::new();
