@@ -32,6 +32,8 @@ mod markdown;
 #[cfg(feature = "tui")]
 mod modal;
 mod overlay;
+#[cfg(feature = "tui")]
+mod syntax;
 
 /// Demo pins watched by `hw monitor` when `--pins` is omitted.
 #[cfg(feature = "hardware")]
