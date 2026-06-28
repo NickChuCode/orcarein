@@ -316,19 +316,26 @@ impl Md {
         if runs.is_empty() && self.pending_marker.is_none() {
             return;
         }
-        let (first, cont) = if let Some(m) = self.pending_marker.take() {
-            let cont_w = disp_width(&m.0);
-            (m, (" ".repeat(cont_w), Style::default()))
-        } else if self.quote > 0 {
-            let p = "▌ ".repeat(self.quote);
-            ((p.clone(), self.fg(Token::Dim)), (p, self.fg(Token::Dim)))
+        // Compose the prefix: quote bars (one per nesting level) + an optional list
+        // marker. The continuation prefix keeps the quote bars and pads the marker
+        // width so wrapped text stays aligned under the first line's text.
+        let quote_pfx: Vec<(String, Style)> = if self.quote > 0 {
+            vec![("▌ ".repeat(self.quote), self.fg(Token::Dim))]
         } else {
-            (
-                (String::new(), Style::default()),
-                (String::new(), Style::default()),
-            )
+            Vec::new()
         };
-        self.push_wrapped(runs, &[first], &[cont]);
+        let (first, cont): (Vec<(String, Style)>, Vec<(String, Style)>) =
+            if let Some(m) = self.pending_marker.take() {
+                let cont_w = disp_width(&m.0);
+                let mut f = quote_pfx.clone();
+                f.push(m);
+                let mut c = quote_pfx.clone();
+                c.push((" ".repeat(cont_w), Style::default()));
+                (f, c)
+            } else {
+                (quote_pfx.clone(), quote_pfx)
+            };
+        self.push_wrapped(runs, &first, &cont);
         if self.quote > 0 || self.lists.is_empty() {
             // top-level paragraphs get trailing space; list items stay tight
         }
@@ -745,6 +752,15 @@ mod tests {
             false,
         );
         let _ = render("", 0, false, false);
+    }
+
+    #[test]
+    fn list_item_inside_blockquote_keeps_quote_bar() {
+        let p = plains("> - item one\n> - item two", 80);
+        // Each list-item line carries both the quote bar ▌ and the bullet marker ·.
+        assert!(p
+            .iter()
+            .any(|l| l.contains('▌') && l.contains('·') && l.contains("item one")));
     }
 
     #[test]
