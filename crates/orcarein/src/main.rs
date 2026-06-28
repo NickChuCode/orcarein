@@ -225,6 +225,19 @@ fn non_blank(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.trim().is_empty())
 }
 
+/// Truncate `s` to at most `max_bytes`, on a char boundary (never splits UTF-8).
+/// Used to cap @mention file injections so a huge file can't blow up the prompt.
+fn cap_chars(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Resolves effective settings from the precedence chain
 /// CLI flag > env var > `config.toml` > built-in default.
 fn resolve(cli: &Cli) -> Result<Resolved> {
@@ -1205,7 +1218,17 @@ async fn main() -> Result<()> {
         let _ = editor.add_history_entry(input);
         #[cfg(feature = "tui")]
         history.push(input.to_string());
-        session.push_user(input);
+        // Expand `@path` mentions into file-content blocks for the model. The
+        // original `input` (with `@path`) is kept for history/display above; only
+        // the message sent to the model carries the expanded file content. The
+        // blocks land at the tail of the latest user turn, so the cached prefix
+        // (system + prior turns) is untouched.
+        let expanded = orcarein_core::mention::expand_mentions(input, |p| {
+            std::fs::read_to_string(std::path::Path::new(p))
+                .ok()
+                .map(|s| cap_chars(&s, 32 * 1024))
+        });
+        session.push_user(expanded);
 
         let mut sink = ReplSink::new(fancy, mode);
         match agent
