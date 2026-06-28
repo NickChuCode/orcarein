@@ -12,6 +12,7 @@ pub mod github;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;
+pub mod mention;
 pub mod message;
 pub mod permission;
 pub mod provider;
