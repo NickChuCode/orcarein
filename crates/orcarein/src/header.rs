@@ -1,34 +1,67 @@
-//! Unified TUI header/chrome (v02-22): a bordered, icon'd welcome box that
-//! replaces the old multi-line startup banner, plus a slim title bar shared by
-//! overlay surfaces. Pure string rendering — no terminal I/O — so it is fully
-//! unit-tested. See the v02-22 design spec.
+//! Unified TUI header/chrome (v02-24, redesigned per the Claude Design
+//! "OrcaRein 终端设计系统"): a bordered welcome box with a 4-line orca mascot
+//! beside labeled identity, a `getting started` command strip, and the model
+//! echoed in the title bar. Pure rendering — no terminal I/O — so it is fully
+//! unit-tested.
+//!
+//! Color model: [`render_header`] builds a structured `Vec<Vec<Span>>` (text +
+//! semantic [`Token`]). [`header_plain`] concatenates the text (the authoritative
+//! width/golden surface — ANSI escapes are zero-width and must never enter the
+//! layout math) and [`header_ansi`] paints each span via [`crate::color`]. The
+//! slim title bar shared by overlay surfaces lives here too.
 
+use crate::color::{self, ColorMode, Token};
 use unicode_width::UnicodeWidthStr;
 
-/// Pixel-art whale mascot (faceless, traced from the project logo): a plump
-/// whale with its head to the left and tail flukes flicking up at the right.
-/// Rendered centered at the top of the left column in the double-column header.
-/// Every line is a verified, equal display width (`MASCOT_W`); only width-1
-/// solid-block glyphs are used — no box-drawing chars, which [`paint_borders`]
-/// would dye blue — so the box never skews and the silhouette stays uncolored.
+/// Pixel-art whale mascot (faceless, traced from the project logo): a plump orca
+/// with head to the left and tail flukes flicking up at the right. Rendered in
+/// the left cell of the wide header; rows 0..=2 are the brand-blue body, row 3 is
+/// the orca-white belly. Every line is a verified, equal display width (16
+/// columns); only width-1 solid-block glyphs are used so the box never skews. The
+/// narrow / plain headers omit it.
 pub const MASCOT: &[&str] = &[
-    "                ▗▟▘",
-    "  ▄▄▄▄▄▄       ▄▟▛ ",
-    "▗█████████▄▄▄▟██▛  ",
-    "▟███████████████▖  ",
-    "▜██████████████▛   ",
-    " ▝▀▀████████▀▀     ",
+    "     ▄▄     ▄▄▄ ",
+    " ▄████████▄████ ",
+    "████████████▀▀  ",
+    " ▀▀████████▀    ",
 ];
 
-/// Display width of every [`MASCOT`] line (all lines share this width).
-pub const MASCOT_W: usize = 19;
+/// Box-drawing width thresholds.
+pub const NARROW: u16 = 60;
+pub const MIN_BOX_WIDTH: u16 = 24;
 
-/// The box-drawing glyphs we paint when coloring the border.
-const BORDER_GLYPHS: &[char] = &['╭', '╮', '╰', '╯', '─', '│', '┬', '┴'];
+/// Gap between the mascot cell and the identity block (also the left margin in
+/// the narrow box), and the fixed width of the identity label field.
+const GAP: usize = 2;
+const LABEL_W: usize = 8;
 
-/// DeepSeek blue (#4D6BFE) truecolor SGR prefix, paired with the reset below.
-const BLUE: &str = "\x1b[38;2;77;107;254m";
-const RESET: &str = "\x1b[0m";
+/// A run of text carrying one semantic color [`Token`]. Concatenating a line's
+/// span texts yields the plain (uncolored) line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub token: Token,
+}
+
+fn sp(text: impl Into<String>, token: Token) -> Span {
+    Span {
+        text: text.into(),
+        token,
+    }
+}
+
+/// The header's input model. Fields are kept structured (not pre-joined) so each
+/// piece can carry its own color.
+pub struct HeaderModel<'a> {
+    pub title: &'a str,
+    pub model: &'a str,
+    pub provider: &'a str,
+    pub cwd: String,
+    pub session: &'a str,
+    pub saved: bool,
+    /// `(command, 说明)` pairs for the getting-started strip.
+    pub tips: Vec<(&'a str, &'a str)>,
+}
 
 /// Display width (CJK full-width counts as 2).
 pub fn disp_width(s: &str) -> usize {
@@ -45,8 +78,7 @@ pub fn truncate_to_width(s: &str, budget: usize) -> String {
     if budget == 0 {
         return String::new();
     }
-    // Reserve 1 column for the ellipsis.
-    let keep = budget - 1;
+    let keep = budget - 1; // reserve 1 column for the ellipsis
     let mut out = String::new();
     let mut w = 0usize;
     for ch in s.chars() {
@@ -61,16 +93,20 @@ pub fn truncate_to_width(s: &str, budget: usize) -> String {
     out
 }
 
-/// Plain `!`-prefixed warning lines, only for non-default states.
-pub fn status_chips(no_permission: bool, economy_off: bool) -> Vec<String> {
-    let mut v = Vec::new();
+/// A single combined `!` warning line for non-default states, or `None`.
+pub fn status_line(no_permission: bool, economy_off: bool) -> Option<String> {
+    let mut parts = Vec::new();
     if no_permission {
-        v.push("! permissions disabled".to_string());
+        parts.push("权限已禁用");
     }
     if economy_off {
-        v.push("! cache economy OFF".to_string());
+        parts.push("缓存节流 OFF");
     }
-    v
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("! {}", parts.join(" · ")))
+    }
 }
 
 /// First 8 chars of a session id (or all, if shorter). Char-boundary safe.
@@ -98,25 +134,12 @@ pub fn abbreviate_home(p: &std::path::Path) -> String {
     }
 }
 
-pub const NARROW: u16 = 60;
-pub const MIN_BOX_WIDTH: u16 = 24;
-const MIN_LEFT: usize = 16;
-const MIN_RIGHT: usize = 16;
-
-pub struct HeaderModel<'a> {
-    pub title: &'a str,
-    pub identity: Vec<(&'a str, String)>,
-    pub tips: Vec<(&'a str, &'a str)>,
-}
-
 /// Pad `s` with spaces on the right to exactly `w` display columns (truncating
 /// first if longer). Result has `disp_width == w`.
 fn pad_to(s: &str, w: usize) -> String {
     let t = truncate_to_width(s, w);
-    let mut out = t;
-    let gap = w.saturating_sub(disp_width(&out));
-    out.push_str(&" ".repeat(gap));
-    out
+    let gap = w.saturating_sub(disp_width(&t));
+    format!("{t}{}", " ".repeat(gap))
 }
 
 /// A row of `c` repeated to `n` display columns (c assumed width-1).
@@ -124,139 +147,229 @@ fn rule(c: char, n: usize) -> String {
     std::iter::repeat_n(c, n).collect()
 }
 
-/// Center `s` within `w` display columns by padding both sides with spaces
-/// (extra column, if any, goes to the right). Truncates first if longer, so the
-/// result always has `disp_width == w`.
-fn center_to(s: &str, w: usize) -> String {
-    let t = truncate_to_width(s, w);
-    let pad = w.saturating_sub(disp_width(&t));
-    let lhs = pad / 2;
-    let rhs = pad - lhs;
-    format!("{}{}{}", " ".repeat(lhs), t, " ".repeat(rhs))
-}
-
-pub fn render_header(m: &HeaderModel, width: u16, fancy: bool) -> Vec<String> {
-    if !fancy || width < MIN_BOX_WIDTH {
-        let summary = format!(
-            "{} · {} · /help",
-            m.title,
-            m.identity.first().map(|(_, v)| v.as_str()).unwrap_or("")
-        );
-        return vec![truncate_to_width(&summary, width as usize)];
-    }
-    let inner = width.saturating_sub(2) as usize;
-    if width < NARROW {
-        return render_single_col(m, inner);
-    }
-    render_double_col(m, inner)
-}
-
-fn render_single_col(m: &HeaderModel, inner: usize) -> Vec<String> {
+/// Fit colored `pieces` into `budget` display columns: keep pieces while they
+/// fit, truncate the overflowing one, drop the rest; when `pad`, append trailing
+/// spaces so the total is exactly `budget`. Without `pad` it just clips (the
+/// one-liner). Result's total `disp_width` is `budget` (pad) or `<= budget`.
+fn assemble(pieces: Vec<Span>, budget: usize, pad: bool) -> Vec<Span> {
+    let mut used = 0usize;
     let mut out = Vec::new();
-    // top: "╭─ {label} " + fill('─') + "╮", total disp_width == inner+2.
-    // Visible: ╭(1) ─(1) space(1) label space(1) fill ╮(1) = 5 + W(label) + fill.
-    // Want 5 + W(label) + fill == inner+2  =>  fill = inner - W(label) - 3.
-    // Truncate label to inner-3 so fill never underflows.
-    let label = truncate_to_width(m.title, inner.saturating_sub(3));
-    let fill = inner.saturating_sub(disp_width(&label) + 3);
-    out.push(format!("╭─ {label} {}╮", rule('─', fill)));
-    for (k, v) in &m.identity {
-        out.push(format!("│{}│", pad_to(&format!("{k}  {v}"), inner)));
-    }
-    out.push(format!("│{}│", pad_to("", inner)));
-    for (k, d) in &m.tips {
-        out.push(format!("│{}│", pad_to(&format!("{k}  {d}"), inner)));
-    }
-    out.push(format!("╰{}╯", rule('─', inner)));
-    out
-}
-
-fn render_double_col(m: &HeaderModel, inner: usize) -> Vec<String> {
-    let hi = inner.saturating_sub(MIN_RIGHT + 1);
-    let left = if hi < MIN_LEFT {
-        hi
-    } else {
-        (inner * 55 / 100).clamp(MIN_LEFT, hi)
-    };
-    let right = inner.saturating_sub(left + 1);
-
-    let mut out = Vec::new();
-    // top line: ╭─ OrcaRein ─...─┬─ getting started ─...─╮
-    // l_seg = "─ {l_label} " has width W(l_label)+3; need it <= left so the
-    // fill never underflows and disp_width(l_top) == left. So budget = left-3.
-    let l_label = truncate_to_width(m.title, left.saturating_sub(3));
-    let l_seg = format!("─ {l_label} ");
-    let l_top = format!(
-        "{}{}",
-        l_seg,
-        rule('─', left.saturating_sub(disp_width(&l_seg)))
-    );
-    let r_label = truncate_to_width(" getting started ", right);
-    let r_top = format!(
-        "{}{}",
-        r_label,
-        rule('─', right.saturating_sub(disp_width(&r_label)))
-    );
-    out.push(format!("╭{l_top}┬{r_top}╮"));
-
-    // Left column = mascot lines (centered, only when it fits) + identity rows.
-    let mut left_cells: Vec<String> = Vec::new();
-    if MASCOT_W <= left {
-        for art in MASCOT {
-            left_cells.push(center_to(art, left));
+    for p in pieces {
+        let w = disp_width(&p.text);
+        if used + w <= budget {
+            used += w;
+            out.push(p);
+        } else {
+            let room = budget - used;
+            if room > 0 {
+                let t = truncate_to_width(&p.text, room);
+                used += disp_width(&t);
+                out.push(Span {
+                    text: t,
+                    token: p.token,
+                });
+            }
+            break;
         }
     }
-    for (_, v) in &m.identity {
-        left_cells.push(pad_to(v, left));
+    if pad && used < budget {
+        out.push(sp(" ".repeat(budget - used), Token::Fg));
     }
-    // Right column = tips.
-    let right_cells: Vec<String> = m
-        .tips
-        .iter()
-        .map(|(k, d)| pad_to(&format!("{k}  {d}"), right))
-        .collect();
-
-    // body rows: zip the two columns, padding the shorter with blank cells.
-    let rows = left_cells.len().max(right_cells.len());
-    let blank_l = pad_to("", left);
-    let blank_r = pad_to("", right);
-    for i in 0..rows {
-        let lc = left_cells.get(i).unwrap_or(&blank_l);
-        let rc = right_cells.get(i).unwrap_or(&blank_r);
-        out.push(format!("│{lc}│{rc}│"));
-    }
-    out.push(format!("╰{}┴{}╯", rule('─', left), rule('─', right)));
     out
 }
 
-/// Wrap the box-drawing border glyphs of each line in the DeepSeek-blue SGR
-/// escape (content/mascot/text left untouched), when `enabled`. With `enabled`
-/// false this is a passthrough — identical strings — so the uncolored
-/// `render_header` output (and its width tests/goldens) stay authoritative.
-/// Coloring is applied *after* layout, so the escape sequences never enter the
-/// `disp_width` math that built the box.
-pub fn paint_borders(lines: &[String], enabled: bool) -> Vec<String> {
-    if !enabled {
-        return lines.to_vec();
+/// Top border `╭─ <title> <fill> <echo> ─╮`, exactly `width` wide. `echo` is the
+/// model (wide) or provider (narrow), truncated so a `>=2`-col fill remains.
+fn top_border(title: &str, echo: &str, width: usize) -> Vec<Span> {
+    let base = 3 + disp_width(title) + 1 + 1 + 3; // ╭─␠ title ␠ … ␠ echo ␠─╮
+    let echo = truncate_to_width(echo, width.saturating_sub(base + 2));
+    let fill = width.saturating_sub(base + disp_width(&echo));
+    vec![
+        sp("╭─ ", Token::Brand),
+        sp(title, Token::OrcaWhite),
+        sp(" ", Token::Brand),
+        sp(rule('─', fill), Token::Brand),
+        sp(" ", Token::Brand),
+        sp(echo, Token::Accent),
+        sp(" ─╮", Token::Brand),
+    ]
+}
+
+/// Section divider `├─ <label> <fill>┤`, exactly `width` wide.
+fn divider(label: &str, width: usize) -> Vec<Span> {
+    let base = 3 + disp_width(label) + 1 + 1; // ├─␠ label ␠ … ┤
+    let fill = width.saturating_sub(base);
+    vec![
+        sp("├─ ", Token::Brand),
+        sp(label, Token::Accent),
+        sp(" ", Token::Brand),
+        sp(rule('─', fill), Token::Brand),
+        sp("┤", Token::Brand),
+    ]
+}
+
+/// Bottom border `╰<rule>╯`, `inner+2` wide.
+fn bottom(inner: usize) -> Vec<Span> {
+    vec![
+        sp("╰", Token::Brand),
+        sp(rule('─', inner), Token::Brand),
+        sp("╯", Token::Brand),
+    ]
+}
+
+/// One body row of the wide box: `│ <mascot> <labeled identity / belly> │`.
+fn wide_body_row(m: &HeaderModel, i: usize, inner: usize) -> Vec<Span> {
+    let mascot_tok = if i < 3 {
+        Token::Brand
+    } else {
+        Token::OrcaWhite
+    };
+    let mut pieces = vec![sp(MASCOT[i], mascot_tok)];
+    let label = |name: &str| {
+        sp(
+            format!("{}{}", " ".repeat(GAP), pad_to(name, LABEL_W)),
+            Token::Dim,
+        )
+    };
+    match i {
+        0 => {
+            pieces.push(label("model"));
+            pieces.push(sp(m.model, Token::Accent));
+            pieces.push(sp(format!(" · {}", m.provider), Token::Dim));
+        }
+        1 => {
+            pieces.push(label("cwd"));
+            pieces.push(sp(m.cwd.clone(), Token::OrcaWhite));
+        }
+        2 => {
+            pieces.push(label("session"));
+            pieces.push(sp(m.session, Token::Fg));
+            if m.saved {
+                pieces.push(sp(" · auto-saved", Token::Success));
+            }
+        }
+        _ => {} // belly row: mascot only
+    }
+    let mut line = vec![sp("│", Token::Brand)];
+    line.extend(assemble(pieces, inner, true));
+    line.push(sp("│", Token::Brand));
+    line
+}
+
+/// The getting-started command strip (wide), `│ /cmd 说明 … │`.
+fn cmd_strip(tips: &[(&str, &str)], inner: usize) -> Vec<Span> {
+    let mut pieces = vec![sp(" ", Token::Dim)];
+    for (idx, (name, desc)) in tips.iter().enumerate() {
+        pieces.push(sp(*name, Token::Brand));
+        pieces.push(sp(format!(" {desc}"), Token::Dim));
+        if idx + 1 < tips.len() {
+            pieces.push(sp("   ", Token::Dim));
+        }
+    }
+    let mut line = vec![sp("│", Token::Brand)];
+    line.extend(assemble(pieces, inner, true));
+    line.push(sp("│", Token::Brand));
+    line
+}
+
+fn render_double(m: &HeaderModel, inner: usize) -> Vec<Vec<Span>> {
+    let width = inner + 2;
+    let mut out = vec![top_border(m.title, m.model, width)];
+    for i in 0..MASCOT.len() {
+        out.push(wide_body_row(m, i, inner));
+    }
+    out.push(divider("getting started", width));
+    out.push(cmd_strip(&m.tips, inner));
+    out.push(bottom(inner));
+    out
+}
+
+fn render_single(m: &HeaderModel, inner: usize) -> Vec<Vec<Span>> {
+    let width = inner + 2;
+    let mut out = vec![top_border(m.title, m.provider, width)];
+
+    let row = |pieces: Vec<Span>| -> Vec<Span> {
+        let mut line = vec![sp("│", Token::Brand)];
+        line.extend(assemble(pieces, inner, true));
+        line.push(sp("│", Token::Brand));
+        line
+    };
+    let label = |name: &str| sp(format!(" {}", pad_to(name, LABEL_W)), Token::Dim);
+
+    out.push(row(vec![label("model"), sp(m.model, Token::Accent)]));
+    out.push(row(vec![label("cwd"), sp(m.cwd.clone(), Token::OrcaWhite)]));
+    {
+        let mut id = vec![label("session"), sp(m.session, Token::Fg)];
+        if m.saved {
+            id.push(sp(" ·saved", Token::Success));
+        }
+        out.push(row(id));
+    }
+    out.push(divider("getting started", width));
+    for (name, desc) in &m.tips {
+        let pad = 9usize.saturating_sub(disp_width(name));
+        out.push(row(vec![
+            sp(" ", Token::Dim),
+            sp(*name, Token::Brand),
+            sp(" ".repeat(pad), Token::Dim),
+            sp(*desc, Token::Dim),
+        ]));
+    }
+    out.push(bottom(inner));
+    out
+}
+
+fn one_liner(m: &HeaderModel, width: usize) -> Vec<Span> {
+    let pieces = vec![
+        sp(m.title, Token::OrcaWhite),
+        sp(" · ", Token::Dim),
+        sp(m.model, Token::Accent),
+        sp(" · ", Token::Dim),
+        sp(m.provider, Token::Fg),
+        sp(" · ", Token::Dim),
+        sp(m.cwd.clone(), Token::Fg),
+        sp(" · ", Token::Dim),
+        sp("/help", Token::Brand),
+    ];
+    assemble(pieces, width, false)
+}
+
+/// Render the header into structured spans. Three tiers: a full box (`>= NARROW`),
+/// a narrow single-column box (`>= MIN_BOX_WIDTH`), or a one-line summary
+/// (`!fancy` or tiny width).
+pub fn render_header(m: &HeaderModel, width: u16, fancy: bool) -> Vec<Vec<Span>> {
+    if !fancy || width < MIN_BOX_WIDTH {
+        return vec![one_liner(m, width as usize)];
+    }
+    let inner = (width - 2) as usize;
+    if width < NARROW {
+        render_single(m, inner)
+    } else {
+        render_double(m, inner)
+    }
+}
+
+/// Concatenate each line's span texts into the plain (uncolored) line. This is
+/// the authoritative width/golden surface.
+pub fn header_plain(lines: &[Vec<Span>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+        .collect()
+}
+
+/// Paint each span via [`crate::color`]. With [`ColorMode::None`] this is exactly
+/// [`header_plain`] (identity passthrough — same fast path, no escapes emitted).
+pub fn header_ansi(lines: &[Vec<Span>], mode: ColorMode) -> Vec<String> {
+    if mode == ColorMode::None {
+        return header_plain(lines);
     }
     lines
         .iter()
-        .map(|line| {
-            let mut out = String::with_capacity(line.len() + 16);
-            let mut in_span = false;
-            for ch in line.chars() {
-                let is_border = BORDER_GLYPHS.contains(&ch);
-                if is_border && !in_span {
-                    out.push_str(BLUE);
-                    in_span = true;
-                } else if !is_border && in_span {
-                    out.push_str(RESET);
-                    in_span = false;
-                }
-                out.push(ch);
-            }
-            if in_span {
-                out.push_str(RESET);
+        .map(|spans| {
+            let mut out = String::new();
+            for s in spans {
+                out.push_str(&color::paint(mode, s.token, &s.text));
             }
             out
         })
@@ -280,6 +393,44 @@ pub fn slim_title_bar(title: &str, width: u16) -> String {
 mod tests {
     use super::*;
 
+    /// Strip SGR escapes so painted output can be compared to the plain text.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for d in chars.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn demo_model() -> HeaderModel<'static> {
+        HeaderModel {
+            title: "OrcaRein",
+            model: "deepseek-v4-flash",
+            provider: "deepseek",
+            cwd: "~/projects/foo".to_string(),
+            session: "0a1b2c3d",
+            saved: true,
+            tips: vec![
+                ("/help", "命令一览"),
+                ("/init", "初始化"),
+                ("/compact", "压缩上下文"),
+            ],
+        }
+    }
+
+    fn plain(m: &HeaderModel, width: u16, fancy: bool) -> Vec<String> {
+        header_plain(&render_header(m, width, fancy))
+    }
+
     #[test]
     fn disp_width_counts_cjk_as_two() {
         assert_eq!(disp_width("abc"), 3);
@@ -287,274 +438,172 @@ mod tests {
     }
 
     #[test]
-    fn truncate_keeps_short_strings() {
+    fn truncate_keeps_short_and_ellipsizes_long() {
         assert_eq!(truncate_to_width("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_long_ascii_adds_ellipsis_within_budget() {
         let out = truncate_to_width("abcdefgh", 5);
-        assert!(out.ends_with('…'));
-        assert!(disp_width(&out) <= 5);
-    }
-
-    #[test]
-    fn truncate_never_splits_a_cjk_char() {
-        // 6 columns of CJK; budget 5 -> must drop a whole char, stay valid UTF-8.
-        let out = truncate_to_width("中文字", 5);
-        assert!(disp_width(&out) <= 5);
-        assert!(out.ends_with('…'));
-        // Every char is whole (no panic above proves boundary safety).
-        assert!(out
-            .chars()
-            .all(|c| c == '中' || c == '文' || c == '字' || c == '…'));
-    }
-
-    #[test]
-    fn truncate_zero_budget_is_empty() {
+        assert!(out.ends_with('…') && disp_width(&out) <= 5);
         assert_eq!(truncate_to_width("x", 0), "");
     }
 
     #[test]
-    fn status_chips_only_on_nondefault() {
-        assert!(super::status_chips(false, false).is_empty());
-        assert_eq!(super::status_chips(true, false).len(), 1);
-        assert!(super::status_chips(true, false)[0].starts_with('!'));
-        assert_eq!(super::status_chips(false, true).len(), 1);
-        assert_eq!(super::status_chips(true, true).len(), 2);
+    fn truncate_never_splits_a_cjk_char() {
+        let out = truncate_to_width("中文字", 5);
+        assert!(disp_width(&out) <= 5 && out.ends_with('…'));
+        assert!(out.chars().all(|c| "中文字…".contains(c)));
     }
 
     #[test]
-    fn short_id_takes_first_eight_or_all() {
-        assert_eq!(super::short_id("0123456789abcdef"), "01234567");
-        assert_eq!(super::short_id("abc"), "abc");
-    }
-
-    #[test]
-    fn abbreviate_home_replaces_prefix() {
-        // With an explicit home, the prefix collapses to `~`.
-        let home = std::path::Path::new("/home/sarah");
-        assert_eq!(
-            super::abbreviate_home_with(home, std::path::Path::new("/home/sarah/p/x")),
-            "~/p/x"
-        );
-        // Non-matching path is returned as-is.
-        assert_eq!(
-            super::abbreviate_home_with(home, std::path::Path::new("/etc/foo")),
-            "/etc/foo"
-        );
-    }
-
-    fn demo_model() -> HeaderModel<'static> {
-        HeaderModel {
-            title: "OrcaRein",
-            identity: vec![
-                ("model", "deepseek-v4-flash · deepseek".to_string()),
-                ("cwd", "~/projects/foo".to_string()),
-                ("session", "0a1b2c3d · auto-saved".to_string()),
-            ],
-            tips: vec![
-                ("/help", "commands"),
-                ("/init", "make AGENTS.md"),
-                ("/compact", "shrink context"),
-            ],
-        }
-    }
-
-    fn divider_col(line: &str) -> Option<usize> {
-        // The interior divider (┬ on the top, │ on body rows, ┴ on the bottom).
-        // Skip the outer border columns: the leading ╭/│/╰ at col 0 and the
-        // trailing ╮/│/╯ at the last column. We measure display columns so CJK
-        // body cells don't shift the reported position.
-        let chars: Vec<char> = line.chars().collect();
-        let last = chars.len().saturating_sub(1);
-        let mut col = 0usize;
-        for (i, c) in chars.iter().enumerate() {
-            if (*c == '┬' || *c == '│' || *c == '┴') && i != 0 && i != last {
-                return Some(col);
-            }
-            col += disp_width(&c.to_string());
-        }
-        None
-    }
-
-    #[test]
-    fn double_col_invariants() {
-        let m = demo_model();
-        let lines = render_header(&m, 100, true);
-        assert!(lines.len() >= 3);
-        for l in &lines {
-            assert_eq!(disp_width(l), 100, "every line must fill the width: {l:?}");
-        }
-        assert!(lines.first().unwrap().starts_with('╭'));
-        assert!(lines.first().unwrap().ends_with('╮'));
-        assert!(lines.last().unwrap().starts_with('╰'));
-        assert!(lines.last().unwrap().ends_with('╯'));
-        // ┬ / │ / ┴ all sit at the same column.
-        let col = divider_col(&lines[0]).unwrap();
-        for l in &lines {
-            assert_eq!(divider_col(l), Some(col), "divider must align: {l:?}");
-        }
-        // content present.
-        assert!(lines.iter().any(|l| l.contains("deepseek-v4-flash")));
-        assert!(lines.iter().any(|l| l.contains("/compact")));
-    }
-
-    #[test]
-    fn single_col_below_narrow() {
-        let lines = render_header(&demo_model(), 40, true);
-        for l in &lines {
-            assert_eq!(disp_width(l), 40);
-        }
-        assert!(!lines.iter().any(|l| l.contains('┬')));
-        assert!(lines.iter().any(|l| l.contains("~/projects/foo")));
-    }
-
-    #[test]
-    fn plain_one_line_when_not_fancy() {
-        let lines = render_header(&demo_model(), 100, false);
-        assert_eq!(lines.len(), 1);
-        assert!(!lines[0].contains('╭'));
-        assert!(lines[0].contains("OrcaRein"));
-        assert!(lines[0].contains("/help"));
-        // The inline fish is retired everywhere.
-        assert!(!lines[0].contains("><((("));
-    }
-
-    #[test]
-    fn tiny_or_zero_width_never_panics() {
-        let _ = render_header(&demo_model(), 0, true);
-        let _ = render_header(&demo_model(), 10, true); // < MIN_BOX_WIDTH -> one-liner
-    }
-
-    #[test]
-    fn cjk_cwd_keeps_width() {
-        let mut m = demo_model();
-        m.identity[1].1 = "~/项目/中文".to_string();
-        for l in render_header(&m, 60, true) {
-            assert_eq!(disp_width(&l), 60);
-        }
-        for l in render_header(&m, 100, true) {
-            assert_eq!(disp_width(&l), 100);
-        }
-    }
-
-    #[test]
-    fn double_col_at_narrow_boundary_does_not_panic() {
-        for l in render_header(&demo_model(), 60, true) {
-            assert_eq!(disp_width(&l), 60);
+    fn mascot_lines_all_equal_width() {
+        // Load-bearing: any ragged or width-2 glyph would skew the left column.
+        assert!(!MASCOT.is_empty());
+        for l in MASCOT {
+            assert_eq!(disp_width(l), 16, "mascot line not 16 wide: {l:?}");
         }
     }
 
     #[test]
     fn double_col_golden() {
-        let lines = render_header(&demo_model(), 100, true);
+        let lines = plain(&demo_model(), 100, true);
         let expected = vec![
-            "╭─ OrcaRein ──────────────────────────────────────────┬ getting started ───────────────────────────╮",
-            "│                                 ▗▟▘                 │/help  commands                             │",
-            "│                   ▄▄▄▄▄▄       ▄▟▛                  │/init  make AGENTS.md                       │",
-            "│                 ▗█████████▄▄▄▟██▛                   │/compact  shrink context                    │",
-            "│                 ▟███████████████▖                   │                                            │",
-            "│                 ▜██████████████▛                    │                                            │",
-            "│                  ▝▀▀████████▀▀                      │                                            │",
-            "│deepseek-v4-flash · deepseek                         │                                            │",
-            "│~/projects/foo                                       │                                            │",
-            "│0a1b2c3d · auto-saved                                │                                            │",
-            "╰─────────────────────────────────────────────────────┴────────────────────────────────────────────╯",
+            "╭─ OrcaRein ─────────────────────────────────────────────────────────────────── deepseek-v4-flash ─╮",
+            "│     ▄▄     ▄▄▄   model   deepseek-v4-flash · deepseek                                            │",
+            "│ ▄████████▄████   cwd     ~/projects/foo                                                          │",
+            "│████████████▀▀    session 0a1b2c3d · auto-saved                                                   │",
+            "│ ▀▀████████▀                                                                                      │",
+            "├─ getting started ────────────────────────────────────────────────────────────────────────────────┤",
+            "│ /help 命令一览   /init 初始化   /compact 压缩上下文                                              │",
+            "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
         ];
         assert_eq!(lines, expected);
     }
 
     #[test]
     fn single_col_golden() {
-        let lines = render_header(&demo_model(), 40, true);
+        let lines = plain(&demo_model(), 40, true);
         let expected = vec![
-            "╭─ OrcaRein ───────────────────────────╮",
-            "│model  deepseek-v4-flash · deepseek   │",
-            "│cwd  ~/projects/foo                   │",
-            "│session  0a1b2c3d · auto-saved        │",
-            "│                                      │",
-            "│/help  commands                       │",
-            "│/init  make AGENTS.md                 │",
-            "│/compact  shrink context              │",
+            "╭─ OrcaRein ──────────────── deepseek ─╮",
+            "│ model   deepseek-v4-flash            │",
+            "│ cwd     ~/projects/foo               │",
+            "│ session 0a1b2c3d ·saved              │",
+            "├─ getting started ────────────────────┤",
+            "│ /help    命令一览                    │",
+            "│ /init    初始化                      │",
+            "│ /compact 压缩上下文                  │",
             "╰──────────────────────────────────────╯",
         ];
         assert_eq!(lines, expected);
     }
 
     #[test]
-    fn slim_title_bar_fills_width_with_corners() {
-        let bar = super::slim_title_bar("对话记录", 40);
-        assert_eq!(disp_width(&bar), 40);
-        assert!(bar.starts_with('╭'));
-        assert!(bar.ends_with('╮'));
-        assert!(bar.contains("对话记录"));
+    fn double_col_invariants() {
+        let lines = plain(&demo_model(), 100, true);
+        for l in &lines {
+            assert_eq!(disp_width(l), 100, "every line must fill the width: {l:?}");
+        }
+        assert!(lines.first().unwrap().starts_with('╭') && lines.first().unwrap().ends_with('╮'));
+        assert!(lines.last().unwrap().starts_with('╰') && lines.last().unwrap().ends_with('╯'));
+        assert!(lines.iter().any(|l| l.starts_with('├') && l.ends_with('┤')));
+        assert!(lines.iter().any(|l| l.contains("deepseek-v4-flash")));
+        assert!(lines.iter().any(|l| l.contains("/compact")));
     }
 
     #[test]
-    fn mascot_lines_all_equal_width() {
-        // Load-bearing: any width-2 or ragged glyph would skew the left column.
-        assert!(!MASCOT.is_empty());
-        for l in MASCOT {
-            assert_eq!(
-                disp_width(l),
-                MASCOT_W,
-                "mascot line not {MASCOT_W} wide: {l:?}"
-            );
+    fn one_liner_when_not_fancy() {
+        let lines = plain(&demo_model(), 100, false);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains('╭'));
+        assert!(lines[0].contains("OrcaRein") && lines[0].contains("/help"));
+        assert!(lines[0].contains("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn tiny_or_zero_width_never_panics() {
+        let _ = plain(&demo_model(), 0, true);
+        let _ = plain(&demo_model(), 10, true); // < MIN_BOX_WIDTH -> one-liner
+    }
+
+    #[test]
+    fn cjk_cwd_keeps_width() {
+        let mut m = demo_model();
+        m.cwd = "~/项目/中文".to_string();
+        for l in plain(&m, 60, true) {
+            assert_eq!(disp_width(&l), 60);
+        }
+        for l in plain(&m, 100, true) {
+            assert_eq!(disp_width(&l), 100);
         }
     }
 
     #[test]
-    fn double_col_shows_mascot_above_identity() {
-        let lines = render_header(&demo_model(), 100, true);
-        // The whale's solid body row appears in some body line's left cell,
-        // and it sits above the first identity value.
-        let mascot_row = lines.iter().position(|l| l.contains("██████████████"));
-        let id_row = lines.iter().position(|l| l.contains("deepseek-v4-flash"));
-        assert!(mascot_row.is_some(), "mascot missing from double-col box");
-        assert!(id_row.is_some());
-        assert!(
-            mascot_row.unwrap() < id_row.unwrap(),
-            "mascot must be above identity"
+    fn double_col_at_narrow_boundary_does_not_panic() {
+        for l in plain(&demo_model(), 60, true) {
+            assert_eq!(disp_width(&l), 60);
+        }
+    }
+
+    #[test]
+    fn ansi_strips_back_to_plain_and_colors_key_spans() {
+        let spans = render_header(&demo_model(), 100, true);
+        let plain = header_plain(&spans);
+        let painted = header_ansi(&spans, ColorMode::Truecolor);
+        // Painted, with escapes removed, equals the plain golden.
+        for (p, c) in plain.iter().zip(painted.iter()) {
+            assert_eq!(&strip_sgr(c), p);
+        }
+        // Title is orca-white; the model echo is accent; both appear painted.
+        assert!(painted[0].contains(&color::paint(
+            ColorMode::Truecolor,
+            Token::OrcaWhite,
+            "OrcaRein"
+        )));
+        assert!(painted[0].contains(&color::paint(
+            ColorMode::Truecolor,
+            Token::Accent,
+            "deepseek-v4-flash"
+        )));
+    }
+
+    #[test]
+    fn ansi_none_equals_plain() {
+        let spans = render_header(&demo_model(), 100, true);
+        assert_eq!(header_ansi(&spans, ColorMode::None), header_plain(&spans));
+    }
+
+    #[test]
+    fn status_line_only_on_nondefault() {
+        assert_eq!(status_line(false, false), None);
+        assert_eq!(status_line(true, false).unwrap(), "! 权限已禁用");
+        assert_eq!(status_line(false, true).unwrap(), "! 缓存节流 OFF");
+        assert_eq!(
+            status_line(true, true).unwrap(),
+            "! 权限已禁用 · 缓存节流 OFF"
         );
     }
 
     #[test]
-    fn paint_borders_disabled_is_passthrough() {
-        let lines = render_header(&demo_model(), 100, true);
-        assert_eq!(paint_borders(&lines, false), lines);
+    fn short_id_takes_first_eight_or_all() {
+        assert_eq!(short_id("0123456789abcdef"), "01234567");
+        assert_eq!(short_id("abc"), "abc");
     }
 
     #[test]
-    fn paint_borders_wraps_only_border_glyphs() {
-        let lines = render_header(&demo_model(), 100, true);
-        let painted = paint_borders(&lines, true);
-        const BLUE: &str = "\x1b[38;2;77;107;254m";
-        const RESET: &str = "\x1b[0m";
-        // Top line starts with a colored corner.
-        assert!(painted[0].starts_with(&format!("{BLUE}╭")));
-        // The colored top line carries the product name uncolored: the blue
-        // escape never sits immediately before a content char like 'O'.
-        assert!(painted[0].contains("OrcaRein"));
-        assert!(
-            !painted[0].contains(&format!("{BLUE}O")),
-            "title text must not be colored"
+    fn abbreviate_home_replaces_prefix() {
+        let home = std::path::Path::new("/home/sarah");
+        assert_eq!(
+            abbreviate_home_with(home, std::path::Path::new("/home/sarah/p/x")),
+            "~/p/x"
         );
-        // Find the body line carrying the model value and verify its content is
-        // not inside a color span, while its leading border is.
-        let (i, body) = painted
-            .iter()
-            .enumerate()
-            .find(|(_, l)| l.contains("deepseek-v4-flash"))
-            .expect("model line present");
-        assert!(
-            !body.contains(&format!("{BLUE}d")),
-            "content must not be colored"
+        assert_eq!(
+            abbreviate_home_with(home, std::path::Path::new("/etc/foo")),
+            "/etc/foo"
         );
-        // The reset closes the leading border before content begins.
-        assert!(body.starts_with(&format!("{BLUE}│{RESET}")));
-        // Original visible text survives (strip escapes → equals plain line).
-        let stripped: String = body.replace(BLUE, "").replace(RESET, "");
-        assert_eq!(stripped, lines[i]);
+    }
+
+    #[test]
+    fn slim_title_bar_fills_width_with_corners() {
+        let bar = slim_title_bar("对话记录", 40);
+        assert_eq!(disp_width(&bar), 40);
+        assert!(bar.starts_with('╭') && bar.ends_with('╮'));
+        assert!(bar.contains("对话记录"));
     }
 }

@@ -23,6 +23,7 @@ use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+mod color;
 mod header;
 #[cfg(feature = "hardware")]
 mod hwmon;
@@ -999,35 +1000,34 @@ async fn main() -> Result<()> {
     };
     let tool_defs = registry.definitions();
 
+    // Terminal width + capability, resolved once and reused by the header, the
+    // streaming sink, the permission prompt, and /help. `fancy` gates the boxed
+    // chrome; `mode` is the color capability (None on non-tty / NO_COLOR / dumb,
+    // so a NO_COLOR tty still draws the box, just uncolored).
+    let (cols, fancy) = header_env();
+    let mode = color::detect(fancy);
+
     {
-        use header::{paint_borders, render_header, status_chips, HeaderModel};
-        use std::io::IsTerminal;
+        use header::{header_ansi, render_header, status_line, HeaderModel};
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let (cols, fancy) = header_env();
-        let model_line = format!("{model} · {}", provider.name());
-        let session_line = format!("{} · auto-saved", header::short_id(&session_id));
         let hm = HeaderModel {
             title: "OrcaRein",
-            identity: vec![
-                ("model", model_line),
-                ("cwd", header::abbreviate_home(&cwd)),
-                ("session", session_line),
-            ],
+            model: &model,
+            provider: provider.name(),
+            cwd: header::abbreviate_home(&cwd),
+            session: header::short_id(&session_id),
+            saved: true,
             tips: vec![
-                ("/help", "commands"),
-                ("/init", "make AGENTS.md"),
-                ("/compact", "shrink context"),
+                ("/help", "命令一览"),
+                ("/init", "初始化"),
+                ("/compact", "压缩上下文"),
             ],
         };
-        // Paint the box border DeepSeek-blue only on a real, color-permitting tty
-        // and only for the fancy box (the one-liner is never colored).
-        let color =
-            fancy && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-        for line in paint_borders(&render_header(&hm, cols, fancy), color) {
+        for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
             println!("{line}");
         }
-        for chip in status_chips(cli.no_permission, cli.no_economy) {
-            println!("{chip}");
+        if let Some(s) = status_line(cli.no_permission, cli.no_economy) {
+            println!("{}", color::paint(mode, color::Token::Warning, &s));
         }
         println!();
     }
@@ -1039,7 +1039,7 @@ async fn main() -> Result<()> {
     let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
         Box::new(AllowlistPolicy::allow_all())
     } else {
-        Box::new(InteractivePolicy::new())
+        Box::new(InteractivePolicy::new(fancy, mode))
     };
 
     // The prompt-token count of the most recent turn ≈ current context fill;
@@ -1098,6 +1098,7 @@ async fn main() -> Result<()> {
                 &model,
                 last_prompt_tokens,
                 &registry.names(),
+                mode,
             ) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
@@ -1120,7 +1121,7 @@ async fn main() -> Result<()> {
         history.push(input.to_string());
         session.push_user(input);
 
-        let mut sink = ReplSink::new();
+        let mut sink = ReplSink::new(fancy, mode);
         match agent
             .run_turn(&mut session, &model, policy.as_mut(), &mut sink)
             .await
@@ -1129,16 +1130,29 @@ async fn main() -> Result<()> {
                 println!(); // close the final streamed line
                 let total = session.usage();
                 last_prompt_tokens = outcome.usage.prompt_tokens;
-                let ctx = cost::context_line(last_prompt_tokens, &model)
-                    .map(|c| format!(" | {c}"))
-                    .unwrap_or_default();
-                let meter = cost::meter_line(&total, &model)
-                    .map(|m| format!(" | {m}"))
-                    .unwrap_or_default();
-                eprintln!(
-                    "[tokens: +{} this turn / {} total{}{}]\n",
-                    outcome.usage.total_tokens, total.total_tokens, ctx, meter
-                );
+                let ctx_raw = cost::context_line(last_prompt_tokens, &model);
+                let meter_raw = cost::meter_line(&total, &model);
+                let turn = outcome.usage.total_tokens;
+                let tot = total.total_tokens;
+                if mode == color::ColorMode::None {
+                    let ctx = ctx_raw.map(|c| format!(" | {c}")).unwrap_or_default();
+                    let meter = meter_raw.map(|m| format!(" | {m}")).unwrap_or_default();
+                    eprintln!("[tokens: +{turn} this turn / {tot} total{ctx}{meter}]\n");
+                } else {
+                    use color::Token;
+                    let mut l = format!(
+                        "  {}",
+                        color::paint(mode, Token::Accent, &format!("+{turn} tok this turn"))
+                    );
+                    l.push_str(&color::paint(mode, Token::Dim, &format!(" · {tot} total")));
+                    if let Some(c) = ctx_raw {
+                        l.push_str(&color::paint(mode, Token::Dim, &format!(" · {c}")));
+                    }
+                    if let Some(m) = meter_raw {
+                        l.push_str(&color::paint(mode, Token::Dim, &format!(" · {m}")));
+                    }
+                    eprintln!("{l}\n");
+                }
                 // Auto-save after a successful turn; never let a save error
                 // interrupt the conversation.
                 if let Err(e) = store.save(&session_id, created_at_ms, &session) {
@@ -1146,7 +1160,8 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("\n[错误] {e:#}\n");
+                let msg = format!("[错误] {e:#}");
+                eprintln!("\n{}\n", color::paint(mode, color::Token::Error, &msg));
                 session.pop_last();
             }
         }
@@ -1161,12 +1176,16 @@ async fn main() -> Result<()> {
 /// ([`AllowlistPolicy`]) lives in `orcarein-core` since it needs no I/O.
 struct InteractivePolicy {
     store: PermissionStore,
+    fancy: bool,
+    mode: color::ColorMode,
 }
 
 impl InteractivePolicy {
-    fn new() -> Self {
+    fn new(fancy: bool, mode: color::ColorMode) -> Self {
         InteractivePolicy {
             store: PermissionStore::new(),
+            fancy,
+            mode,
         }
     }
 }
@@ -1176,7 +1195,7 @@ impl PermissionPolicy for InteractivePolicy {
         if let Some(d) = self.store.cached(tool) {
             return d;
         }
-        let d = prompt_permission(tool, args);
+        let d = prompt_permission(tool, args, self.fancy, self.mode);
         if d.is_sticky() {
             self.store.remember(tool, d);
         }
@@ -1189,13 +1208,41 @@ impl PermissionPolicy for InteractivePolicy {
 struct ReplSink {
     started_reasoning: bool,
     started_content: bool,
+    /// Whether to draw the colored `▌` chrome (a capable tty); falls back to the
+    /// plain `[思考]/[回复]/[tool]` bracket labels otherwise (grep / redirect
+    /// friendly). `mode` is the color capability — `None` keeps the chrome but
+    /// drops the color (a NO_COLOR tty).
+    fancy: bool,
+    mode: color::ColorMode,
 }
 
 impl ReplSink {
-    fn new() -> Self {
+    fn new(fancy: bool, mode: color::ColorMode) -> Self {
         ReplSink {
             started_reasoning: false,
             started_content: false,
+            fancy,
+            mode,
+        }
+    }
+
+    fn head_reasoning(&self) {
+        if self.fancy {
+            println!("{}", color::paint(self.mode, color::Token::Dim, "▌ 思考"));
+        } else {
+            println!("[思考]");
+        }
+    }
+
+    fn head_content(&self) {
+        if self.fancy {
+            println!(
+                "{}{}",
+                color::paint(self.mode, color::Token::Brand, "▌ "),
+                color::paint(self.mode, color::Token::OrcaWhite, "回复"),
+            );
+        } else {
+            println!("[回复]");
         }
     }
 }
@@ -1205,10 +1252,15 @@ impl EventSink for ReplSink {
         match event {
             AgentEvent::Reasoning(text) => {
                 if !self.started_reasoning {
-                    println!("[思考]");
+                    self.head_reasoning();
                     self.started_reasoning = true;
                 }
-                print!("{text}");
+                // The "thinking" body is secondary — dimmed on a capable tty.
+                if self.fancy {
+                    print!("{}", color::paint(self.mode, color::Token::Dim, &text));
+                } else {
+                    print!("{text}");
+                }
                 let _ = std::io::stdout().flush();
             }
             AgentEvent::Content(text) => {
@@ -1216,9 +1268,10 @@ impl EventSink for ReplSink {
                     if self.started_reasoning {
                         println!("\n");
                     }
-                    println!("[回复]");
+                    self.head_content();
                     self.started_content = true;
                 }
+                // The answer body stays the terminal default foreground.
                 print!("{text}");
                 let _ = std::io::stdout().flush();
             }
@@ -1228,15 +1281,37 @@ impl EventSink for ReplSink {
                 if self.started_content || self.started_reasoning {
                     println!();
                 }
-                eprintln!("[tool: {name}({arguments})]");
+                if self.fancy {
+                    eprintln!(
+                        "{}{}{}",
+                        color::paint(self.mode, color::Token::Accent, "  → "),
+                        color::paint(self.mode, color::Token::Fg, &name),
+                        color::paint(self.mode, color::Token::Dim, &format!("({arguments})")),
+                    );
+                } else {
+                    eprintln!("[tool: {name}({arguments})]");
+                }
             }
             AgentEvent::ToolFinished {
                 result, is_error, ..
             } => {
-                if is_error {
-                    eprintln!("[tool error] {result}");
-                } else {
-                    eprintln!("[result] {} bytes", result.len());
+                match (self.fancy, is_error) {
+                    (true, true) => eprintln!(
+                        "{}{}",
+                        color::paint(self.mode, color::Token::Dim, "  └ "),
+                        color::paint(self.mode, color::Token::Error, &format!("error · {result}")),
+                    ),
+                    (true, false) => eprintln!(
+                        "{}{}",
+                        color::paint(self.mode, color::Token::Dim, "  └ "),
+                        color::paint(
+                            self.mode,
+                            color::Token::Success,
+                            &format!("ok · {} bytes", result.len()),
+                        ),
+                    ),
+                    (false, true) => eprintln!("[tool error] {result}"),
+                    (false, false) => eprintln!("[result] {} bytes", result.len()),
                 }
                 // The next model response is a fresh segment.
                 self.started_reasoning = false;
@@ -1244,7 +1319,12 @@ impl EventSink for ReplSink {
             }
             AgentEvent::Usage(_) => {} // printed once at end of turn
             AgentEvent::IterationLimit => {
-                eprintln!("[超过 tool call 上限 {MAX_TOOL_ITERATIONS} 次，中断]");
+                let msg = format!("[超过 tool call 上限 {MAX_TOOL_ITERATIONS} 次，中断]");
+                if self.fancy {
+                    eprintln!("{}", color::paint(self.mode, color::Token::Error, &msg));
+                } else {
+                    eprintln!("{msg}");
+                }
             }
         }
     }
@@ -1393,11 +1473,41 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
 }
 
 /// Synchronously prompts the user. Any input we cannot parse — empty
-/// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default).
-fn prompt_permission(name: &str, args: &str) -> Decision {
-    eprintln!();
-    eprintln!("OrcaRein wants to run: {name}({args})");
-    eprint!("Allow? [y=once N=never A=always n=once]: ");
+/// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default). On a capable
+/// tty it draws the colored `▌ 权限确认` chrome; otherwise a plain one-liner.
+fn prompt_permission(name: &str, args: &str, fancy: bool, mode: color::ColorMode) -> Decision {
+    use color::Token;
+    if fancy {
+        let p = |t: Token, s: &str| color::paint(mode, t, s);
+        eprintln!();
+        eprintln!(
+            "{}{}",
+            p(Token::Warning, "▌ 权限确认"),
+            p(Token::Dim, &format!("  {name} 请求授权"))
+        );
+        eprintln!();
+        eprintln!("   {}", p(Token::Fg, &format!("{name}({args})")));
+        eprintln!();
+        // Option keys colored by risk; the default (deny-once) is reverse-marked.
+        let opts = format!(
+            "{}  {} {}   {} {}   {} {}   {} {}   {}",
+            p(Token::Dim, "允许？"),
+            p(Token::Success, "[y]"),
+            p(Token::Dim, "本次"),
+            p(Token::Accent, "[a]"),
+            p(Token::Dim, "总是"),
+            color::reverse("[n]"),
+            p(Token::Dim, "拒绝"),
+            p(Token::Error, "[N]"),
+            p(Token::Dim, "永不"),
+            p(Token::Warning, "←默认"),
+        );
+        eprint!("   {opts} ");
+    } else {
+        eprintln!();
+        eprintln!("OrcaRein wants to run: {name}({args})");
+        eprint!("Allow? [y=once N=never a=always n=once]: ");
+    }
     let _ = std::io::stderr().flush();
 
     let mut line = String::new();
@@ -1405,8 +1515,8 @@ fn prompt_permission(name: &str, args: &str) -> Decision {
         return Decision::DenyOnce;
     }
     match line.trim().chars().next() {
-        Some('y') => Decision::AllowOnce,
-        Some('A') => Decision::AllowAlways,
+        Some('y') | Some('Y') => Decision::AllowOnce,
+        Some('a') | Some('A') => Decision::AllowAlways,
         Some('N') => Decision::DenyAlways,
         _ => Decision::DenyOnce,
     }
@@ -1490,6 +1600,54 @@ fn format_tool_list(names: &[&str]) -> String {
     )
 }
 
+/// Renders the `/help` command list as a two-column block (REPL-only, so always
+/// interactive; color degrades via `mode`). Pure — the column alignment is
+/// unit-tested. Columns align on a fixed left-block width; CJK 说明 counts as 2
+/// display columns per char.
+fn render_help(mode: color::ColorMode) -> String {
+    use color::Token;
+    use header::disp_width;
+    let p = |t: Token, s: &str| color::paint(mode, t, s);
+
+    // (command, 说明): left column then right column, row-major.
+    const ROWS: &[[(&str, &str); 2]] = &[
+        [("/help", "显示帮助"), ("/init", "生成 AGENTS.md")],
+        [("/clear", "清空对话"), ("/compact", "压缩上下文")],
+        [("/save", "保存会话"), ("/usage", "用量与花费")],
+        [("/tools", "列出工具"), ("/show", "查看文件（分页）")],
+        [("/history", "浏览记录"), ("/exit", "退出会话")],
+    ];
+    const LCMD: usize = 11; // left command field width
+    const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
+    const RCMD: usize = 10; // right command field width
+
+    let mut out = format!(
+        "{}{}  {}\n",
+        p(Token::Brand, "▌ "),
+        p(Token::OrcaWhite, "commands"),
+        p(Token::Dim, "命令一览"),
+    );
+    out.push_str(&format!("  {}\n", p(Token::Dim, &"─".repeat(46))));
+    for row in ROWS {
+        let (lc, ld) = row[0];
+        let (rc, rd) = row[1];
+        let lcmd_fill = LCMD.saturating_sub(disp_width(lc));
+        let mid_fill = LBLOCK.saturating_sub(2 + LCMD + disp_width(ld));
+        let rcmd_fill = RCMD.saturating_sub(disp_width(rc));
+        out.push_str(&format!(
+            "  {}{}{}{}{}{}{}\n",
+            p(Token::Accent, lc),
+            " ".repeat(lcmd_fill),
+            p(Token::Dim, ld),
+            " ".repeat(mid_fill),
+            p(Token::Accent, rc),
+            " ".repeat(rcmd_fill),
+            p(Token::Dim, rd),
+        ));
+    }
+    out.trim_end().to_string()
+}
+
 /// Handles a slash command (the leading `/` already stripped). Takes the
 /// session store + active id so `/save` can persist on demand, the model
 /// and last turn's prompt-token count so `/usage` can show context fill + cost,
@@ -1504,6 +1662,7 @@ fn handle_command(
     model: &str,
     last_prompt_tokens: u64,
     tool_names: &[&str],
+    mode: color::ColorMode,
 ) -> CommandAction {
     // Split into a verb and an optional argument so `/show <path>` works while
     // bare verbs (`/clear`) still match.
@@ -1565,17 +1724,7 @@ fn handle_command(
             CommandAction::Continue
         }
         "help" => {
-            println!("命令：");
-            println!("  /exit, /quit   退出");
-            println!("  /clear         清空会话（保留 system prompt）");
-            println!("  /save          立即保存会话到磁盘（每轮也会自动保存）");
-            println!("  /usage, /context  token 用量 + 上下文占用 + 成本");
-            println!("  /tools         列出当前可用工具（内置 + MCP）");
-            println!("  /show <文件>   分页查看一个文件（长则进浮层，q 退出）");
-            println!("  /history       分页查看本次对话记录");
-            println!("  /init          让 agent 探索仓库并生成 AGENTS.md（项目记忆）");
-            println!("  /compact       压缩较早对话（摘要旧段、保留最近，省 token）");
-            println!("  /help          这条帮助");
+            println!("{}", render_help(mode));
             CommandAction::Continue
         }
         other => {
@@ -1791,6 +1940,31 @@ mod tests {
         let block = super::project_memory_block(dir.path()).expect("present -> Some");
         assert!(block.contains("# Project context"));
         assert!(block.contains("use cargo test"));
+    }
+
+    #[test]
+    fn render_help_lists_all_commands_and_aligns_columns() {
+        // Plain (no color) so we can measure display columns directly.
+        let out = super::render_help(crate::color::ColorMode::None);
+        for cmd in [
+            "/help", "/clear", "/save", "/tools", "/history", "/init", "/compact", "/usage",
+            "/show", "/exit",
+        ] {
+            assert!(out.contains(cmd), "help missing {cmd}");
+        }
+        // Every data row's right-hand command starts at the same display column.
+        for (line, rcmd) in out
+            .lines()
+            .skip(2) // title + rule
+            .zip(["/init", "/compact", "/usage", "/show", "/exit"])
+        {
+            let pos = line.find(rcmd).expect("right command present");
+            assert_eq!(
+                crate::header::disp_width(&line[..pos]),
+                34,
+                "right column misaligned in {line:?}"
+            );
+        }
     }
 
     #[test]
