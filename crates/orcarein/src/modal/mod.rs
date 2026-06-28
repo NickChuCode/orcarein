@@ -142,8 +142,15 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
                 .style(Style::default().add_modifier(Modifier::REVERSED));
             f.render_widget(Paragraph::new(status), chunks[1]);
 
-            // ratatui takes (x = col, y = row); render gives (row, col).
-            f.set_cursor_position((view.cursor_screen.1, view.cursor_screen.0));
+            // The inline viewport is positioned ABSOLUTELY in the terminal and
+            // `set_cursor_position` takes absolute coordinates — so the render's
+            // viewport-relative (row, col) must be offset by the body chunk's
+            // origin, else the cursor jumps to the terminal's top-left. Clamp
+            // into the body area so a long line can't push it off-screen.
+            let body_area = chunks[0];
+            let cx = (body_area.x + view.cursor_screen.1).min(body_area.right().saturating_sub(1));
+            let cy = (body_area.y + view.cursor_screen.0).min(body_area.bottom().saturating_sub(1));
+            f.set_cursor_position((cx, cy));
         })?;
 
         // 4. Read one event; skip non-key and key-release events.
