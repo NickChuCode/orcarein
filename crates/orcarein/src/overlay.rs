@@ -75,9 +75,7 @@ fn paged_overlay(title: &str, content: &str) -> std::io::Result<bool> {
 
 /// Raw-mode RAII guard: disables raw mode on drop. Shared by the pager
 /// (via the alternate-screen overlay) and the modal editor (raw only).
-// consumed by modal in Task 13
 #[cfg(feature = "tui")]
-#[allow(dead_code)]
 pub(crate) struct RawModeGuard;
 
 #[cfg(feature = "tui")]
@@ -90,9 +88,7 @@ impl Drop for RawModeGuard {
 
 /// Enter raw mode and hand back a guard that restores it on drop. Does NOT
 /// touch the alternate screen — the modal editor renders inline.
-// consumed by modal in Task 13
 #[cfg(feature = "tui")]
-#[allow(dead_code)]
 pub(crate) fn enter_raw() -> std::io::Result<RawModeGuard> {
     ratatui::crossterm::terminal::enable_raw_mode()?;
     Ok(RawModeGuard)
