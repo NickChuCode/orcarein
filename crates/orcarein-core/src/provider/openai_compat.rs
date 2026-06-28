@@ -227,6 +227,46 @@ impl ToolCallAcc {
     }
 }
 
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
+/// Parse an OpenAI-compatible `/v1/models` body into sorted, deduped model ids.
+/// Pure (HTTP-free) so it is unit-tested without the network.
+pub(super) fn parse_models(body: &str) -> Result<Vec<String>> {
+    let resp: ModelsResponse = serde_json::from_str(body).context("parse /v1/models body")?;
+    let mut ids: Vec<String> = resp.data.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// `GET {models_url}` (a full URL) with bearer auth and parse the catalog.
+pub(super) async fn list_models_compat(
+    client: &reqwest::Client,
+    models_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>> {
+    let resp = client
+        .get(models_url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .context("models request failed")?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("models endpoint returned {status}:\n{body}");
+    }
+    parse_models(&body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +276,24 @@ mod tests {
         assert_eq!(find_separator(b"abc\n\ndef"), Some(3));
         assert_eq!(find_separator(b"no separator here"), None);
         assert_eq!(find_separator(b"\n\nat start"), Some(0));
+    }
+
+    #[test]
+    fn parse_models_extracts_sorted_deduped_ids() {
+        let body = r#"{"data":[{"id":"deepseek-v4-pro"},{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}"#;
+        let got = parse_models(body).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_models_rejects_malformed_body() {
+        assert!(parse_models("not json").is_err());
     }
 
     #[test]

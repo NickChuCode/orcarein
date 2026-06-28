@@ -13,6 +13,7 @@ use super::{ChatOptions, Provider, StreamEvent};
 use crate::{Message, ToolDefinition};
 
 const API_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const MODELS_URL: &str = "https://api.deepseek.com/v1/models";
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 pub struct DeepSeekProvider {
@@ -55,6 +56,10 @@ impl Provider for DeepSeekProvider {
             opts,
         )
         .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        openai_compat::list_models_compat(&self.client, MODELS_URL, &self.api_key).await
     }
 }
 

@@ -19,6 +19,7 @@ use super::{ChatOptions, Provider, StreamEvent};
 use crate::{Message, ToolDefinition};
 
 const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const MODELS_URL: &str = "https://api.openai.com/v1/models";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
 pub struct OpenAIProvider {
@@ -61,6 +62,10 @@ impl Provider for OpenAIProvider {
             opts,
         )
         .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        openai_compat::list_models_compat(&self.client, MODELS_URL, &self.api_key).await
     }
 }
 
