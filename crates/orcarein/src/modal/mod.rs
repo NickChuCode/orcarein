@@ -9,9 +9,9 @@
 #![allow(dead_code)]
 
 pub mod buffer;
+pub mod clipboard;
 pub mod command;
 pub mod render;
-// clipboard added in a later task.
 
 /// In-process, non-persisted input history (spec §5/§9). Owned by main.rs.
 pub type History = Vec<String>;
