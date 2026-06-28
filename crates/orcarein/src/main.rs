@@ -1748,6 +1748,25 @@ fn show_arg_path(arg: &str) -> &str {
     a.strip_prefix('@').unwrap_or(a)
 }
 
+/// Map a (lowercased) path's extension to a `syntax` language name, so `/show`
+/// can syntax-highlight a standalone code file. `None` → not a known code file.
+fn lang_for_ext(lower: &str) -> Option<&'static str> {
+    let (_, ext) = lower.rsplit_once('.')?;
+    Some(match ext {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "js" | "mjs" | "cjs" => "js",
+        "ts" => "ts",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
+        "sh" | "bash" => "bash",
+        "json" => "json",
+        "toml" => "toml",
+        _ => return None,
+    })
+}
+
 /// `/show <path>`: reads a file and shows it through the pager. Read failures
 /// are reported, not fatal.
 fn run_show(path: &str) {
@@ -1761,6 +1780,8 @@ fn run_show(path: &str) {
             let lower = path.to_lowercase();
             let kind = if lower.ends_with(".md") || lower.ends_with(".markdown") {
                 overlay::DocKind::Markdown
+            } else if let Some(lang) = lang_for_ext(&lower) {
+                overlay::DocKind::Code(lang.to_string())
             } else {
                 overlay::DocKind::Plain
             };
@@ -2293,6 +2314,17 @@ mod tests {
         assert_eq!(super::show_arg_path("crates/a.rs"), "crates/a.rs");
         // Only the leading @ is stripped.
         assert_eq!(super::show_arg_path("a@b.rs"), "a@b.rs");
+    }
+
+    #[test]
+    fn lang_for_ext_maps_known_code_extensions() {
+        assert_eq!(super::lang_for_ext("foo/bar.rs"), Some("rust"));
+        assert_eq!(super::lang_for_ext("a.py"), Some("python"));
+        assert_eq!(super::lang_for_ext("a.cpp"), Some("cpp"));
+        assert_eq!(super::lang_for_ext("a.json"), Some("json"));
+        // Non-code / no extension → None (falls back to plain).
+        assert_eq!(super::lang_for_ext("readme.txt"), None);
+        assert_eq!(super::lang_for_ext("noext"), None);
     }
 
     #[test]

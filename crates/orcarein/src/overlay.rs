@@ -11,10 +11,15 @@
 #[cfg(feature = "tui")]
 use crate::color::{self, Token};
 
-/// Whether pager content is plain text or Markdown to be rendered.
+/// Whether pager content is plain text, Markdown to be rendered, or a standalone
+/// code file to be syntax-highlighted (the `String` is the language name).
 pub enum DocKind {
     Plain,
     Markdown,
+    // The lang is only read by the `tui` code-doc renderer; under no-tui `/show`
+    // prints in place and the field is unused.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    Code(String),
 }
 
 /// Shows `content` to the user, paging it through an alternate-screen overlay
@@ -80,6 +85,7 @@ fn paged_overlay(title: &str, content: &str, kind: DocKind) -> std::io::Result<b
     let rgb = color::use_rgb(color::detect(true));
     let doc = match kind {
         DocKind::Markdown => crate::markdown::render(content, cols, rgb, false),
+        DocKind::Code(lang) => code_doc(content, &lang, rgb),
         DocKind::Plain => plain_doc(content, rgb),
     };
     if !needs_pager(doc.len(), usable) {
@@ -197,6 +203,44 @@ pub(crate) struct RenderedLine {
 #[cfg(feature = "tui")]
 pub(crate) fn plain_doc(content: &str, rgb: bool) -> Vec<RenderedLine> {
     content.split('\n').map(|l| plain_line(l, rgb)).collect()
+}
+
+/// Build a doc from a standalone code file: each line syntax-highlighted by
+/// `lang` (when `rgb`), full-width with no gutter (a `bat`/`less`-style viewer).
+/// `rgb` off → plain lines. `plain == spans concat` holds (search/scroll rely
+/// on it), since the lexer's runs reconstruct each line exactly.
+#[cfg(feature = "tui")]
+fn code_doc(content: &str, lang: &str, rgb: bool) -> Vec<RenderedLine> {
+    use ratatui::style::Style;
+    content
+        .split('\n')
+        .map(|line| {
+            if !rgb {
+                return plain_line(line, false);
+            }
+            let spans: Vec<(String, Style)> = crate::syntax::highlight(line, lang)
+                .into_iter()
+                .map(|(s, kind)| {
+                    let st = match color::syn_color(kind) {
+                        Some(c) => Style::default().fg(c),
+                        None => Style::default(),
+                    };
+                    (s, st)
+                })
+                .collect();
+            // An empty line highlights to nothing — keep one empty span so the
+            // pager has a row (and `plain` stays the empty string).
+            let spans = if spans.is_empty() {
+                vec![(String::new(), Style::default())]
+            } else {
+                spans
+            };
+            RenderedLine {
+                spans,
+                plain: line.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// One plain (or role-bar) line → [`RenderedLine`].
