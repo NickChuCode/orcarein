@@ -573,31 +573,48 @@ fn render_table(t: &Table, width: usize, rgb: bool) -> Vec<RenderedLine> {
     for r in &t.rows {
         consider(r);
     }
-    // Keep as many left columns as fit: each column costs `width+3` ("│ cell ").
-    // Reserve 1 for the closing "│". Drop the rest, mark with ╌.
-    let mut keep = 0usize;
-    let mut used = 1usize; // closing │
-    for &c in &cw {
-        let need = c + 3; // "│ " + cell + " "
-        if used + need <= width || keep == 0 {
-            used += need;
-            keep += 1;
-        } else {
-            break;
+    // Fit columns into `width`. Each column costs `cw[i]+3` ("│ cell "), plus 1
+    // for the closing "│", so the budget for the sum of column widths is
+    // `width − 3·ncol − 1`. Prefer shrinking the widest column (water-fill) so all
+    // columns stay visible; only drop right columns when even 1-wide each won't fit.
+    let budget = width.saturating_sub(3 * ncol + 1);
+    let sum: usize = cw.iter().sum();
+    let (cols_owned, truncated): (Vec<usize>, bool) = if sum <= budget {
+        (cw.clone(), false)
+    } else if budget >= ncol {
+        // Water-fill: shrink the widest column (lowest index on ties) until it fits.
+        let mut c = cw.clone();
+        let mut s = sum;
+        while s > budget {
+            let mut mi = 0;
+            for i in 1..c.len() {
+                if c[i] > c[mi] {
+                    mi = i;
+                }
+            }
+            if c[mi] <= 1 {
+                break; // all at floor (shouldn't happen since budget >= ncol)
+            }
+            c[mi] -= 1;
+            s -= 1;
         }
-    }
-    let truncated = keep < ncol;
-    let cols = &cw[..keep];
-
-    let pad_cell = |s: &str, w: usize| -> String {
-        let s = s.trim();
-        let sw = disp_width(s);
-        if sw >= w {
-            crate::header::truncate_to_width(s, w)
-        } else {
-            format!("{s}{}", " ".repeat(w - sw))
+        (c, false)
+    } else {
+        // Too many columns for the width: drop right columns (legacy behavior).
+        let mut keep = 0usize;
+        let mut used = 1usize; // closing │
+        for &c in &cw {
+            let need = c + 3;
+            if used + need <= width || keep == 0 {
+                used += need;
+                keep += 1;
+            } else {
+                break;
+            }
         }
+        (cw[..keep].to_vec(), keep < ncol)
     };
+    let cols: &[usize] = &cols_owned;
 
     let mut out = Vec::new();
     let border = |left: char, mid: char, right: char| -> RenderedLine {
@@ -620,7 +637,7 @@ fn render_table(t: &Table, width: usize, rgb: bool) -> Vec<RenderedLine> {
         for (i, &c) in cols.iter().enumerate() {
             spans.push(("│".to_string(), frame));
             let val = cells.get(i).map(|s| s.as_str()).unwrap_or("");
-            spans.push((format!(" {} ", pad_cell(val, c)), style));
+            spans.push((format!(" {} ", fit_cell(val, c)), style));
         }
         spans.push(("│".to_string(), frame));
         if truncated {
@@ -729,6 +746,34 @@ mod tests {
             false,
         );
         let _ = render("", 0, false, false);
+    }
+
+    #[test]
+    fn table_shrinks_widest_column_keeping_all_columns() {
+        // One very wide column: the old logic drops columns; the new logic shrinks
+        // it and keeps both columns.
+        let src =
+            "| k | v |\n| - | - |\n| a | this_is_a_very_long_value_that_would_blow_the_table |";
+        let p = plains(src, 30);
+        // Both header columns present.
+        assert!(p.iter().any(|l| l.contains('k') && l.contains('v')));
+        // All border/data rows are equal width.
+        let widths: Vec<usize> = p
+            .iter()
+            .filter(|l| {
+                l.starts_with('┌') || l.starts_with('│') || l.starts_with('├') || l.starts_with('└')
+            })
+            .map(|l| disp_width(l))
+            .collect();
+        assert!(!widths.is_empty());
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "rows misaligned: {widths:?}"
+        );
+        // The over-wide cell is ellipsis-truncated.
+        assert!(p.iter().any(|l| l.contains('…')));
+        // No column-drop marker (both columns fit after shrinking).
+        assert!(!p.iter().any(|l| l.contains('╌')));
     }
 
     #[test]
