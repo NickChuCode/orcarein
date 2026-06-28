@@ -30,6 +30,48 @@ pub fn list_project_files(cwd: &Path, cap: usize) -> Vec<String> {
     out
 }
 
+/// Scan `text` for `@<path>` tokens (path = non-whitespace run after a boundary
+/// `@` — start-of-text or whitespace, which covers `\n`). For each path that
+/// `reader` resolves, append a delimited `<file>` block; leave unresolved ones
+/// as literal text. Dedupe by path; the user's text is preserved verbatim.
+pub fn expand_mentions(text: &str, reader: impl Fn(&str) -> Option<String>) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut paths: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < n {
+        let boundary = i == 0 || chars[i - 1].is_whitespace();
+        if chars[i] == '@' && boundary {
+            let mut j = i + 1;
+            while j < n && !chars[j].is_whitespace() {
+                j += 1;
+            }
+            let mut raw: String = chars[i + 1..j].iter().collect();
+            while raw.ends_with(['.', ',', ';', ':', ')']) {
+                raw.pop();
+            }
+            if !raw.is_empty() && seen.insert(raw.clone()) {
+                paths.push(raw);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    let mut blocks = String::new();
+    for p in &paths {
+        if let Some(content) = reader(p) {
+            blocks.push_str(&format!("\n\n<file path=\"{p}\">\n{content}\n</file>"));
+        }
+    }
+    if blocks.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{blocks}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +100,29 @@ mod tests {
         assert_eq!(files, sorted);
         // cap
         assert!(list_project_files(root, 1).len() <= 1);
+    }
+
+    #[test]
+    fn expands_resolved_mentions_dedup_and_leaves_unresolved() {
+        let reader = |p: &str| match p {
+            "src/a.rs" => Some("CONTENT_A".to_string()),
+            _ => None,
+        };
+        // single mention → file block appended, original text kept
+        let out = expand_mentions("see @src/a.rs please", reader);
+        assert!(out.starts_with("see @src/a.rs please"));
+        assert!(out.contains("<file path=\"src/a.rs\">"));
+        assert!(out.contains("CONTENT_A"));
+        // dedupe: two of the same path → one block
+        let out2 = expand_mentions("@src/a.rs @src/a.rs", reader);
+        assert_eq!(out2.matches("<file path=").count(), 1);
+        // unresolved mention → left as literal, no block
+        let out3 = expand_mentions("@missing.rs", reader);
+        assert_eq!(out3, "@missing.rs");
+        // email a@b is NOT a mention (no boundary before @)
+        let out4 = expand_mentions("mail a@src/a.rs", reader);
+        assert!(!out4.contains("<file"));
+        // no mention → unchanged
+        assert_eq!(expand_mentions("plain text", reader), "plain text");
     }
 }
