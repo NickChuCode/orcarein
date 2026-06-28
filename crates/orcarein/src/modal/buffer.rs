@@ -251,6 +251,132 @@ impl EditBuffer {
         self.desired_col = self.cursor.col;
         self.clamp_cursor();
     }
+
+    // ---- Undo bookkeeping (real, not a stub). redo() comes in Task 7. ----
+
+    /// Snapshot the current state before a mutation and invalidate redo.
+    fn push_undo(&mut self) {
+        self.undo.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor.clone(),
+        });
+        self.redo.clear();
+    }
+
+    // ---- Mode entry (NOT mutations — no undo push). ----
+
+    /// `i` — insert before the cursor (no movement).
+    pub fn enter_insert_before(&mut self) {
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `a` — insert after the cursor (col + 1, may sit one past last char).
+    pub fn enter_insert_after(&mut self) {
+        self.mode = Mode::Insert;
+        self.cursor.col += 1;
+        self.clamp_cursor();
+    }
+
+    /// `I` — insert at the first non-blank char of the row (vim-correct).
+    pub fn enter_insert_line_start(&mut self) {
+        self.move_first_nonblank();
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `A` — insert at the end of the row (col = char count, past last char).
+    pub fn enter_insert_line_end(&mut self) {
+        self.mode = Mode::Insert;
+        self.cursor.col = self.row_chars(self.cursor.row);
+        self.clamp_cursor();
+    }
+
+    /// `o` — open a blank line below the current row and enter insert.
+    pub fn open_below(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row + 1;
+        self.lines.insert(row, String::new());
+        self.cursor = Cursor { row, col: 0 };
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `O` — open a blank line above the current row and enter insert.
+    pub fn open_above(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row;
+        self.lines.insert(row, String::new());
+        self.cursor = Cursor { row, col: 0 };
+        self.mode = Mode::Insert;
+        self.clamp_cursor();
+    }
+
+    /// `Esc` — leave insert mode. Set Normal, then clamp (which steps the
+    /// cursor back off the past-the-end position, matching vim).
+    pub fn leave_insert(&mut self) {
+        self.mode = Mode::Normal;
+        self.clamp_cursor();
+    }
+
+    // ---- Insert-mode editing (char-boundary safe, CJK-safe). ----
+
+    /// Byte offset of char index `col` within `line` (end-of-line if past it).
+    fn byte_at(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len())
+    }
+
+    /// Insert one char at the cursor, advancing the cursor by one char.
+    pub fn insert_char(&mut self, c: char) {
+        self.push_undo();
+        let line = &mut self.lines[self.cursor.row];
+        let at = Self::byte_at(line, self.cursor.col);
+        line.insert(at, c);
+        self.cursor.col += 1;
+        self.desired_col = self.cursor.col;
+    }
+
+    /// Split the current line at the cursor; cursor drops to (row + 1, col 0).
+    pub fn insert_newline(&mut self) {
+        self.push_undo();
+        let row = self.cursor.row;
+        let at = Self::byte_at(&self.lines[row], self.cursor.col);
+        let tail = self.lines[row].split_off(at);
+        self.lines.insert(row + 1, tail);
+        self.cursor = Cursor {
+            row: row + 1,
+            col: 0,
+        };
+        self.desired_col = 0;
+    }
+
+    /// Delete the char before the cursor; at col 0 join onto the previous line.
+    pub fn backspace(&mut self) {
+        if self.cursor.col == 0 && self.cursor.row == 0 {
+            return; // top-left: nothing to delete
+        }
+        self.push_undo();
+        if self.cursor.col > 0 {
+            let line = &mut self.lines[self.cursor.row];
+            let start = Self::byte_at(line, self.cursor.col - 1);
+            line.remove(start);
+            self.cursor.col -= 1;
+        } else {
+            // col == 0, row > 0: join this line onto the end of the previous.
+            let row = self.cursor.row;
+            let prev_len = self.row_chars(row - 1);
+            let cur = self.lines.remove(row);
+            self.lines[row - 1].push_str(&cur);
+            self.cursor = Cursor {
+                row: row - 1,
+                col: prev_len,
+            };
+        }
+        self.desired_col = self.cursor.col;
+    }
 }
 
 impl Default for EditBuffer {
@@ -348,5 +474,58 @@ mod tests {
         assert_eq!(b.cursor.col, 6); // end of "bar"
         b.move_word_back();
         assert_eq!(b.cursor.col, 4); // back to "bar"
+    }
+
+    #[test]
+    fn insert_char_and_newline_are_char_safe_cjk() {
+        let mut b = EditBuffer::new();
+        b.enter_insert_before();
+        b.insert_char('中');
+        b.insert_char('文');
+        assert_eq!(b.lines, vec!["中文".to_string()]);
+        assert_eq!(b.cursor.col, 2); // two chars
+        b.insert_newline();
+        assert_eq!(b.lines, vec!["中文".to_string(), String::new()]);
+        assert_eq!(b.cursor, Cursor { row: 1, col: 0 });
+    }
+
+    #[test]
+    fn backspace_joins_lines_at_col0() {
+        let mut b = EditBuffer::from_str("ab\ncd");
+        b.mode = Mode::Insert;
+        b.cursor = Cursor { row: 1, col: 0 };
+        b.backspace();
+        assert_eq!(b.lines, vec!["abcd".to_string()]);
+        assert_eq!(b.cursor, Cursor { row: 0, col: 2 });
+    }
+
+    #[test]
+    fn a_appends_after_cursor_a_at_line_end() {
+        let mut b = EditBuffer::from_str("ab");
+        b.enter_insert_after(); // 'a' on col0 -> col1, insert mode
+        assert_eq!(b.cursor.col, 1);
+        assert!(matches!(b.mode, Mode::Insert));
+        let mut b2 = EditBuffer::from_str("ab");
+        b2.enter_insert_line_end(); // 'A' -> col2 (past last char), insert
+        assert_eq!(b2.cursor.col, 2);
+    }
+
+    #[test]
+    fn open_below_inserts_blank_line_and_enters_insert() {
+        let mut b = EditBuffer::from_str("ab");
+        b.open_below();
+        assert_eq!(b.lines, vec!["ab".to_string(), String::new()]);
+        assert_eq!(b.cursor, Cursor { row: 1, col: 0 });
+        assert!(matches!(b.mode, Mode::Insert));
+    }
+
+    #[test]
+    fn leave_insert_steps_back_when_past_end() {
+        let mut b = EditBuffer::from_str("ab");
+        b.mode = Mode::Insert;
+        b.cursor = Cursor { row: 0, col: 2 }; // past last char
+        b.leave_insert();
+        assert!(matches!(b.mode, Mode::Normal));
+        assert_eq!(b.cursor.col, 1); // vim behavior
     }
 }
