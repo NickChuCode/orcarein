@@ -110,9 +110,17 @@ pub fn modal_readline(prompt: &str, history: &History) -> std::io::Result<ReadOu
 
         // (Re)create the terminal only on a height change.
         if terminal.is_none() || desired_h != current_h {
-            // Drop the old terminal first so its backend releases stdout, then
-            // build a fresh one — the only way to change an inline height.
-            drop(terminal.take());
+            // CLEAR the old viewport before dropping it: ratatui's drop only
+            // restores the cursor, so without this the old frame (notably its
+            // status bar) lingers as garbage when the new, differently-sized
+            // viewport is built. clear() on inline puts the cursor at the old
+            // viewport's top-left and wipes from there down; the fresh terminal
+            // then reserves its rows from that same anchor (grows/shrinks in
+            // place). Then build a new one — the only way to change inline height.
+            if let Some(mut old) = terminal.take() {
+                let _ = old.clear();
+                drop(old);
+            }
             terminal = Some(Terminal::with_options(
                 CrosstermBackend::new(std::io::stdout()),
                 TerminalOptions {
