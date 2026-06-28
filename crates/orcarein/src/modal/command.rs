@@ -537,12 +537,17 @@ fn exec_op_line(buf: &mut EditBuffer, op: Op, count: usize) -> Effect {
 /// inclusive range.
 fn exec_op_motion(buf: &mut EditBuffer, op: Op, motion: Motion, count: usize) -> Effect {
     let start = buf.cursor.clone();
+    // The probing motions below mutate `desired_col`; snapshot it so the operator
+    // doesn't leak the motion's column intent into a later j/k.
+    let start_desired = buf.desired_col;
     for _ in 0..count {
         apply_motion(buf, motion);
     }
     let end = buf.cursor.clone();
-    // Restore the cursor before operating (delete_range/yank_range reposition).
+    // Restore the cursor + desired_col before operating (delete_range/yank_range
+    // reposition the cursor themselves).
     buf.cursor = start.clone();
+    buf.desired_col = start_desired;
 
     // If the motion didn't move (e.g. already at boundary), there is nothing to
     // operate on with a clean inclusive range; act on the single char.

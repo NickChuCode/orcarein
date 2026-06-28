@@ -574,8 +574,45 @@ impl EditBuffer {
         self.clamp_cursor();
     }
 
+    /// Insert charwise `text` (which MAY contain '\n' from a cross-line yank) at
+    /// char position (row, insert_col), preserving the "no line holds a '\n'"
+    /// invariant by splitting the line when needed. Returns the cursor position
+    /// of the last inserted char (for p/P landing). Char-boundary safe.
+    fn splice_charwise(&mut self, row: usize, insert_col: usize, text: &str) -> Cursor {
+        if !text.contains('\n') {
+            let pasted = text.chars().count();
+            let line = &mut self.lines[row];
+            let at = Self::byte_at(line, insert_col);
+            line.insert_str(at, text);
+            return Cursor {
+                row,
+                col: insert_col + pasted.saturating_sub(1),
+            };
+        }
+        // Multi-line: split the current line at insert_col and weave segments in.
+        let segs: Vec<&str> = text.split('\n').collect();
+        let n = segs.len();
+        let line = self.lines[row].clone();
+        let at = Self::byte_at(&line, insert_col);
+        let (before, after) = (&line[..at], &line[at..]);
+        self.lines[row] = format!("{before}{}", segs[0]);
+        for (i, seg) in segs[1..].iter().enumerate() {
+            let idx = row + 1 + i;
+            if i + 1 == n - 1 {
+                // Last segment gets the original line's tail appended.
+                self.lines.insert(idx, format!("{seg}{after}"));
+            } else {
+                self.lines.insert(idx, (*seg).to_string());
+            }
+        }
+        Cursor {
+            row: row + n - 1,
+            col: segs[n - 1].chars().count().saturating_sub(1),
+        }
+    }
+
     /// `p` — paste after the cursor. Linewise → new line(s) below the cursor
-    /// row; charwise → inline after the cursor.
+    /// row; charwise → inline after the cursor (splitting on any '\n').
     pub fn paste_after(&mut self) {
         if self.register.text.is_empty() && !self.register.linewise {
             return;
@@ -598,12 +635,7 @@ impl EditBuffer {
                 self.cursor.col + 1
             };
             let text = self.register.text.clone();
-            let pasted = text.chars().count();
-            let line = &mut self.lines[row];
-            let at = Self::byte_at(line, insert_col);
-            line.insert_str(at, &text);
-            // Cursor lands on the last pasted char.
-            self.cursor.col = insert_col + pasted.saturating_sub(1);
+            self.cursor = self.splice_charwise(row, insert_col, &text);
         }
         self.clamp_cursor();
     }
@@ -723,11 +755,7 @@ impl EditBuffer {
             let row = self.cursor.row;
             let insert_col = self.cursor.col;
             let text = self.register.text.clone();
-            let pasted = text.chars().count();
-            let line = &mut self.lines[row];
-            let at = Self::byte_at(line, insert_col);
-            line.insert_str(at, &text);
-            self.cursor.col = insert_col + pasted.saturating_sub(1);
+            self.cursor = self.splice_charwise(row, insert_col, &text);
         }
         self.clamp_cursor();
     }
@@ -930,6 +958,39 @@ mod tests {
         b.paste_after();
         assert_eq!(b.lines, vec!["abc".to_string()]);
         assert_eq!(b.cursor.col, 1);
+    }
+
+    #[test]
+    fn charwise_p_with_multiline_register_splits_into_lines() {
+        // A charwise register can hold '\n' (cross-line v-yank). Pasting it must
+        // NOT embed a newline into one line — it splits the line instead.
+        let mut b = EditBuffer::from_str("XY");
+        b.register = Register {
+            text: "a\nb".into(),
+            linewise: false,
+        };
+        b.cursor.col = 0; // on 'X'; p pastes after X
+        b.paste_after();
+        assert_eq!(b.lines, vec!["Xa".to_string(), "bY".to_string()]);
+        assert!(
+            b.lines.iter().all(|l| !l.contains('\n')),
+            "invariant: no line holds a newline"
+        );
+        // cursor on last pasted char 'b' -> row1 col0
+        assert_eq!(b.cursor, Cursor { row: 1, col: 0 });
+    }
+
+    #[test]
+    fn charwise_cap_p_with_multiline_register_splits_into_lines() {
+        let mut b = EditBuffer::from_str("XY");
+        b.register = Register {
+            text: "a\nb".into(),
+            linewise: false,
+        };
+        b.cursor.col = 1; // on 'Y'; P pastes before Y
+        b.paste_before();
+        assert_eq!(b.lines, vec!["Xa".to_string(), "bY".to_string()]);
+        assert!(b.lines.iter().all(|l| !l.contains('\n')));
     }
 
     #[test]
