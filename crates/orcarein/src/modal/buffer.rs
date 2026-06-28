@@ -430,26 +430,10 @@ impl EditBuffer {
         self.clamp_cursor();
     }
 
-    /// `D` — delete from the cursor to the end of the line (charwise register).
-    pub fn delete_to_line_end(&mut self) {
-        self.push_undo();
-        let row = self.cursor.row;
-        let line = &mut self.lines[row];
-        let start = Self::byte_at(line, self.cursor.col);
-        let tail = line.split_off(start);
-        self.register = Register {
-            text: tail,
-            linewise: false,
-        };
-        self.clamp_cursor();
-    }
-
-    /// `C` — change to end of line: delete to line end, then enter Insert.
-    pub fn change_to_line_end(&mut self) {
-        self.delete_to_line_end();
-        self.mode = Mode::Insert;
-        self.clamp_cursor();
-    }
+    // Note: `D` (delete-to-line-end) and `C` (change-to-line-end) are handled by
+    // the reducer via `OpMotion { motion: LineEnd }` → `delete_range`, which is
+    // equivalent (delete cursor..=last-char) and already covered by the `d$`
+    // reducer test — so no dedicated buffer methods are needed for them.
 
     /// `dd` — delete the whole current line (linewise register). Leaves one
     /// empty line if it was the last remaining line.
@@ -946,21 +930,6 @@ mod tests {
         b.paste_after();
         assert_eq!(b.lines, vec!["abc".to_string()]);
         assert_eq!(b.cursor.col, 1);
-    }
-
-    #[test]
-    fn d_deletes_to_line_end_charwise() {
-        let mut b = EditBuffer::from_str("abcd");
-        b.cursor.col = 1;
-        b.delete_to_line_end();
-        assert_eq!(b.lines, vec!["a".to_string()]);
-        assert_eq!(
-            b.register,
-            Register {
-                text: "bcd".into(),
-                linewise: false
-            }
-        );
     }
 
     #[test]
