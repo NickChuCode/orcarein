@@ -80,6 +80,7 @@ pub fn modal_readline(
     prompt: &str,
     history: &History,
     ctx: Option<(String, color::Token)>,
+    model: Option<&str>,
 ) -> std::io::Result<ReadOutcome> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -248,6 +249,21 @@ pub fn modal_readline(
             // the whole bar instead, telling the mode apart by the badge text.
             let show_hint = term_width >= crate::header::NARROW;
             let w = crate::header::disp_width;
+            // Right-aligned readout: `model · ctx X%` (either piece optional). The
+            // model is the compact label (accent), ctx keeps its threshold color.
+            let sep = " · ";
+            let mut right: Vec<(String, color::Token)> = Vec::new();
+            if let Some(m) = model {
+                right.push((m.to_string(), color::Token::Accent));
+            }
+            if let Some((label, tok)) = ctx.as_ref() {
+                right.push((label.clone(), *tok));
+            }
+            let right_w = if right.is_empty() {
+                0
+            } else {
+                right.iter().map(|(t, _)| w(t)).sum::<usize>() + w(sep) * (right.len() - 1)
+            };
             let status_line: Line = if rgb {
                 let badge = format!(" {} ", view.badge);
                 let badge_style = Style::default()
@@ -271,14 +287,16 @@ pub fn modal_readline(
                     ));
                     used += 3 + w(&view.hint);
                 }
-                // Right-aligned ctx readout (colored by threshold), then pad the gap.
-                let ctx_w = ctx.as_ref().map(|(l, _)| w(l)).unwrap_or(0);
-                let target = (term_width as usize).saturating_sub(ctx_w);
+                // Right-aligned `model · ctx` readout, then pad the gap.
+                let target = (term_width as usize).saturating_sub(right_w);
                 if used < target {
                     spans.push(Span::styled(" ".repeat(target - used), bg));
                 }
-                if let Some((label, tok)) = ctx.as_ref() {
-                    spans.push(Span::styled(label.clone(), bg.fg(color::rt(*tok))));
+                for (i, (text, tok)) in right.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::styled(sep, bg.fg(color::rt(color::Token::Dim))));
+                    }
+                    spans.push(Span::styled(text.clone(), bg.fg(color::rt(*tok))));
                 }
                 Line::from(spans)
             } else {
@@ -287,15 +305,17 @@ pub fn modal_readline(
                 } else {
                     format!(" {}  {} ", view.badge, view.pos)
                 };
-                let ctx_w = ctx.as_ref().map(|(l, _)| w(l)).unwrap_or(0);
-                let target = (term_width as usize).saturating_sub(ctx_w);
+                let target = (term_width as usize).saturating_sub(right_w);
                 let used = w(&s);
                 if used < target {
                     s.push_str(&" ".repeat(target - used));
                 }
-                if let Some((label, _)) = ctx.as_ref() {
-                    s.push_str(label);
-                }
+                let right_str = right
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(sep);
+                s.push_str(&right_str);
                 Line::from(s).style(Style::default().add_modifier(Modifier::REVERSED))
             };
             f.render_widget(Paragraph::new(status_line), chunks[2]);

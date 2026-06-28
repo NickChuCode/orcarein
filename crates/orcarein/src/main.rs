@@ -1096,7 +1096,12 @@ async fn main() -> Result<()> {
                             };
                             (format!("ctx {pct:.0}%"), ctx_token(pct))
                         });
-                    match modal::modal_readline("> ", &history, ctx_label) {
+                    match modal::modal_readline(
+                        "> ",
+                        &history,
+                        ctx_label,
+                        Some(short_model(&model)),
+                    ) {
                         Ok(modal::ReadOutcome::Submitted(s)) => s,
                         Ok(modal::ReadOutcome::Cancelled) => continue,
                         Ok(modal::ReadOutcome::Eof) => break,
@@ -1154,12 +1159,26 @@ async fn main() -> Result<()> {
                 }
                 CommandAction::SwitchModel(n) => {
                     let new = expand_model_alias(&n, provider.name());
-                    if new == model {
+                    if !is_known_model(provider.name(), &new) {
+                        eprintln!(
+                            "未知 model「{n}」。{} 可用：flash / pro（完整名 deepseek-v4-flash / deepseek-v4-pro）。",
+                            provider.name()
+                        );
+                    } else if new == model {
                         println!("已经是 model {model} 了。");
                     } else {
                         model = new;
                         println!("已切换 model → {model}");
                         println!("（下次请求 cache 一次性 miss：前缀缓存按 model 隔离。）");
+                        // Persist the choice so the next session resolves + shows it.
+                        match Config::config_path() {
+                            Some(path) => {
+                                if let Err(e) = persist_model_choice(&path, &model) {
+                                    eprintln!("（model 已切换，但未能写入 config.toml：{e}）");
+                                }
+                            }
+                            None => eprintln!("（model 已切换，但无 config 目录可持久化）"),
+                        }
                     }
                     continue;
                 }
@@ -1856,6 +1875,38 @@ fn expand_model_alias(name: &str, provider: &str) -> String {
     name.to_string()
 }
 
+/// The models we know are valid for `provider`, so `/model` can reject typos
+/// (e.g. `flas`) before switching. For `deepseek` this is the two V4 ids; for
+/// other providers we have no static list, so we allow anything (a live
+/// `list_models` fetch in Phase 2 tightens this and generalizes it).
+fn is_known_model(provider: &str, model: &str) -> bool {
+    match provider {
+        "deepseek" => matches!(model, "deepseek-v4-flash" | "deepseek-v4-pro"),
+        _ => true,
+    }
+}
+
+/// The compact model label for the status bar: strip the `deepseek-v4-` prefix
+/// (`deepseek-v4-pro` → `pro`), otherwise the id unchanged. The display inverse
+/// of [`expand_model_alias`]. Pure — unit-tested. Only the modal status bar (tui)
+/// consumes it, so it is `tui`-gated to stay dead-code-free under
+/// `--no-default-features`.
+#[cfg(feature = "tui")]
+fn short_model(model: &str) -> &str {
+    model.strip_prefix("deepseek-v4-").unwrap_or(model)
+}
+
+/// Persist the chosen `model` to the config file at `path` (the global
+/// `config.toml`), so the next session's [`resolve`] picks it up and the header
+/// shows it. Loads the existing config (missing = default), sets `model`, writes
+/// it back. Errors (e.g. a read-only config dir) bubble up for the caller to warn.
+fn persist_model_choice(path: &std::path::Path, model: &str) -> anyhow::Result<()> {
+    let mut config = Config::load_from(path)?;
+    config.set("model", model)?;
+    config.save_to(path)?;
+    Ok(())
+}
+
 /// The context-occupancy line (`ctx 2.4% (24k/1.0M)`), colored by threshold.
 /// `None` when the model's window is unknown (caller omits / falls back).
 fn ctx_colored(prompt_tokens: u64, model: &str, mode: color::ColorMode) -> Option<String> {
@@ -2348,6 +2399,48 @@ mod tests {
             "deepseek-v4-pro"
         );
         assert_eq!(super::expand_model_alias("pro", "openai"), "pro");
+    }
+
+    #[test]
+    fn is_known_model_rejects_typos_for_deepseek() {
+        // Real ids pass.
+        assert!(super::is_known_model("deepseek", "deepseek-v4-flash"));
+        assert!(super::is_known_model("deepseek", "deepseek-v4-pro"));
+        // A typo / nonexistent model is rejected (the reported bug: `flas`).
+        assert!(!super::is_known_model("deepseek", "flas"));
+        assert!(!super::is_known_model("deepseek", "deepseek-chat"));
+        // Other providers can't be validated without a live list yet → allow
+        // (Phase 2's list_models tightens this).
+        assert!(super::is_known_model("openai", "gpt-4o"));
+        assert!(super::is_known_model("mock", "anything"));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn short_model_strips_deepseek_prefix() {
+        // The compact label shown on the status bar (inverse of expand_model_alias).
+        assert_eq!(super::short_model("deepseek-v4-pro"), "pro");
+        assert_eq!(super::short_model("deepseek-v4-flash"), "flash");
+        // A future model id keeps only its tail.
+        assert_eq!(super::short_model("deepseek-v4-4.1"), "4.1");
+        // Other providers' ids pass through untouched.
+        assert_eq!(super::short_model("gpt-4o"), "gpt-4o");
+        assert_eq!(super::short_model("mock"), "mock");
+    }
+
+    #[test]
+    fn persist_model_choice_writes_and_reloads() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Persisting into a missing config creates it with the model set.
+        super::persist_model_choice(&path, "deepseek-v4-pro").unwrap();
+        let cfg = orcarein_core::Config::load_from(&path).unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("deepseek-v4-pro"));
+        // A later switch overwrites the persisted choice.
+        super::persist_model_choice(&path, "deepseek-v4-flash").unwrap();
+        let cfg2 = orcarein_core::Config::load_from(&path).unwrap();
+        assert_eq!(cfg2.model.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]
