@@ -173,7 +173,14 @@ impl Md {
                 self.code_buf.clear();
             }
             Tag::BlockQuote(_) => self.quote += 1,
-            Tag::List(start) => self.lists.push(ListCtx { ordered: start }),
+            Tag::List(start) => {
+                // Flush the parent item's inline text before descending, so a tight
+                // nested list doesn't merge "a"/"b"/"c" into one deepest-level line.
+                if !self.lists.is_empty() && !self.runs.is_empty() {
+                    self.emit_para();
+                }
+                self.lists.push(ListCtx { ordered: start });
+            }
             Tag::Item => {
                 let depth = self.lists.len().saturating_sub(1);
                 let indent = "  ".repeat(depth);
@@ -324,17 +331,16 @@ impl Md {
         } else {
             Vec::new()
         };
-        let (first, cont): (Vec<(String, Style)>, Vec<(String, Style)>) =
-            if let Some(m) = self.pending_marker.take() {
-                let cont_w = disp_width(&m.0);
-                let mut f = quote_pfx.clone();
-                f.push(m);
-                let mut c = quote_pfx.clone();
-                c.push((" ".repeat(cont_w), Style::default()));
-                (f, c)
-            } else {
-                (quote_pfx.clone(), quote_pfx)
-            };
+        let (first, cont) = if let Some(m) = self.pending_marker.take() {
+            let cont_w = disp_width(&m.0);
+            let mut f = quote_pfx.clone();
+            f.push(m);
+            let mut c = quote_pfx.clone();
+            c.push((" ".repeat(cont_w), Style::default()));
+            (f, c)
+        } else {
+            (quote_pfx.clone(), quote_pfx)
+        };
         self.push_wrapped(runs, &first, &cont);
         if self.quote > 0 || self.lists.is_empty() {
             // top-level paragraphs get trailing space; list items stay tight
@@ -866,6 +872,19 @@ mod tests {
         assert!(p.iter().any(|l| l.contains('…')));
         // No column-drop marker (both columns fit after shrinking).
         assert!(!p.iter().any(|l| l.contains('╌')));
+    }
+
+    #[test]
+    fn deeply_nested_lists_indent_progressively() {
+        let p = plains("- a\n  - b\n    - c", 80);
+        // Each level renders as "· a" / "  · b" / "    · c"; locate by marker+body
+        // to avoid fragile single-char matches.
+        let lead = |needle: &str| -> usize {
+            let l = p.iter().find(|l| l.contains(needle)).expect(needle);
+            l.len() - l.trim_start_matches(' ').len()
+        };
+        assert!(lead("· b") > lead("· a"));
+        assert!(lead("· c") > lead("· b"));
     }
 
     #[test]
