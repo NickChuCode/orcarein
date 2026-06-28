@@ -145,6 +145,22 @@ pub fn rt(token: Token) -> ratatui::style::Color {
     ratatui::style::Color::Rgb(r, g, b)
 }
 
+/// Syntax-highlight color for a token kind (drafted to extend the Claude Design
+/// "OrcaRein 终端设计系统" — author finalizes the exact hex). `Plain` → None
+/// (keeps the code-block body fg). Only the fg is overridden; the block bg stays.
+#[cfg(feature = "tui")]
+pub fn syn_color(kind: crate::syntax::SynKind) -> Option<ratatui::style::Color> {
+    use crate::syntax::SynKind::*;
+    use ratatui::style::Color::Rgb;
+    Some(match kind {
+        Keyword => Rgb(0xC9, 0x9B, 0xE6),       // soft violet
+        Str => Rgb(0x8F, 0xD9, 0x8F),           // soft green
+        Comment => return Some(rt(Token::Dim)), // delegate → stays in sync if Dim retunes
+        Number => Rgb(0xE0, 0xA6, 0x6B),        // warm amber
+        Plain => return None,
+    })
+}
+
 /// Status-bar background (`#16223C`) for the modal / pager bars.
 #[cfg(feature = "tui")]
 pub const STATUS_BG: ratatui::style::Color = ratatui::style::Color::Rgb(22, 34, 60);

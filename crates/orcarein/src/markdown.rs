@@ -372,9 +372,19 @@ impl Md {
             plain.push_str(&self.code_lang);
             self.out.push(RenderedLine { spans, plain });
         }
+        let lang_lc = self.code_lang.to_lowercase();
         let buf = std::mem::take(&mut self.code_buf);
         for line in buf.trim_end_matches('\n').split('\n') {
-            for (i, seg) in wrap_code_line(line, first_avail, cont_avail)
+            // Styled runs: syntax-highlighted when rgb, else a single body run.
+            let runs: Vec<(String, Style)> = if self.rgb {
+                crate::syntax::highlight(line, &lang_lc)
+                    .into_iter()
+                    .map(|(s, kind)| (s, self.code_token_style(kind, body)))
+                    .collect()
+            } else {
+                vec![(line.to_string(), body)]
+            };
+            for (i, seg_spans) in wrap_styled_code(&runs, first_avail, cont_avail)
                 .into_iter()
                 .enumerate()
             {
@@ -387,14 +397,23 @@ impl Md {
                 }
                 spans.push((gutter.to_string(), bar));
                 plain.push_str(gutter);
-                if !seg.is_empty() {
-                    spans.push((seg.clone(), body));
-                    plain.push_str(&seg);
+                for (s, st) in seg_spans {
+                    plain.push_str(&s);
+                    spans.push((s, st));
                 }
                 self.out.push(RenderedLine { spans, plain });
             }
         }
         self.blank();
+    }
+
+    /// The style for a code token: the block body (fg+bg) with the syntax color
+    /// overriding the fg (Plain keeps body). Only applied on the rgb path.
+    fn code_token_style(&self, kind: crate::syntax::SynKind, body: Style) -> Style {
+        match color::syn_color(kind) {
+            Some(c) => body.fg(c),
+            None => body,
+        }
     }
 
     fn code_body_style(&self) -> Style {
@@ -486,10 +505,6 @@ fn char_w(c: char) -> usize {
     disp_width(&c.to_string())
 }
 
-/// Hard-wrap one code line, never splitting a char (CJK=2). The first segment
-/// fits `first_avail` display columns, every continuation fits `cont_avail`
-/// (the gutters differ: `▏ ` for the first line, `▏ ↳ ` for continuations).
-/// Always returns at least one (possibly empty) segment.
 /// Hard-wrap styled `runs` to display width, carrying each char's style across
 /// wrap boundaries. The first segment fits `first_avail` columns, continuations
 /// `cont_avail` (CJK=2, never splits a char). Returns content-only spans per
@@ -527,30 +542,6 @@ fn wrap_styled_code(
     }
     segs.push(cur); // always at least one (possibly empty) segment
     segs.into_iter().map(|chs| coalesce(&chs)).collect()
-}
-
-fn wrap_code_line(line: &str, first_avail: usize, cont_avail: usize) -> Vec<String> {
-    let first_avail = first_avail.max(1);
-    let cont_avail = cont_avail.max(1);
-    let mut segs: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut w = 0usize;
-    for c in line.chars() {
-        let cap = if segs.is_empty() {
-            first_avail
-        } else {
-            cont_avail
-        };
-        let cw = char_w(c);
-        if w + cw > cap && !cur.is_empty() {
-            segs.push(std::mem::take(&mut cur));
-            w = 0;
-        }
-        cur.push(c);
-        w += cw;
-    }
-    segs.push(cur); // always emit at least one segment (possibly empty)
-    segs
 }
 
 /// Word-wrap styled `runs` to `width` columns, prefixing line 0 with `first` and
@@ -911,6 +902,24 @@ mod tests {
         assert!(p.iter().any(|l| l.contains('…')));
         // No column-drop marker (both columns fit after shrinking).
         assert!(!p.iter().any(|l| l.contains('╌')));
+    }
+
+    #[test]
+    fn code_block_highlights_when_rgb() {
+        // rgb=true → keyword/number split into separate styled spans.
+        let lines = render("```rust\nlet x = 1;\n```", 80, true, false);
+        let code = lines
+            .iter()
+            .find(|l| l.plain.contains("let x = 1;"))
+            .expect("code line");
+        // plain unchanged vs the no-highlight path.
+        assert_eq!(code.plain, "▏ let x = 1;");
+        // highlighting split the content into multiple spans (gutter + >1 content).
+        assert!(
+            code.spans.len() > 2,
+            "expected multiple spans: {:?}",
+            code.spans
+        );
     }
 
     #[test]
