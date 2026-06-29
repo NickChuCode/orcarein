@@ -15,8 +15,8 @@ use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
     OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RiskLevel,
-    SearchTool, SecretStore, Session, SessionStore, SessionSummary, Tool, ToolRegistry,
-    WriteFileTool, MAX_TOOL_ITERATIONS,
+    SearchTool, SecretStore, Session, SessionStore, SessionSummary, SubagentTool, Tool,
+    ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -699,6 +699,34 @@ fn print_doctor_report(checks: &[Check]) {
 
 /// Builds the tool registry honoring `--tools`. Warns to stderr if the
 /// allowlist names any unknown tool.
+/// The tool-call ceiling for a child `task` agent. Lower than the parent's
+/// `MAX_TOOL_ITERATIONS` since a subagent handles one self-contained sub-task.
+const MAX_SUBAGENT_ITERATIONS: usize = 12;
+
+/// Augments `registry` with the `task` subagent tool. The child registry comes
+/// from [`build_registry`] (built-ins only — never `task`), so a subagent cannot
+/// spawn its own subagents (no recursion). The caller supplies a `policy_factory`
+/// so each agent path mirrors its own permission posture for its children.
+fn register_subagent(
+    registry: &mut ToolRegistry,
+    provider: Arc<dyn Provider>,
+    allowlist: Option<Vec<String>>,
+    model: String,
+    policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+) {
+    let af = allowlist.clone();
+    let registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync> =
+        Arc::new(move || build_registry(af.as_deref()));
+    registry.register(Box::new(SubagentTool::new(
+        provider,
+        registry_factory,
+        policy_factory,
+        model,
+        MAX_SUBAGENT_ITERATIONS,
+        DEFAULT_SUBAGENT_PERSONA.to_string(),
+    )));
+}
+
 fn build_registry(allowlist: Option<&[String]>) -> ToolRegistry {
     let all_tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFileTool),
@@ -1027,7 +1055,6 @@ async fn main() -> Result<()> {
         let mcp_cfg = orcarein_core::Config::load().unwrap_or_default();
         orcarein_core::mcp::setup_servers(&mcp_cfg.mcp_servers, &mut registry).await
     };
-    let tool_defs = registry.definitions();
 
     // Terminal width + capability, resolved once and reused by the header, the
     // streaming sink, the permission prompt, and /help. `fancy` gates the boxed
@@ -1035,6 +1062,30 @@ async fn main() -> Result<()> {
     // so a NO_COLOR tty still draws the box, just uncolored).
     let (cols, fancy) = header_env();
     let mode = color::detect(fancy);
+
+    // Register the `task` subagent tool. Its children mirror the REPL's own
+    // permission posture: interactive (with a subagent-tagged prompt) unless
+    // `--no-permission`, in which case the child runs unprompted too. Clone the
+    // provider Arc into the tool *before* `Agent::new` borrows `&*provider`.
+    {
+        let no_permission = cli.no_permission;
+        let policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
+            Arc::new(move || {
+                if no_permission {
+                    Box::new(AllowlistPolicy::allow_all())
+                } else {
+                    Box::new(InteractivePolicy::new(fancy, mode).with_subagent_prefix())
+                }
+            });
+        register_subagent(
+            &mut registry,
+            Arc::clone(&provider),
+            tools_allowlist.clone(),
+            model.clone(),
+            policy_factory,
+        );
+    }
+    let tool_defs = registry.definitions();
 
     // Resolve the selectable model list once (used by `/model` validation and the
     // picker popup). A short timeout keeps a slow/offline endpoint from stalling
@@ -1352,6 +1403,9 @@ struct InteractivePolicy {
     store: PermissionStore,
     fancy: bool,
     mode: color::ColorMode,
+    /// When set, the prompt is visibly marked as a subagent's request so it is
+    /// not confused with the parent agent's own permission prompt.
+    subagent: bool,
 }
 
 impl InteractivePolicy {
@@ -1360,7 +1414,15 @@ impl InteractivePolicy {
             store: PermissionStore::new(),
             fancy,
             mode,
+            subagent: false,
         }
+    }
+
+    /// Marks this policy as belonging to a subagent — its prompt is prefixed
+    /// with "subagent 请求：" to distinguish it from the parent's.
+    fn with_subagent_prefix(mut self) -> Self {
+        self.subagent = true;
+        self
     }
 }
 
@@ -1369,7 +1431,7 @@ impl PermissionPolicy for InteractivePolicy {
         if let Some(d) = self.store.cached(tool) {
             return d;
         }
-        let d = prompt_permission(tool, args, self.fancy, self.mode);
+        let d = prompt_permission(tool, args, self.fancy, self.mode, self.subagent);
         if d.is_sticky() {
             self.store.remember(tool, d);
         }
@@ -1596,6 +1658,31 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         let mcp_cfg = orcarein_core::Config::load().unwrap_or_default();
         orcarein_core::mcp::setup_servers(&mcp_cfg.mcp_servers, &mut registry).await
     };
+
+    // Register the `task` subagent tool with a policy_factory mirroring this
+    // headless run's posture (allow_all / allowlist / deny_all). Clone the
+    // provider Arc into the tool before `Agent::new` borrows `&*provider`.
+    {
+        let no_permission = cli.no_permission;
+        let allow_child = allow.clone();
+        let policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
+            Arc::new(move || {
+                if no_permission {
+                    Box::new(AllowlistPolicy::allow_all())
+                } else if let Some(names) = allow_child.clone() {
+                    Box::new(AllowlistPolicy::from_allowed(names))
+                } else {
+                    Box::new(AllowlistPolicy::deny_all())
+                }
+            });
+        register_subagent(
+            &mut registry,
+            Arc::clone(&provider),
+            tools_allowlist.clone(),
+            model.clone(),
+            policy_factory,
+        );
+    }
     let tool_defs = registry.definitions();
     let agent =
         Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(cli));
@@ -1649,15 +1736,24 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
 /// Synchronously prompts the user. Any input we cannot parse — empty
 /// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default). On a capable
 /// tty it draws the colored `▌ 权限确认` chrome; otherwise a plain one-liner.
-fn prompt_permission(name: &str, args: &str, fancy: bool, mode: color::ColorMode) -> Decision {
+fn prompt_permission(
+    name: &str,
+    args: &str,
+    fancy: bool,
+    mode: color::ColorMode,
+    subagent: bool,
+) -> Decision {
     use color::Token;
+    // Subagent prompts are visibly tagged so they are not mistaken for the
+    // parent agent's own request.
+    let who = if subagent { "subagent 请求：" } else { "" };
     if fancy {
         let p = |t: Token, s: &str| color::paint(mode, t, s);
         eprintln!();
         eprintln!(
             "{}{}",
             p(Token::Warning, "▌ 权限确认"),
-            p(Token::Dim, &format!("  {name} 请求授权"))
+            p(Token::Dim, &format!("  {who}{name} 请求授权"))
         );
         eprintln!();
         eprintln!("   {}", p(Token::Fg, &format!("{name}({args})")));
@@ -1679,7 +1775,7 @@ fn prompt_permission(name: &str, args: &str, fancy: bool, mode: color::ColorMode
         eprint!("   {opts} ");
     } else {
         eprintln!();
-        eprintln!("OrcaRein wants to run: {name}({args})");
+        eprintln!("{who}OrcaRein wants to run: {name}({args})");
         eprint!("Allow? [y=once N=never a=always n=once]: ");
     }
     let _ = std::io::stderr().flush();
@@ -2249,7 +2345,31 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let registry = build_registry(Some(&issue_tools));
+    let mut registry = build_registry(Some(&issue_tools));
+
+    // Register the `task` subagent tool. Children mirror the issue path's
+    // restricted posture: the same edit-only allowlist (no shell), backed by a
+    // child registry built from `issue_tools`. Clone the provider Arc into the
+    // tool before `Agent::new` borrows `&*provider`.
+    {
+        let child_tools = issue_tools.clone();
+        let policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
+            Arc::new(|| {
+                Box::new(AllowlistPolicy::from_allowed([
+                    "list_dir",
+                    "search",
+                    "edit",
+                    "write_file",
+                ]))
+            });
+        register_subagent(
+            &mut registry,
+            Arc::clone(&provider),
+            Some(child_tools),
+            model.clone(),
+            policy_factory,
+        );
+    }
     let tool_defs = registry.definitions();
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
