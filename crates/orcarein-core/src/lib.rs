@@ -48,6 +48,8 @@ pub use tool::{
     ReadFileTool,
     RiskLevel,
     SearchTool,
+    // v0.2 — sub-agent (task) tool
+    SubagentTool,
     Tool,
     ToolCall,
     ToolDefinition,
@@ -56,6 +58,7 @@ pub use tool::{
     ToolRegistry,
     ToolSchema,
     WriteFileTool,
+    DEFAULT_SUBAGENT_PERSONA,
 };
 
 /// Returns the crate version (semver string).
