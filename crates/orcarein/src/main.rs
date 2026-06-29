@@ -22,6 +22,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod color;
 mod header;
@@ -193,7 +194,7 @@ enum SessionAction {
 
 /// Effective settings after resolving CLI > env > config > defaults.
 struct Resolved {
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
     model: String,
     system_prompt: String,
     tools_allowlist: Option<Vec<String>>,
@@ -201,7 +202,7 @@ struct Resolved {
 
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
 /// provider name first so a missing key never masks a typo'd provider.
-fn build_provider(name: &str, api_key: Option<String>) -> Result<Box<dyn Provider>> {
+fn build_provider(name: &str, api_key: Option<String>) -> Result<Arc<dyn Provider>> {
     match name {
         "deepseek" | "openai" => {}
         other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
@@ -214,8 +215,8 @@ fn build_provider(name: &str, api_key: Option<String>) -> Result<Box<dyn Provide
         )
     })?;
     match name {
-        "deepseek" => Ok(Box::new(DeepSeekProvider::new(key))),
-        "openai" => Ok(Box::new(OpenAIProvider::new(key))),
+        "deepseek" => Ok(Arc::new(DeepSeekProvider::new(key))),
+        "openai" => Ok(Arc::new(OpenAIProvider::new(key))),
         _ => unreachable!("provider validated above"),
     }
 }
