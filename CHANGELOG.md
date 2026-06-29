@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-29
+
+The bulk of the v0.2 development line, which landed on `main` after the early
+`v0.2.0` tag and had not yet been packaged. A major terminal-UX overhaul plus an
+MCP client, project memory, and live model switching.
+
+### Added
+
+- **Vim modal input editor** — a self-built multiline editor (normal / insert /
+  visual modes, motions, operators, counts, undo/redo, OSC52 clipboard) that
+  replaces rustyline on capable terminals and degrades back to it otherwise.
+- **Semantic color system** — 8 named tokens with truecolor → 256 → 16 → NO_COLOR
+  degradation, applied across the header, streaming output, permission prompt,
+  help, modal editor, and pager.
+- **Unified TUI header** — a DeepSeek-blue box with an orca mascot and a labeled
+  model / cwd / session identity panel; one-line fallback on narrow / non-tty.
+- **Markdown rendering in the pager** (`/show`, `/history`) — headings, bold /
+  italic / inline code, fenced code blocks, block quotes, lists, links, and
+  CJK-aware tables, parsed with `pulldown-cmark` (behind the `tui` feature).
+- **Code syntax highlighting** — a hand-rolled zero-dependency lexer highlights
+  fenced code blocks and `/show` of standalone code files; the palette is
+  finalized via the design system and tiers across truecolor / 256 / 16.
+- **`@`-mention completion** — an in-editor popup completes project files and
+  directories (gitignore-aware); at submit, `@path` injects the file content (or
+  a directory tree) so the model sees it without polluting the cached prefix.
+- **Runtime model switching** — `/model` switches the model live, shows it on the
+  status bar, and persists the choice to `config.toml`. An in-editor picker popup
+  lists models fetched live from the provider's `GET /v1/models`, so new models
+  appear and retired ones disappear automatically; unknown names are rejected.
+- **More runtime commands** — `/sessions`, `/resume`, `/new`, `/compact`,
+  `/init`, `/tools`, plus context-window fill warnings.
+- **Project memory** — `AGENTS.md` is discovered (walk-up) and injected into the
+  REPL / `run` / `issue` prompts; `/init` generates one agentically.
+- **MCP client** — connect to stdio MCP servers and expose their tools alongside
+  the built-ins (`mcp` feature, on by default).
+- **gitignore-aware `search` tool** and **context compaction** (`/compact`).
+
+### Changed
+
+- HTTP TLS uses rustls (friendlier for aarch64 cross-compilation).
+- `bash` tool output is capped (32 KiB per stream) to prevent context overflow.
+
+### Fixed
+
+- Numerous modal-editor fixes: inline-cursor origin offset, viewport clearing on
+  resize / exit, charwise multiline paste, and insert-mode arrow keys.
+
 ## [0.2.0] - 2026-06-17
 
 First packaged release with prebuilt binaries for all platforms, including

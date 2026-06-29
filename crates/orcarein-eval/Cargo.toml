@@ -10,7 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-orcarein-core = { path = "../orcarein-core", version = "0.2.0" }
+orcarein-core = { path = "../orcarein-core", version = "0.3.0" }
 tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

@@ -3,10 +3,12 @@ resolver = "2"
 members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware", "crates/orcarein-eval"]
 
 [workspace.package]
-# Ch16: MVP `v0.1.0-mvp`. v0.2.0: terminal UX + session mgmt + cross-SoC hardware
-# layer (board profiles + gpiocdev GPIO backend) — first packaged release with
-# aarch64 Linux binaries for Pi / Orange Pi.
-version = "0.2.0"
+# Ch16: MVP `v0.1.0-mvp`. v0.2.0: first packaged release with aarch64 Linux
+# binaries. v0.3.0: the bulk of the v0.2 dev line that landed after the v0.2.0
+# tag — vim modal editor, semantic color system + unified header, pager Markdown
+# + syntax highlighting, @-mention completion, MCP client, project memory,
+# /compact, and runtime model switching with a live /v1/models picker.
+version = "0.3.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
