@@ -16,6 +16,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 
 use super::{RiskLevel, Tool, ToolError, ToolOutput, ToolRegistry};
 use crate::{Agent, AgentEvent, PermissionPolicy, Provider, Session};
@@ -40,9 +41,9 @@ struct TaskArgs {
 /// The `task` tool — delegates a self-contained sub-task to a fresh sub-agent
 /// with an isolated context window.
 pub struct SubagentTool {
-    provider: std::sync::Arc<dyn Provider>,
-    registry_factory: std::sync::Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
-    policy_factory: std::sync::Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+    provider: Arc<dyn Provider>,
+    registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
+    policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
     model: String,
     max_iterations: usize,
     persona: String,
@@ -52,9 +53,9 @@ impl SubagentTool {
     /// Builds a `task` tool. The factories are invoked once per `execute` so
     /// each child run gets its own registry + policy (no shared state).
     pub fn new(
-        provider: std::sync::Arc<dyn Provider>,
-        registry_factory: std::sync::Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
-        policy_factory: std::sync::Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+        provider: Arc<dyn Provider>,
+        registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
+        policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
         model: String,
         max_iterations: usize,
         persona: String,
@@ -70,18 +71,23 @@ impl SubagentTool {
     }
 }
 
-/// Caps `s` at [`OUTPUT_CAP`] bytes on a char boundary, appending a marker if
-/// it had to truncate.
+/// Marker appended when [`cap`] has to truncate.
+const TRUNC_MARKER: &str = "\n[output truncated]";
+
+/// Caps the returned string at [`OUTPUT_CAP`] bytes total. When truncation is
+/// needed, headroom for [`TRUNC_MARKER`] is reserved first so the combined
+/// length never exceeds the cap, and the content is cut on a char boundary.
 fn cap(s: &str) -> String {
     if s.len() <= OUTPUT_CAP {
         return s.to_string();
     }
-    // Walk back to the nearest char boundary at or below the cap.
-    let mut end = OUTPUT_CAP;
+    // Reserve room for the marker so content + marker stays within the cap.
+    let mut end = OUTPUT_CAP.saturating_sub(TRUNC_MARKER.len());
+    // Walk back to the nearest char boundary at or below that budget.
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[output truncated]", &s[..end])
+    format!("{}{TRUNC_MARKER}", &s[..end])
 }
 
 #[async_trait]
@@ -329,5 +335,62 @@ mod tests {
                 .any(|m| m.content.contains("CHILD_INTERMEDIATE")),
             "child intermediate must not leak into the parent session"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_appends_did_not_converge_on_iteration_limit() {
+        // max_iterations = 1, but the child keeps calling a tool, so the loop
+        // hits the cap before the model ever produces a final text answer.
+        let child_provider = Arc::new(MockProvider::new());
+        child_provider.push_tool_call("c1", "echo", "{}");
+        child_provider.push_tool_call("c2", "echo", "{}");
+        child_provider.push_tool_call("c3", "echo", "{}");
+
+        let tool = SubagentTool::new(
+            child_provider,
+            Arc::new(|| {
+                let mut r = ToolRegistry::new();
+                r.register(Box::new(EchoTool));
+                r
+            }),
+            deny_all_factory(),
+            "m".into(),
+            1,
+            DEFAULT_SUBAGENT_PERSONA.into(),
+        );
+
+        let out = tool
+            .execute(json!({ "description": "spin" }))
+            .await
+            .unwrap();
+        assert!(
+            out.content.contains("did not converge"),
+            "expected non-convergence note, got: {:?}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn cap_truncates_multibyte_without_panic_and_stays_within_cap() {
+        // "你" is 3 bytes; repeating it past the cap guarantees the byte budget
+        // lands mid-codepoint, exercising the char-boundary walk-back.
+        let s = "你".repeat(OUTPUT_CAP); // ~3x OUTPUT_CAP bytes
+        let out = cap(&s);
+
+        // No panic + valid UTF-8 (a String is UTF-8 by construction; the cut
+        // must land on a boundary or `&s[..end]` would have panicked above).
+        assert!(out.len() <= OUTPUT_CAP, "total must stay within the cap");
+        assert!(
+            out.ends_with(TRUNC_MARKER),
+            "must carry the truncation marker"
+        );
+    }
+
+    #[test]
+    fn cap_leaves_short_input_unchanged() {
+        let s = "short result";
+        let out = cap(s);
+        assert_eq!(out, s);
+        assert!(!out.ends_with(TRUNC_MARKER));
     }
 }
