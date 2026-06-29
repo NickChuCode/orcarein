@@ -69,12 +69,12 @@ pub enum AgentEvent {
 ///
 /// Any `FnMut(AgentEvent)` is also an `EventSink` (blanket impl below), so a
 /// test or quick embedder can pass a closure.
-pub trait EventSink {
+pub trait EventSink: Send {
     /// Receive one event. Called synchronously as the turn progresses.
     fn emit(&mut self, event: AgentEvent);
 }
 
-impl<F: FnMut(AgentEvent)> EventSink for F {
+impl<F: FnMut(AgentEvent) + Send> EventSink for F {
     fn emit(&mut self, event: AgentEvent) {
         self(event)
     }
@@ -85,7 +85,7 @@ impl<F: FnMut(AgentEvent)> EventSink for F {
 /// Only consulted for [`RiskLevel::Risky`] tools — `Safe` tools always run.
 /// The REPL implements this by prompting the human; `run` mode by consulting
 /// an [`AllowlistPolicy`].
-pub trait PermissionPolicy {
+pub trait PermissionPolicy: Send {
     /// Return a [`Decision`] for running `tool` (with raw `args`) at `risk`.
     fn decide(&mut self, tool: &str, args: &str, risk: RiskLevel) -> Decision;
 }
