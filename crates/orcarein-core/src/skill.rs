@@ -1,0 +1,162 @@
+//! Skills — named, on-demand instruction packs a repo carries in
+//! `.orcarein/skills/`. Pure, std-only, and SILENT (mirrors `memory.rs`:
+//! unreadable / malformed files are skipped, never logged — core has no
+//! `tracing`). The binary discovers skills once at startup, injects a compact
+//! index into the system prompt, and registers the `skill` tool that loads a
+//! body on demand. See the 2026-06-30 skill design spec.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// The skills directory, relative to a repo root (Claude Code / superpowers
+/// convention). `/` works as a separator on Windows too via `Path::join`.
+pub const SKILLS_DIRNAME: &str = ".orcarein/skills";
+
+/// Cap on a single skill body returned to the model (same bound as AGENTS.md).
+pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
+
+/// Cap on how many skills feed the index — bounds the stable-prefix size.
+pub const MAX_SKILLS: usize = 64;
+
+/// A discovered skill: `name`/`description` from frontmatter, `body` = the
+/// markdown after the closing `---` fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+/// Strips one matching pair of surrounding quotes (`"` or `'`), if present.
+fn strip_quotes(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Parse one skill file. Requires: the first non-blank line is a `---` fence;
+/// `name:`/`description:` key lines inside; a closing `---`; then the body.
+/// Only `name`/`description` are recognized (other keys ignored). `name` is
+/// required — a missing/empty name (or no frontmatter / no closing fence)
+/// yields `None` (the file is skipped). CRLF-tolerant. The body is sliced
+/// **verbatim from the original `content`** (never rebuilt from `.lines()`,
+/// which would lose CRLF); line scanning only locates the closing fence.
+pub fn parse_skill(content: &str) -> Option<Skill> {
+    let mut name: Option<String> = None;
+    let mut description = String::new();
+    let mut seen_open = false;
+    let mut body_start: Option<usize> = None;
+    let mut offset = 0usize; // byte offset of the current line's start
+
+    for line in content.split_inclusive('\n') {
+        let line_len = line.len();
+        let t = line.trim_end_matches('\n').trim_end_matches('\r').trim();
+
+        if !seen_open {
+            if t.is_empty() {
+                offset += line_len;
+                continue; // skip leading blank lines
+            }
+            if t == "---" {
+                seen_open = true;
+                offset += line_len;
+                continue;
+            }
+            return None; // first non-blank line is not a fence -> not a skill
+        }
+
+        if t == "---" {
+            body_start = Some(offset + line_len); // body begins after this line
+            break;
+        }
+        if let Some((k, v)) = t.split_once(':') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "name" => name = Some(strip_quotes(v.trim()).to_string()),
+                "description" => description = strip_quotes(v.trim()).to_string(),
+                _ => {}
+            }
+        }
+        offset += line_len;
+    }
+
+    let body_start = body_start?; // no closing fence -> skip
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())?;
+
+    let rest = &content[body_start..];
+    let body = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .unwrap_or(rest)
+        .to_string();
+
+    Some(Skill {
+        name,
+        description,
+        body,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_skill() {
+        let s = "---\nname: release\ndescription: how to cut a release\n---\nStep 1.\nStep 2.\n";
+        let sk = parse_skill(s).expect("should parse");
+        assert_eq!(sk.name, "release");
+        assert_eq!(sk.description, "how to cut a release");
+        assert_eq!(sk.body, "Step 1.\nStep 2.\n");
+    }
+
+    #[test]
+    fn missing_name_is_none() {
+        let s = "---\ndescription: no name here\n---\nbody\n";
+        assert!(parse_skill(s).is_none());
+    }
+
+    #[test]
+    fn missing_description_defaults_empty() {
+        let s = "---\nname: solo\n---\nbody\n";
+        let sk = parse_skill(s).unwrap();
+        assert_eq!(sk.name, "solo");
+        assert_eq!(sk.description, "");
+    }
+
+    #[test]
+    fn no_opening_fence_is_none() {
+        assert!(parse_skill("name: x\ndescription: y\nbody\n").is_none());
+    }
+
+    #[test]
+    fn no_closing_fence_is_none() {
+        assert!(parse_skill("---\nname: x\ndescription: y\nbody\n").is_none());
+    }
+
+    #[test]
+    fn body_is_verbatim_after_fence() {
+        let s = "---\nname: code\n---\n```rust\nfn main() {}\n```\n\nmore\n";
+        let sk = parse_skill(s).unwrap();
+        assert_eq!(sk.body, "```rust\nfn main() {}\n```\n\nmore\n");
+    }
+
+    #[test]
+    fn crlf_is_tolerated_and_body_preserves_crlf() {
+        let s = "---\r\nname: win\r\ndescription: crlf\r\n---\r\nline1\r\nline2\r\n";
+        let sk = parse_skill(s).unwrap();
+        assert_eq!(sk.name, "win");
+        assert_eq!(sk.description, "crlf");
+        assert_eq!(sk.body, "line1\r\nline2\r\n");
+    }
+
+    #[test]
+    fn quoted_values_are_unquoted() {
+        let s = "---\nname: \"quoted\"\ndescription: 'single'\n---\nb\n";
+        let sk = parse_skill(s).unwrap();
+        assert_eq!(sk.name, "quoted");
+        assert_eq!(sk.description, "single");
+    }
+}

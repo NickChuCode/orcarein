@@ -17,6 +17,7 @@ pub mod message;
 pub mod permission;
 pub mod provider;
 pub mod session;
+pub mod skill;
 pub mod tool;
 
 pub use agent::{
