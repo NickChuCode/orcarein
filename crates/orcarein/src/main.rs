@@ -789,6 +789,18 @@ fn fresh_session_prompt(base: String, cwd: &std::path::Path) -> String {
     }
 }
 
+/// Appends the discovered-skills index to a fresh-session prompt, if any. Kept
+/// separate from `fresh_session_prompt` so the (session-fixed) skills index and
+/// the (per-`/new`-refreshed) AGENTS.md block have independent lifecycles: the
+/// index and the registered `SkillTool` are built from the same startup
+/// discovery, so what the index lists is always loadable.
+fn append_skills_index(prompt: String, index: Option<&str>) -> String {
+    match index {
+        Some(block) => format!("{prompt}\n\n{block}"),
+        None => prompt,
+    }
+}
+
 /// Whether `/init` may write AGENTS.md in `cwd`.
 #[derive(Debug)]
 enum InitDecision {
@@ -2637,6 +2649,17 @@ mod tests {
             1,
             "fresh session injects exactly one block"
         );
+    }
+
+    #[test]
+    fn append_skills_index_adds_block_when_present() {
+        let out = super::append_skills_index("BASE".to_string(), Some("# Available skills"));
+        assert_eq!(out, "BASE\n\n# Available skills");
+    }
+
+    #[test]
+    fn append_skills_index_is_noop_when_absent() {
+        assert_eq!(super::append_skills_index("BASE".to_string(), None), "BASE");
     }
 
     #[test]
