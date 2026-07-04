@@ -50,6 +50,7 @@ pub use tool::{
     ReadFileTool,
     RiskLevel,
     SearchTool,
+    SkillTool,
     // v0.2 — sub-agent (task) tool
     SubagentTool,
     Tool,

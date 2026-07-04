@@ -22,6 +22,7 @@ pub mod protocol;
 pub mod read_file;
 pub mod repair;
 pub mod search;
+pub mod skill;
 pub mod subagent;
 pub mod write_file;
 
@@ -32,6 +33,7 @@ pub use protocol::{FunctionCall, FunctionDefinition, ToolCall, ToolDefinition, T
 pub use read_file::ReadFileTool;
 pub use repair::parse_tool_arguments;
 pub use search::SearchTool;
+pub use skill::SkillTool;
 pub use subagent::{SubagentTool, DEFAULT_SUBAGENT_PERSONA};
 pub use write_file::WriteFileTool;
 
