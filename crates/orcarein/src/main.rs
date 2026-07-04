@@ -1241,6 +1241,7 @@ async fn main() -> Result<()> {
                 &model,
                 last_prompt_tokens,
                 &registry.names(),
+                &skills,
                 mode,
             ) {
                 CommandAction::Continue => continue,
@@ -2114,7 +2115,8 @@ fn render_help(mode: color::ColorMode) -> String {
         [("/tools", "列出工具"), ("/show", "查看文件（分页）")],
         [("/history", "浏览记录"), ("/model", "切换模型")],
         [("/sessions", "列出会话"), ("/resume", "切换会话")],
-        [("/new", "新建会话"), ("/exit", "退出会话")],
+        [("/new", "新建会话"), ("/skills", "列出可用 skill")],
+        [("/exit", "退出会话"), ("", "")],
     ];
     const LCMD: usize = 11; // left command field width
     const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
@@ -2171,6 +2173,7 @@ fn handle_command(
     model: &str,
     last_prompt_tokens: u64,
     tool_names: &[&str],
+    skills: &[orcarein_core::Skill],
     mode: color::ColorMode,
 ) -> CommandAction {
     // Split into a verb and an optional argument so `/show <path>` works while
@@ -2217,6 +2220,14 @@ fn handle_command(
         // presentation — neither pushes anything into the session.
         "tools" => {
             println!("{}", format_tool_list(tool_names));
+            CommandAction::Continue
+        }
+        "skills" => {
+            if skills.is_empty() {
+                println!("没有发现 skill（在 .orcarein/skills/ 放 *.md 或 <name>/SKILL.md）。");
+            } else {
+                print!("{}", orcarein_core::skills_list(skills));
+            }
             CommandAction::Continue
         }
         "show" => {
@@ -2541,6 +2552,7 @@ mod tests {
             "/sessions",
             "/resume",
             "/new",
+            "/skills",
         ] {
             assert!(out.contains(cmd), "help missing {cmd}");
         }
@@ -2549,7 +2561,7 @@ mod tests {
             .lines()
             .skip(2) // title + rule
             .zip([
-                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/exit",
+                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/skills",
             ])
         {
             let pos = line.find(rcmd).expect("right command present");
