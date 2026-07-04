@@ -45,6 +45,12 @@ fn strip_quotes(s: &str) -> &str {
 /// **verbatim from the original `content`** (never rebuilt from `.lines()`,
 /// which would lose CRLF); line scanning only locates the closing fence.
 pub fn parse_skill(content: &str) -> Option<Skill> {
+    // Strip a leading UTF-8 BOM: PowerShell's `Set-Content`/`Out-File -Encoding
+    // utf8` (PS 5.1) writes one, and it would otherwise make the first line
+    // `\u{FEFF}---` != `---`, silently skipping the whole file. Rebinding here
+    // keeps all downstream byte offsets consistent with the sliced body.
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+
     let mut name: Option<String> = None;
     let mut description = String::new();
     let mut seen_open = false;
@@ -304,6 +310,16 @@ mod tests {
         let sk = parse_skill(s).unwrap();
         assert_eq!(sk.name, "quoted");
         assert_eq!(sk.description, "single");
+    }
+
+    #[test]
+    fn leading_utf8_bom_is_tolerated() {
+        // PowerShell's utf8 encoders prepend a BOM; without stripping it the
+        // opening fence would not match and the file would be silently skipped.
+        let s = "\u{FEFF}---\nname: bom\ndescription: d\n---\nbody\n";
+        let sk = parse_skill(s).expect("BOM-prefixed skill should parse");
+        assert_eq!(sk.name, "bom");
+        assert_eq!(sk.body, "body\n");
     }
 
     use std::fs;
