@@ -1682,6 +1682,14 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         ..
     } = resolved;
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let skills = orcarein_core::discover_skills(&cwd);
+    let skills_index = if skills.is_empty() {
+        None
+    } else {
+        Some(orcarein_core::skills_index(&skills))
+    };
+
     #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
     let mut registry = build_registry(tools_allowlist.as_deref());
     #[cfg(feature = "mcp")]
@@ -1714,6 +1722,9 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
             policy_factory,
         );
     }
+    if !skills.is_empty() {
+        registry.register(Box::new(SkillTool::new(skills)));
+    }
     let tool_defs = registry.definitions();
     let agent =
         Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(cli));
@@ -1731,8 +1742,9 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
     };
 
     // Inject project memory (AGENTS.md) into the headless run prompt too.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let system_prompt = fresh_session_prompt(system_prompt, &cwd);
+    // Reuses the `cwd` bound above for skill discovery.
+    let system_prompt =
+        append_skills_index(fresh_session_prompt(system_prompt, &cwd), skills_index.as_deref());
     let mut session = Session::new(&system_prompt);
     session.push_user(&prompt);
 
@@ -2378,6 +2390,14 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         .collect();
     let mut registry = build_registry(Some(&issue_tools));
 
+    let skills =
+        orcarein_core::discover_skills(&std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let skills_index = if skills.is_empty() {
+        None
+    } else {
+        Some(orcarein_core::skills_index(&skills))
+    };
+
     // Register the `task` subagent tool. Children mirror the issue path's
     // restricted posture: the same edit-only allowlist (no shell), backed by a
     // child registry built from `issue_tools`. Clone the provider Arc into the
@@ -2401,6 +2421,9 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
             policy_factory,
         );
     }
+    if !skills.is_empty() {
+        registry.register(Box::new(SkillTool::new(skills)));
+    }
     let tool_defs = registry.definitions();
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
@@ -2423,7 +2446,7 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
     );
     // The issue fix benefits most from project context — inject AGENTS.md here too.
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let system = fresh_session_prompt(system, &cwd);
+    let system = append_skills_index(fresh_session_prompt(system, &cwd), skills_index.as_deref());
     let mut session = Session::new(system);
     session.push_user(format!(
         "Issue #{number}: {}\n\n{}",
