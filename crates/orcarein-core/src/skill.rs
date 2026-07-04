@@ -99,9 +99,85 @@ pub fn parse_skill(content: &str) -> Option<Skill> {
     })
 }
 
+/// Cap on a description's rendered length (chars) — keeps index lines compact.
+const MAX_DESC_CHARS: usize = 200;
+
+/// Collapse internal whitespace/newlines to single spaces and cap the length.
+fn one_line(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX_DESC_CHARS {
+        let head: String = collapsed.chars().take(MAX_DESC_CHARS).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
+}
+
+/// Model-facing index: goes into the system prompt's stable prefix. Only
+/// name + description — never a body (that's the on-demand property). The
+/// caller uses this ONLY when `skills` is non-empty.
+pub fn skills_index(skills: &[Skill]) -> String {
+    let mut s =
+        String::from("# Available skills (call the `skill` tool with a name to load one)\n");
+    for sk in skills {
+        s.push_str("- ");
+        s.push_str(&sk.name);
+        s.push_str(": ");
+        s.push_str(&one_line(&sk.description));
+        s.push('\n');
+    }
+    s
+}
+
+/// Human-facing list for the `/skills` command (no "call the tool" header).
+/// An empty slice yields an empty string; the binary prints an empty-state hint.
+pub fn skills_list(skills: &[Skill]) -> String {
+    let mut s = String::new();
+    for sk in skills {
+        s.push_str("- ");
+        s.push_str(&sk.name);
+        s.push_str(" — ");
+        s.push_str(&one_line(&sk.description));
+        s.push('\n');
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sk(name: &str, desc: &str) -> Skill {
+        Skill { name: name.into(), description: desc.into(), body: "BODY".into() }
+    }
+
+    #[test]
+    fn index_is_golden_and_carries_no_body() {
+        let skills = [sk("release", "how to cut a release"), sk("triage", "how we label issues")];
+        let idx = skills_index(&skills);
+        assert_eq!(
+            idx,
+            "# Available skills (call the `skill` tool with a name to load one)\n\
+             - release: how to cut a release\n\
+             - triage: how we label issues\n"
+        );
+        // The defining "on-demand" property: no body text in the index.
+        assert!(!idx.contains("BODY"));
+    }
+
+    #[test]
+    fn index_single_lines_multiline_description() {
+        let skills = [sk("x", "line one\nline two   with   spaces")];
+        let idx = skills_index(&skills);
+        assert!(idx.contains("- x: line one line two with spaces\n"));
+    }
+
+    #[test]
+    fn list_is_golden_and_empty_slice_is_empty() {
+        let skills = [sk("release", "cut a release")];
+        assert_eq!(skills_list(&skills), "- release — cut a release\n");
+        assert_eq!(skills_list(&[]), "");
+    }
 
     #[test]
     fn parses_valid_skill() {
