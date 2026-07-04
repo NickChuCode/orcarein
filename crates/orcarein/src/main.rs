@@ -15,7 +15,7 @@ use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
     OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RiskLevel,
-    SearchTool, SecretStore, Session, SessionStore, SessionSummary, SubagentTool, Tool,
+    SearchTool, SecretStore, Session, SessionStore, SessionSummary, SkillTool, SubagentTool, Tool,
     ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
@@ -1040,6 +1040,18 @@ async fn main() -> Result<()> {
     // build a fresh session that re-reads the current project memory.
     let base_system = system_prompt.clone();
 
+    // Discover project skills once at startup (cwd walk-up). Fixed for the
+    // whole session so the index and the registered SkillTool stay consistent.
+    let skills = {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        orcarein_core::discover_skills(&cwd)
+    };
+    let skills_index: Option<String> = if skills.is_empty() {
+        None
+    } else {
+        Some(orcarein_core::skills_index(&skills))
+    };
+
     // Either continue the resumed session (keeping its id + creation time so
     // auto-save writes back to the same file) or start a fresh one. `mut` so
     // `/model` and `/resume`/`/new` can switch them at runtime.
@@ -1054,7 +1066,8 @@ async fn main() -> Result<()> {
             // session keeps its frozen prompt (consistent with config.system_prompt),
             // so a changed AGENTS.md takes effect on the next new session.
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let prompt = fresh_session_prompt(system_prompt, &cwd);
+            let prompt =
+                append_skills_index(fresh_session_prompt(system_prompt, &cwd), skills_index.as_deref());
             (Session::new(&prompt), created.to_string(), created)
         }
     };
@@ -1096,6 +1109,9 @@ async fn main() -> Result<()> {
             model.clone(),
             policy_factory,
         );
+    }
+    if !skills.is_empty() {
+        registry.register(Box::new(SkillTool::new(skills.clone())));
     }
     let tool_defs = registry.definitions();
 
@@ -1307,7 +1323,10 @@ async fn main() -> Result<()> {
                     let _ = store.save(&session_id, created_at_ms, &session);
                     let created = SessionStore::now_ms();
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    let prompt = fresh_session_prompt(base_system.clone(), &cwd);
+                    let prompt = append_skills_index(
+                        fresh_session_prompt(base_system.clone(), &cwd),
+                        skills_index.as_deref(),
+                    );
                     session = Session::new(&prompt);
                     session_id = created.to_string();
                     created_at_ms = created;
