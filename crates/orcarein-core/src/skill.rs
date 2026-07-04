@@ -143,6 +143,67 @@ pub fn skills_list(skills: &[Skill]) -> String {
     s
 }
 
+/// Walk up from `start` to the filesystem root; return the first existing
+/// `<ancestor>/.orcarein/skills` directory. Purely lexical (`ancestors()`),
+/// so no symlink cycle risk — same shape as `memory::find_agents_md`.
+pub fn find_skills_dir(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let candidate = dir.join(SKILLS_DIRNAME);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Discover every skill under the nearest `.orcarein/skills/`, from BOTH
+/// layouts: flat `*.md` files and nested `<name>/SKILL.md` (one level deep).
+/// Malformed / unreadable files are skipped silently. Candidates are sorted by
+/// path for determinism, deduped by frontmatter `name` (first-by-path wins),
+/// then returned sorted by `name` and capped at `MAX_SKILLS`. The deterministic
+/// order is required so the injected index is byte-stable (cache prefix).
+pub fn discover_skills(start: &Path) -> Vec<Skill> {
+    let Some(dir) = find_skills_dir(start) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new(); // permission / race -> nothing, silently
+    };
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let is_md = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+            if is_md {
+                candidates.push(path);
+            }
+        } else if path.is_dir() {
+            // Nested layout: <name>/SKILL.md (canonical superpowers/Claude Code
+            // name). One level only — no recursion.
+            let nested = path.join("SKILL.md");
+            if nested.is_file() {
+                candidates.push(nested);
+            }
+        }
+    }
+    candidates.sort();
+
+    let mut by_name: BTreeMap<String, Skill> = BTreeMap::new();
+    for path in candidates {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(skill) = parse_skill(&raw) {
+            by_name.entry(skill.name.clone()).or_insert(skill);
+        }
+    }
+    by_name.into_values().take(MAX_SKILLS).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +295,81 @@ mod tests {
         let sk = parse_skill(s).unwrap();
         assert_eq!(sk.name, "quoted");
         assert_eq!(sk.description, "single");
+    }
+
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write(path: &std::path::Path, content: &str) {
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    fn valid(name: &str) -> String {
+        format!("---\nname: {name}\ndescription: d {name}\n---\nbody {name}\n")
+    }
+
+    #[test]
+    fn discovers_flat_md_sorted_by_name() {
+        let dir = tempdir().unwrap();
+        let sk = dir.path().join(".orcarein/skills");
+        write(&sk.join("b.md"), &valid("bravo"));
+        write(&sk.join("a.md"), &valid("alpha"));
+        let skills = discover_skills(dir.path());
+        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["alpha", "bravo"]);
+    }
+
+    #[test]
+    fn skips_malformed_and_non_md_and_bad_subdirs() {
+        let dir = tempdir().unwrap();
+        let sk = dir.path().join(".orcarein/skills");
+        write(&sk.join("good.md"), &valid("good"));
+        write(&sk.join("bad.md"), "no frontmatter here\n"); // -> skipped
+        write(&sk.join("notes.txt"), &valid("ignored")); // wrong ext
+        write(&sk.join("emptydir/README.md"), &valid("nope")); // subdir w/o SKILL.md
+        let skills = discover_skills(dir.path());
+        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["good"]);
+    }
+
+    #[test]
+    fn discovers_nested_skill_md_with_frontmatter_name() {
+        let dir = tempdir().unwrap();
+        let sk = dir.path().join(".orcarein/skills");
+        // Directory named "rel" but frontmatter name is authoritative.
+        write(&sk.join("rel/SKILL.md"), &valid("release"));
+        let skills = discover_skills(dir.path());
+        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["release"]);
+    }
+
+    #[test]
+    fn walks_up_to_find_skills_dir_from_deeper_cwd() {
+        let dir = tempdir().unwrap();
+        let sk = dir.path().join(".orcarein/skills");
+        write(&sk.join("a.md"), &valid("alpha"));
+        let deep = dir.path().join("src/sub");
+        fs::create_dir_all(&deep).unwrap();
+        let skills = discover_skills(&deep);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "alpha");
+    }
+
+    #[test]
+    fn absent_dir_yields_empty() {
+        let dir = tempdir().unwrap();
+        assert!(discover_skills(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn duplicate_name_first_by_sorted_path_wins() {
+        let dir = tempdir().unwrap();
+        let sk = dir.path().join(".orcarein/skills");
+        // Both declare name "dup"; "a.md" sorts before "b.md" -> a wins.
+        write(&sk.join("a.md"), "---\nname: dup\ndescription: from a\n---\nA\n");
+        write(&sk.join("b.md"), "---\nname: dup\ndescription: from b\n---\nB\n");
+        let skills = discover_skills(dir.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "from a");
     }
 }
