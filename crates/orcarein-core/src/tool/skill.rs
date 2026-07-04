@@ -96,8 +96,16 @@ mod tests {
 
     fn tool() -> SkillTool {
         SkillTool::new(vec![
-            Skill { name: "release".into(), description: "d".into(), body: "RELEASE BODY".into() },
-            Skill { name: "triage".into(), description: "d".into(), body: "TRIAGE BODY".into() },
+            Skill {
+                name: "release".into(),
+                description: "d".into(),
+                body: "RELEASE BODY".into(),
+            },
+            Skill {
+                name: "triage".into(),
+                description: "d".into(),
+                body: "TRIAGE BODY".into(),
+            },
         ])
     }
 

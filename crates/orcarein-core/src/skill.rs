@@ -83,7 +83,9 @@ pub fn parse_skill(content: &str) -> Option<Skill> {
     }
 
     let body_start = body_start?; // no closing fence -> skip
-    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())?;
+    let name = name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())?;
 
     let rest = &content[body_start..];
     let body = rest
@@ -209,12 +211,19 @@ mod tests {
     use super::*;
 
     fn sk(name: &str, desc: &str) -> Skill {
-        Skill { name: name.into(), description: desc.into(), body: "BODY".into() }
+        Skill {
+            name: name.into(),
+            description: desc.into(),
+            body: "BODY".into(),
+        }
     }
 
     #[test]
     fn index_is_golden_and_carries_no_body() {
-        let skills = [sk("release", "how to cut a release"), sk("triage", "how we label issues")];
+        let skills = [
+            sk("release", "how to cut a release"),
+            sk("triage", "how we label issues"),
+        ];
         let idx = skills_index(&skills);
         assert_eq!(
             idx,
@@ -318,7 +327,10 @@ mod tests {
         write(&sk.join("b.md"), &valid("bravo"));
         write(&sk.join("a.md"), &valid("alpha"));
         let skills = discover_skills(dir.path());
-        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["alpha", "bravo"]);
+        assert_eq!(
+            skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "bravo"]
+        );
     }
 
     #[test]
@@ -330,7 +342,10 @@ mod tests {
         write(&sk.join("notes.txt"), &valid("ignored")); // wrong ext
         write(&sk.join("emptydir/README.md"), &valid("nope")); // subdir w/o SKILL.md
         let skills = discover_skills(dir.path());
-        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["good"]);
+        assert_eq!(
+            skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["good"]
+        );
     }
 
     #[test]
@@ -340,7 +355,10 @@ mod tests {
         // Directory named "rel" but frontmatter name is authoritative.
         write(&sk.join("rel/SKILL.md"), &valid("release"));
         let skills = discover_skills(dir.path());
-        assert_eq!(skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["release"]);
+        assert_eq!(
+            skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["release"]
+        );
     }
 
     #[test]
@@ -366,8 +384,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let sk = dir.path().join(".orcarein/skills");
         // Both declare name "dup"; "a.md" sorts before "b.md" -> a wins.
-        write(&sk.join("a.md"), "---\nname: dup\ndescription: from a\n---\nA\n");
-        write(&sk.join("b.md"), "---\nname: dup\ndescription: from b\n---\nB\n");
+        write(
+            &sk.join("a.md"),
+            "---\nname: dup\ndescription: from a\n---\nA\n",
+        );
+        write(
+            &sk.join("b.md"),
+            "---\nname: dup\ndescription: from b\n---\nB\n",
+        );
         let skills = discover_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "from a");

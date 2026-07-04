@@ -1066,8 +1066,10 @@ async fn main() -> Result<()> {
             // session keeps its frozen prompt (consistent with config.system_prompt),
             // so a changed AGENTS.md takes effect on the next new session.
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let prompt =
-                append_skills_index(fresh_session_prompt(system_prompt, &cwd), skills_index.as_deref());
+            let prompt = append_skills_index(
+                fresh_session_prompt(system_prompt, &cwd),
+                skills_index.as_deref(),
+            );
             (Session::new(&prompt), created.to_string(), created)
         }
     };
@@ -1744,8 +1746,10 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
 
     // Inject project memory (AGENTS.md) into the headless run prompt too.
     // Reuses the `cwd` bound above for skill discovery.
-    let system_prompt =
-        append_skills_index(fresh_session_prompt(system_prompt, &cwd), skills_index.as_deref());
+    let system_prompt = append_skills_index(
+        fresh_session_prompt(system_prompt, &cwd),
+        skills_index.as_deref(),
+    );
     let mut session = Session::new(&system_prompt);
     session.push_user(&prompt);
 
