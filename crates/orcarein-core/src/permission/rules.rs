@@ -200,6 +200,15 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 /// `glob_match` with an injected home dir (so tests never touch the real HOME).
+///
+/// Both the (home-expanded) pattern and the text are normalized to `/`
+/// separators before matching, since `directories::BaseDirs` returns
+/// backslash-separated paths on Windows (e.g. `C:\Users\name`) while our
+/// sensitive-path defaults are written with `/` (e.g. `~/.ssh/**`). Without
+/// normalization a real Windows path like `C:\Users\name\.ssh\id_rsa` would
+/// never match `~/.ssh/**`, silently disabling those defaults. Over-matching
+/// is safe here — a false match only escalates to an `Ask` prompt, never an
+/// auto-allow.
 pub(crate) fn glob_match_with_home(pattern: &str, text: &str, home: &str) -> bool {
     let expanded;
     let pat = if let Some(rest) = pattern.strip_prefix("~/") {
@@ -208,12 +217,14 @@ pub(crate) fn glob_match_with_home(pattern: &str, text: &str, home: &str) -> boo
     } else {
         pattern
     };
-    if star_match(pat, text) {
+    let pat_norm = pat.replace('\\', "/");
+    let text_norm = text.replace('\\', "/");
+    if star_match(&pat_norm, &text_norm) {
         return true;
     }
-    if !pat.contains('/') {
-        let base = text.rsplit(['/', '\\']).next().unwrap_or(text);
-        return star_match(pat, base);
+    if !pat_norm.contains('/') {
+        let base = text_norm.rsplit('/').next().unwrap_or(&text_norm);
+        return star_match(&pat_norm, base);
     }
     false
 }
@@ -328,6 +339,23 @@ mod tests {
             "~/.ssh/**",
             "/home/u/notes.txt",
             "/home/u"
+        ));
+    }
+
+    #[test]
+    fn windows_backslash_paths_match_tilde_defaults() {
+        // Regression: directories::BaseDirs returns backslash-separated
+        // paths on Windows (e.g. C:\Users\u), so ~/.ssh/** must still match
+        // a real Windows path with backslashes throughout.
+        assert!(glob_match_with_home(
+            "~/.ssh/**",
+            "C:\\Users\\u\\.ssh\\id_rsa",
+            "C:\\Users\\u"
+        ));
+        assert!(glob_match_with_home(
+            "~/.aws/credentials",
+            "C:\\Users\\u\\.aws\\credentials",
+            "C:\\Users\\u"
         ));
     }
 

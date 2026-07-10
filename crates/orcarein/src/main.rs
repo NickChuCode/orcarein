@@ -1519,6 +1519,9 @@ fn scope_key(tool: &str, args: &str) -> String {
 
 /// Append a targeted `Bash(<command>)` allow rule to the user's config.toml.
 /// Best-effort: a write failure is reported but never fails the decision.
+/// If the config file exists but fails to parse, persistence is skipped
+/// entirely rather than overwriting it with a fresh default (which would
+/// silently drop provider/model/system_prompt/mcp_servers settings).
 fn persist_bash_rule(config_path: &std::path::Path, args: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
         return;
@@ -1526,7 +1529,17 @@ fn persist_bash_rule(config_path: &std::path::Path, args: &str) {
     let Some(cmd) = v.get("command").and_then(|x| x.as_str()) else {
         return;
     };
-    let mut cfg = Config::load_from(config_path).unwrap_or_default();
+    let mut cfg = if config_path.exists() {
+        match Config::load_from(config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("orcarein: not persisting permission rule (config unreadable): {e}");
+                return;
+            }
+        }
+    } else {
+        Config::default()
+    };
     let rule = PermissionRule {
         tool: "bash".to_string(),
         command: Some(cmd.to_string()),
@@ -3293,6 +3306,18 @@ mod tests {
         super::persist_bash_rule(&path, r#"{"command":"git status"}"#);
         let cfg2 = orcarein_core::Config::load_from(&path).unwrap();
         assert_eq!(cfg2.permissions.unwrap().rules.len(), 1);
+    }
+
+    #[test]
+    fn persist_bash_rule_never_clobbers_unparseable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let corrupt = "this is not valid toml = = =";
+        std::fs::write(&path, corrupt).unwrap();
+        super::persist_bash_rule(&path, r#"{"command":"git status"}"#);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, corrupt, "corrupt config must be left untouched");
+        assert!(!after.contains("[permissions]"));
     }
 
     #[cfg(feature = "tui")]

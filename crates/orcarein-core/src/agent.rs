@@ -260,9 +260,9 @@ impl<'a> Agent<'a> {
     }
 
     /// Runs one user turn to completion: streams a completion, executes any
-    /// tool calls (gating `Risky` ones through `policy`), feeds the results
-    /// back, and repeats until the model stops calling tools or
-    /// [`MAX_TOOL_ITERATIONS`] is reached.
+    /// tool calls (gating each tool through its permission ruleset; an `Ask`
+    /// result consults `policy`), feeds the results back, and repeats until
+    /// the model stops calling tools or [`MAX_TOOL_ITERATIONS`] is reached.
     ///
     /// The caller must have already pushed the user's message onto `session`.
     /// Events stream through `sink`; the final text and usage come back in the
