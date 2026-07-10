@@ -31,7 +31,9 @@ pub use doctor::{Check, CheckStatus, Tally};
 pub use github::{fetch_issue, parse_owner_repo, GithubError, Issue};
 pub use memory::{find_agents_md, format_memory_block, load_project_memory, ProjectMemory};
 pub use message::Message;
-pub use permission::{Decision, PermissionStore};
+pub use permission::{
+    Action, Decision, PermissionRequest, PermissionRule, PermissionStore, RuleAction, Ruleset,
+};
 pub use provider::{
     ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, RetryPolicy, StreamEvent,
 };

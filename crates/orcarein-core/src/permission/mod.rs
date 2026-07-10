@@ -10,6 +10,9 @@
 
 use std::collections::HashMap;
 
+pub mod rules;
+pub use rules::{Action, PermissionRequest, PermissionRule, RuleAction, Ruleset};
+
 /// A user's decision about whether a tool may run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
