@@ -33,7 +33,7 @@ pub use memory::{find_agents_md, format_memory_block, load_project_memory, Proje
 pub use message::Message;
 pub use permission::{Decision, PermissionStore};
 pub use provider::{
-    ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, StreamEvent,
+    ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, RetryPolicy, StreamEvent,
 };
 pub use session::{Session, SessionError, SessionStore, SessionSummary, TokenUsage};
 pub use skill::{discover_skills, find_skills_dir, skills_index, skills_list, Skill};

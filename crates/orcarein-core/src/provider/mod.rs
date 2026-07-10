@@ -13,10 +13,12 @@
 pub mod deepseek;
 pub mod openai;
 mod openai_compat;
+pub mod retry;
 pub mod testing;
 
 pub use deepseek::DeepSeekProvider;
 pub use openai::OpenAIProvider;
+pub use retry::RetryPolicy;
 pub use testing::MockProvider;
 
 use async_trait::async_trait;

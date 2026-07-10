@@ -55,3 +55,7 @@ required-features = ["mcp"]
 [dev-dependencies]
 # Ch10: integration test for ReadFileTool needs scratch files.
 tempfile = { workspace = true }
+# P0.1: retry.rs uses #[tokio::test(start_paused = true)] to fast-forward
+# backoff sleeps in tests — "test-util" is excluded from the "full" feature
+# set the main dependency uses, so the dev-dep unions it in for test builds.
+tokio = { workspace = true, features = ["test-util"] }

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 
 use super::openai_compat;
+use super::retry::RetryPolicy;
 use super::{ChatOptions, Provider, StreamEvent};
 use crate::{Message, ToolDefinition};
 
@@ -19,6 +20,7 @@ const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 pub struct DeepSeekProvider {
     client: reqwest::Client,
     api_key: String,
+    retry: RetryPolicy,
 }
 
 impl DeepSeekProvider {
@@ -27,7 +29,14 @@ impl DeepSeekProvider {
         DeepSeekProvider {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// Overrides the retry policy (the binary wires this from `config.toml`).
+    pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
+        self
     }
 }
 
@@ -51,6 +60,7 @@ impl Provider for DeepSeekProvider {
             &self.client,
             API_URL,
             &self.api_key,
+            &self.retry,
             messages,
             tools,
             opts,
@@ -59,7 +69,8 @@ impl Provider for DeepSeekProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
-        openai_compat::list_models_compat(&self.client, MODELS_URL, &self.api_key).await
+        openai_compat::list_models_compat(&self.client, MODELS_URL, &self.api_key, &self.retry)
+            .await
     }
 }
 

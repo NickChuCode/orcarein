@@ -9,7 +9,7 @@
 //! Anthropic — when it eventually arrives in v0.2 — would get its own
 //! parser because its protocol is not OpenAI-compatible.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use async_stream::try_stream;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
@@ -17,6 +17,9 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+use super::retry::{
+    classify_reqwest, classify_status, with_retry, Decision, RetryError, RetryPolicy,
+};
 use super::{ChatOptions, StreamEvent};
 use crate::{FunctionCall, Message, TokenUsage, ToolCall, ToolDefinition};
 
@@ -29,6 +32,7 @@ pub(super) async fn chat_stream_compat(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
+    policy: &RetryPolicy,
     messages: &[Message],
     tools: &[ToolDefinition],
     opts: &ChatOptions,
@@ -46,19 +50,52 @@ pub(super) async fn chat_stream_compat(
         body["tool_choice"] = json!("auto");
     }
 
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await
-        .context("HTTP request failed")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}:\n{body}");
-    }
+    let response = with_retry(policy, || async {
+        let sent = client
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send();
+        // Bound connect + response headers only. send() resolves at the
+        // headers, so this does NOT cap the SSE body that streams afterwards.
+        match tokio::time::timeout(policy.request_timeout, sent).await {
+            Err(_elapsed) => Err(RetryError::Retryable {
+                source: anyhow::anyhow!("request timed out before response headers"),
+                retry_after: None,
+            }),
+            Ok(Err(e)) => {
+                // Classify borrows `e`; then `e` moves into Error::new (borrow
+                // ends first — this order is required).
+                let decision = classify_reqwest(&e);
+                let err = anyhow::Error::new(e).context("HTTP request failed");
+                Err(match decision {
+                    Decision::Retryable(ra) => RetryError::Retryable {
+                        source: err,
+                        retry_after: ra,
+                    },
+                    Decision::Fatal => RetryError::Fatal(err),
+                })
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                if status.is_success() {
+                    Ok(resp)
+                } else {
+                    let decision = classify_status(status, resp.headers());
+                    let body = resp.text().await.unwrap_or_default();
+                    let err = anyhow::anyhow!("provider returned {status}:\n{body}");
+                    Err(match decision {
+                        Decision::Retryable(ra) => RetryError::Retryable {
+                            source: err,
+                            retry_after: ra,
+                        },
+                        Decision::Fatal => RetryError::Fatal(err),
+                    })
+                }
+            }
+        }
+    })
+    .await?;
 
     let bytes_stream = response.bytes_stream();
 
@@ -252,18 +289,48 @@ pub(super) async fn list_models_compat(
     client: &reqwest::Client,
     models_url: &str,
     api_key: &str,
+    policy: &RetryPolicy,
 ) -> Result<Vec<String>> {
-    let resp = client
-        .get(models_url)
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .context("models request failed")?;
-    let status = resp.status();
+    let resp = with_retry(policy, || async {
+        let sent = client.get(models_url).bearer_auth(api_key).send();
+        match tokio::time::timeout(policy.request_timeout, sent).await {
+            Err(_elapsed) => Err(RetryError::Retryable {
+                source: anyhow::anyhow!("models request timed out before response headers"),
+                retry_after: None,
+            }),
+            Ok(Err(e)) => {
+                let decision = classify_reqwest(&e);
+                let err = anyhow::Error::new(e).context("models request failed");
+                Err(match decision {
+                    Decision::Retryable(ra) => RetryError::Retryable {
+                        source: err,
+                        retry_after: ra,
+                    },
+                    Decision::Fatal => RetryError::Fatal(err),
+                })
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                if status.is_success() {
+                    Ok(resp)
+                } else {
+                    let decision = classify_status(status, resp.headers());
+                    let body = resp.text().await.unwrap_or_default();
+                    let err = anyhow::anyhow!("models endpoint returned {status}:\n{body}");
+                    Err(match decision {
+                        Decision::Retryable(ra) => RetryError::Retryable {
+                            source: err,
+                            retry_after: ra,
+                        },
+                        Decision::Fatal => RetryError::Fatal(err),
+                    })
+                }
+            }
+        }
+    })
+    .await?;
+
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("models endpoint returned {status}:\n{body}");
-    }
     parse_models(&body)
 }
 
