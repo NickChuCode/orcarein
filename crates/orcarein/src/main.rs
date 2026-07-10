@@ -14,9 +14,10 @@ use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
-    OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RetryPolicy,
-    RiskLevel, SearchTool, SecretStore, Session, SessionStore, SessionSummary, SkillTool,
-    SubagentTool, Tool, ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
+    OpenAIProvider, PermissionConfig, PermissionPolicy, PermissionRule, PermissionStore, Provider,
+    ReadFileTool, RetryPolicy, RiskLevel, RuleAction, Ruleset, SearchTool, SecretStore, Session,
+    SessionStore, SessionSummary, SkillTool, SubagentTool, Tool, ToolRegistry, WriteFileTool,
+    DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -198,6 +199,10 @@ struct Resolved {
     model: String,
     system_prompt: String,
     tools_allowlist: Option<Vec<String>>,
+    /// User-authored permission rules from `config.toml`'s `[[permissions.rules]]`,
+    /// merged into the Agent's [`Ruleset`] on top of the built-in sensitive-path
+    /// defaults. Empty when the user has no `[permissions]` section.
+    permission_rules: Vec<PermissionRule>,
 }
 
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
@@ -274,11 +279,18 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
             .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_owned()),
     };
 
+    let permission_rules = config
+        .permissions
+        .as_ref()
+        .map(|p| p.rules.clone())
+        .unwrap_or_default();
+
     Ok(Resolved {
         provider,
         model,
         system_prompt,
         tools_allowlist,
+        permission_rules,
     })
 }
 
@@ -1039,6 +1051,7 @@ async fn main() -> Result<()> {
         mut model,
         system_prompt,
         tools_allowlist,
+        permission_rules,
     } = resolved;
 
     // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
@@ -1167,8 +1180,9 @@ async fn main() -> Result<()> {
 
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
     // that supplies an interactive permission policy and a printing event sink.
-    let agent =
-        Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(&cli));
+    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
+        .with_cache_mode(cache_mode(&cli))
+        .with_ruleset(Ruleset::from_config(permission_rules));
     let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
         Box::new(AllowlistPolicy::allow_all())
     } else {
@@ -1445,6 +1459,9 @@ struct InteractivePolicy {
     /// When set, the prompt is visibly marked as a subagent's request so it is
     /// not confused with the parent agent's own permission prompt.
     subagent: bool,
+    /// User config path for persisting bash always-allow rules. `None` = never
+    /// persist (sub-agent policies never write the user's global config).
+    config_path: Option<std::path::PathBuf>,
 }
 
 impl InteractivePolicy {
@@ -1454,6 +1471,7 @@ impl InteractivePolicy {
             fancy,
             mode,
             subagent: false,
+            config_path: Config::config_path(), // top-level persists
         }
     }
 
@@ -1461,20 +1479,68 @@ impl InteractivePolicy {
     /// with "subagent 请求：" to distinguish it from the parent's.
     fn with_subagent_prefix(mut self) -> Self {
         self.subagent = true;
+        self.config_path = None; // sub-agent must not write user config
         self
     }
 }
 
 impl PermissionPolicy for InteractivePolicy {
     fn decide(&mut self, tool: &str, args: &str, _risk: RiskLevel) -> Decision {
-        if let Some(d) = self.store.cached(tool) {
+        let scope = scope_key(tool, args);
+        if let Some(d) = self.store.cached(&scope) {
             return d;
         }
         let d = prompt_permission(tool, args, self.fancy, self.mode, self.subagent);
         if d.is_sticky() {
-            self.store.remember(tool, d);
+            self.store.remember(&scope, d);
+        }
+        // Persist ONLY a bash always-allow, as a targeted command rule.
+        if d == Decision::AllowAlways && tool == "bash" {
+            if let Some(path) = self.config_path.clone() {
+                persist_bash_rule(&path, args);
+            }
         }
         d
+    }
+}
+
+/// Session-cache scope for a tool call: bash is keyed per-command (so "always
+/// allow git status" doesn't allow all bash); every other tool by name.
+fn scope_key(tool: &str, args: &str) -> String {
+    if tool == "bash" {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+            if let Some(c) = v.get("command").and_then(|x| x.as_str()) {
+                return format!("bash\u{0}{c}");
+            }
+        }
+    }
+    tool.to_string()
+}
+
+/// Append a targeted `Bash(<command>)` allow rule to the user's config.toml.
+/// Best-effort: a write failure is reported but never fails the decision.
+fn persist_bash_rule(config_path: &std::path::Path, args: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+        return;
+    };
+    let Some(cmd) = v.get("command").and_then(|x| x.as_str()) else {
+        return;
+    };
+    let mut cfg = Config::load_from(config_path).unwrap_or_default();
+    let rule = PermissionRule {
+        tool: "bash".to_string(),
+        command: Some(cmd.to_string()),
+        path: None,
+        action: RuleAction::Allow,
+    };
+    let perms = cfg
+        .permissions
+        .get_or_insert_with(PermissionConfig::default);
+    if !perms.rules.contains(&rule) {
+        perms.rules.push(rule);
+    }
+    if let Err(e) = cfg.save_to(config_path) {
+        eprintln!("orcarein: could not persist permission rule: {e}");
     }
 }
 
@@ -1687,6 +1753,7 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         model,
         system_prompt,
         tools_allowlist,
+        permission_rules,
         ..
     } = resolved;
 
@@ -1734,8 +1801,9 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         registry.register(Box::new(SkillTool::new(skills)));
     }
     let tool_defs = registry.definitions();
-    let agent =
-        Agent::new(provider.as_ref(), &registry, &tool_defs).with_cache_mode(cache_mode(cli));
+    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
+        .with_cache_mode(cache_mode(cli))
+        .with_ruleset(Ruleset::from_config(permission_rules));
     if cli.no_economy {
         eprintln!("orcarein: economy OFF (benchmark — prefix cache defeated)");
     }
@@ -3199,6 +3267,32 @@ mod tests {
     fn render_transcript_marks_an_empty_session() {
         let s = Session::new("sys");
         assert!(render_transcript(&s).contains("空"));
+    }
+
+    #[test]
+    fn scope_key_bash_is_per_command() {
+        assert_eq!(
+            super::scope_key("bash", r#"{"command":"git status"}"#),
+            "bash\u{0}git status"
+        );
+        assert_eq!(super::scope_key("edit", r#"{"path":"x"}"#), "edit");
+        assert_eq!(super::scope_key("bash", "not json"), "bash");
+    }
+
+    #[test]
+    fn persist_bash_rule_writes_targeted_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        super::persist_bash_rule(&path, r#"{"command":"git status"}"#);
+        let cfg = orcarein_core::Config::load_from(&path).unwrap();
+        let rules = &cfg.permissions.unwrap().rules;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].tool, "bash");
+        assert_eq!(rules[0].command.as_deref(), Some("git status"));
+        // Idempotent: writing the same rule again doesn't duplicate.
+        super::persist_bash_rule(&path, r#"{"command":"git status"}"#);
+        let cfg2 = orcarein_core::Config::load_from(&path).unwrap();
+        assert_eq!(cfg2.permissions.unwrap().rules.len(), 1);
     }
 
     #[cfg(feature = "tui")]

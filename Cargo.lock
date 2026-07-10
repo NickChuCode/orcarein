@@ -1057,6 +1057,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "rustyline",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

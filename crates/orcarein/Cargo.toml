@@ -41,6 +41,8 @@ ratatui = { workspace = true, optional = true }
 unicode-width = { workspace = true }
 # v02-25 分页器 markdown 渲染：CommonMark 解析器。optional + 并入 `tui` feature。
 pulldown-cmark = { workspace = true, optional = true }
+# v02-35 permission v2: scope_key/persist_bash_rule parse tool-call args JSON.
+serde_json = { workspace = true }
 
 [features]
 default = ["tui", "mcp"]
