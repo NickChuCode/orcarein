@@ -64,6 +64,9 @@ pub struct Config {
     /// MCP servers to launch and expose tools from. Empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// HTTP retry policy knob (only max_retries is user-tunable). None = defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
 }
 
 /// One MCP server the client should launch and expose tools from.
@@ -81,6 +84,14 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// The `[retry]` section: the single user-tunable retry knob.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Max retries for transient provider HTTP failures. None → default (3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 /// The qualifier/org/app triple identifying OrcaRein's config directory.
@@ -387,6 +398,19 @@ mod tests {
         s.save_to(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn config_roundtrips_retry_section() {
+        let toml_src = "[retry]\nmax_retries = 5\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.retry.as_ref().and_then(|r| r.max_retries), Some(5));
+
+        // Default has no [retry] and round-trips clean (skip_serializing_if).
+        let empty = Config::default();
+        assert!(empty.retry.is_none());
+        let s = toml::to_string(&empty).unwrap();
+        assert!(!s.contains("retry"));
     }
 
     #[test]

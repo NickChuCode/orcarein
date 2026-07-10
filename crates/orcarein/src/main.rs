@@ -14,9 +14,9 @@ use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
-    OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RiskLevel,
-    SearchTool, SecretStore, Session, SessionStore, SessionSummary, SkillTool, SubagentTool, Tool,
-    ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
+    OpenAIProvider, PermissionPolicy, PermissionStore, Provider, ReadFileTool, RetryPolicy,
+    RiskLevel, SearchTool, SecretStore, Session, SessionStore, SessionSummary, SkillTool,
+    SubagentTool, Tool, ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -202,7 +202,11 @@ struct Resolved {
 
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
 /// provider name first so a missing key never masks a typo'd provider.
-fn build_provider(name: &str, api_key: Option<String>) -> Result<Arc<dyn Provider>> {
+fn build_provider(
+    name: &str,
+    api_key: Option<String>,
+    retry: RetryPolicy,
+) -> Result<Arc<dyn Provider>> {
     match name {
         "deepseek" | "openai" => {}
         other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
@@ -215,8 +219,8 @@ fn build_provider(name: &str, api_key: Option<String>) -> Result<Arc<dyn Provide
         )
     })?;
     match name {
-        "deepseek" => Ok(Arc::new(DeepSeekProvider::new(key))),
-        "openai" => Ok(Arc::new(OpenAIProvider::new(key))),
+        "deepseek" => Ok(Arc::new(DeepSeekProvider::new(key).with_retry(retry))),
+        "openai" => Ok(Arc::new(OpenAIProvider::new(key).with_retry(retry))),
         _ => unreachable!("provider validated above"),
     }
 }
@@ -252,7 +256,8 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         .unwrap_or_else(|| "deepseek".to_owned());
 
     let secrets = SecretStore::load().context("failed to load secrets.toml")?;
-    let provider = build_provider(&provider_name, secrets.resolve(&provider_name))?;
+    let retry = RetryPolicy::from_config(config.retry.as_ref().and_then(|r| r.max_retries));
+    let provider = build_provider(&provider_name, secrets.resolve(&provider_name), retry)?;
 
     let model = non_blank(cli.model.clone())
         .or_else(|| non_blank(config.model.clone()))
