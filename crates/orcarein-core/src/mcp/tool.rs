@@ -9,6 +9,10 @@ use crate::tool::{RiskLevel, Tool, ToolError, ToolOutput};
 
 use super::client::McpClient;
 
+/// Cap on a single MCP tool result (mirrors the bash tool's 32 KiB/stream
+/// cap). A big a11y snapshot or file dump can't flood the model's context.
+const MAX_TOOL_BYTES: usize = 32 * 1024;
+
 /// A remote MCP tool exposed to the agent as a local `Tool`.
 pub struct McpTool {
     exposed_name: String, // mcp__<server>__<tool>
@@ -54,7 +58,21 @@ impl Tool for McpTool {
         self.client
             .call_tool(&self.remote_name, args)
             .await
-            .map(ToolOutput::new)
+            .map(|t| ToolOutput::new(crate::text::cap(&t, MAX_TOOL_BYTES)))
             .map_err(|e| ToolError::Other(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tool_result_cap_matches_bash_budget() {
+        // The MCP cap reuses the shared text::cap at the same 32 KiB budget the
+        // bash tool uses; verify the budget constant + shared truncation shape.
+        assert_eq!(super::MAX_TOOL_BYTES, 32 * 1024);
+        let big = "x".repeat(super::MAX_TOOL_BYTES + 100);
+        let out = crate::text::cap(&big, super::MAX_TOOL_BYTES);
+        assert!(out.contains("truncated 100 bytes"));
+        assert!(out.starts_with(&"x".repeat(64)));
     }
 }
