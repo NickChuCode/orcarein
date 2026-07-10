@@ -273,6 +273,33 @@ mod tests {
         }
     }
 
+    // --- RuleAction serde ---
+    #[test]
+    fn rule_action_serde_is_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&RuleAction::Allow).unwrap(),
+            "\"allow\""
+        );
+        assert_eq!(serde_json::to_string(&RuleAction::Ask).unwrap(), "\"ask\"");
+        assert_eq!(
+            serde_json::to_string(&RuleAction::Deny).unwrap(),
+            "\"deny\""
+        );
+
+        assert_eq!(
+            serde_json::from_str::<RuleAction>("\"allow\"").unwrap(),
+            RuleAction::Allow
+        );
+        assert_eq!(
+            serde_json::from_str::<RuleAction>("\"ask\"").unwrap(),
+            RuleAction::Ask
+        );
+        assert_eq!(
+            serde_json::from_str::<RuleAction>("\"deny\"").unwrap(),
+            RuleAction::Deny
+        );
+    }
+
     // --- glob ---
     #[test]
     fn star_glob_basics() {

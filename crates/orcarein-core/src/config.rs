@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::permission::PermissionRule;
+
 /// Errors from loading or saving configuration / secrets.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -67,6 +69,10 @@ pub struct Config {
     /// HTTP retry policy knob (only max_retries is user-tunable). None = defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
+    /// Declarative permission rules (allow/ask/deny). None = only built-in
+    /// sensitive-path defaults apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionConfig>,
 }
 
 /// One MCP server the client should launch and expose tools from.
@@ -92,6 +98,13 @@ pub struct RetryConfig {
     /// Max retries for transient provider HTTP failures. None → default (3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+}
+
+/// The `[permissions]` section: a list of allow/ask/deny rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<PermissionRule>,
 }
 
 /// The qualifier/org/app triple identifying OrcaRein's config directory.
@@ -441,5 +454,21 @@ TOKEN = "x"
         assert!(empty.mcp_servers.is_empty());
         let s = toml::to_string(&empty).unwrap();
         assert!(!s.contains("mcp_servers"));
+    }
+
+    #[test]
+    fn config_roundtrips_permission_rules() {
+        let toml_src =
+            "[[permissions.rules]]\ntool = \"bash\"\ncommand = \"git *\"\naction = \"allow\"\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let rules = &cfg.permissions.as_ref().unwrap().rules;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].tool, "bash");
+        assert_eq!(rules[0].command.as_deref(), Some("git *"));
+
+        // Default omits [permissions].
+        let empty = Config::default();
+        assert!(empty.permissions.is_none());
+        assert!(!toml::to_string(&empty).unwrap().contains("permissions"));
     }
 }

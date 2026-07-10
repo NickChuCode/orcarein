@@ -25,7 +25,9 @@ pub use agent::{
     Agent, AgentError, AgentEvent, AllowlistPolicy, CacheMode, EventSink, PermissionPolicy,
     TurnOutcome, MAX_TOOL_ITERATIONS,
 };
-pub use config::{env_key_var, Config, ConfigError, RetryConfig, SecretStore, CONFIG_KEYS};
+pub use config::{
+    env_key_var, Config, ConfigError, PermissionConfig, RetryConfig, SecretStore, CONFIG_KEYS,
+};
 pub use cost::{CostEstimate, Prices};
 pub use doctor::{Check, CheckStatus, Tally};
 pub use github::{fetch_issue, parse_owner_repo, GithubError, Issue};
