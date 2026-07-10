@@ -1,6 +1,7 @@
 # OrcaRein landing page
 
-Static landing page served at **https://nickchucode.github.io/orcarein/**.
+Static landing page served at **https://orcarein.net/**
+(also reachable at https://nickchucode.github.io/orcarein/).
 
 Self-contained: `index.html` (verbatim CSS from the design), `app.js` (pixel-orca
 canvas, snowfall, terminal demo, vim keybindings, language toggle, help overlay),
@@ -18,7 +19,9 @@ static site so it can be hosted anywhere without the Claude Design runtime.
 
 `.github/workflows/pages.yml` deploys this folder to GitHub Pages via GitHub
 Actions on any push that touches `site/`. One-time: enable **Settings → Pages →
-Source = GitHub Actions**.
+Source = GitHub Actions**. The `CNAME` file pins the custom domain `orcarein.net`
+so each deploy keeps it (DNS is managed at Cloudflare, records point at the
+GitHub Pages IPs, DNS-only / grey-cloud).
 
 ## Local preview
 
