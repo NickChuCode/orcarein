@@ -82,7 +82,11 @@ pub(super) async fn chat_stream_compat(
                     Ok(resp)
                 } else {
                     let decision = classify_status(status, resp.headers());
-                    let body = resp.text().await.unwrap_or_default();
+                    let body = tokio::time::timeout(policy.request_timeout, resp.text())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
                     let err = anyhow::anyhow!("provider returned {status}:\n{body}");
                     Err(match decision {
                         Decision::Retryable(ra) => RetryError::Retryable {
@@ -315,7 +319,11 @@ pub(super) async fn list_models_compat(
                     Ok(resp)
                 } else {
                     let decision = classify_status(status, resp.headers());
-                    let body = resp.text().await.unwrap_or_default();
+                    let body = tokio::time::timeout(policy.request_timeout, resp.text())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
                     let err = anyhow::anyhow!("models endpoint returned {status}:\n{body}");
                     Err(match decision {
                         Decision::Retryable(ra) => RetryError::Retryable {
