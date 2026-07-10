@@ -331,4 +331,35 @@ mod tests {
         assert_eq!(r.unwrap(), 7);
         assert_eq!(calls.get(), 2);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_is_clamped_to_max_delay() {
+        let p = policy(3); // max_delay = 8s
+        let calls = Cell::new(0u32);
+        let start = tokio::time::Instant::now();
+        let r: anyhow::Result<u32> = with_retry(&p, || {
+            let n = calls.get();
+            calls.set(n + 1);
+            async move {
+                if n == 0 {
+                    // Server asks for 60s, far above the 8s max_delay.
+                    Err(RetryError::Retryable {
+                        source: anyhow::anyhow!("429"),
+                        retry_after: Some(Duration::from_secs(60)),
+                    })
+                } else {
+                    Ok(1)
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert_eq!(r.unwrap(), 1);
+        assert_eq!(calls.get(), 2);
+        // Clamped to max_delay (8s), not the requested 60s.
+        assert!(
+            elapsed >= Duration::from_secs(8) && elapsed < Duration::from_secs(9),
+            "elapsed = {elapsed:?}"
+        );
+    }
 }

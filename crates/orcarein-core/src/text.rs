@@ -43,6 +43,7 @@ mod tests {
         let out = cap(&big, 10);
         assert!(out.starts_with(&"a".repeat(10)));
         assert!(out.contains("truncated 90 bytes; 100 total"));
+        assert!(out.len() < big.len() + 64);
     }
 
     #[test]
