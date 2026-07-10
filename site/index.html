@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="OrcaRein — 为终端而生的开源 Rust CLI agent harness，DeepSeek 一级支持。The model is an orca, you hold the reins.">
+<meta property="og:title" content="OrcaRein — 大模型是虎鲸，缰绳在你手里">
+<meta property="og:description" content="开源 Rust CLI agent harness：DeepSeek 价格、vim 手感、一个到处能跑的静态二进制。">
+<meta property="og:type" content="website">
+<title>OrcaRein — 大模型是虎鲸，缰绳在你手里</title>
+<link rel="icon" type="image/png" href="assets/logo_dark.png">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700;900&display=swap"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/fusion-pixel-12px-proportional-sc@latest/index.css">
+<style>
+body{margin:0;background:#05070F;color:#C6D0E0;font-family:'Noto Sans SC',system-ui,sans-serif;padding-bottom:30px;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:#2BD4C4;text-decoration:none}a:hover{color:#EAF0FA}
+.en{display:none}.L-en .en{display:revert}.L-en .zh{display:none}
+.px{font-family:'Fusion Pixel 12px Proportional SC','Noto Sans SC',sans-serif;font-weight:400}
+.mono{font-family:'JetBrains Mono','Noto Sans SC',monospace}
+.brand{color:#4D6BFE}.acc{color:#2BD4C4}.wt{color:#EAF0FA}.dim{color:#5B6B8F}.ok{color:#46C46E}.warn{color:#E6B450}.err{color:#FF5B5B}.mut{color:#8DA0C4}
+.nav{position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;gap:20px;height:54px;padding:0 20px;background:rgba(5,8,16,.74);backdrop-filter:blur(12px);border-bottom:1px solid #141F38}
+.wordmark{font-size:15px;color:#EAF0FA;letter-spacing:.06em}
+.nlinks{display:flex;gap:20px}
+.nlink{font-size:13px;color:#8DA0C4}
+.ghb{border:1px solid #2A3A5F;padding:6px 12px;font-size:12px;color:#C6D0E0}
+.lbtn{cursor:pointer;border:1px solid #2A3A5F;background:#0B1020;color:#8DA0C4;padding:5px 10px;font-size:12px}
+.sbar{position:fixed;bottom:0;left:0;right:0;z-index:40;display:flex;align-items:stretch;height:30px;line-height:30px;background:#16223C;border-top:1px solid #223052;font-size:12px;white-space:nowrap;overflow:hidden}
+.schip{padding:0 12px;font-weight:700;color:#081120;background:#4D6BFE}
+.mIns{background:#46C46E}
+.sseg{padding:0 12px;color:#5B6B8F}
+.spct{background:#0F1830;padding:0 14px;color:#8DA0C4}
+.sbtn{cursor:pointer;background:none;border:0;font:inherit;color:#2BD4C4;padding:0 12px}
+.tildes{position:fixed;left:16px;top:74px;bottom:44px;z-index:1;color:#1B2745;font-size:13px;line-height:24px;white-space:pre;pointer-events:none;overflow:hidden}
+.hero{position:relative;min-height:100vh;display:flex;align-items:center;overflow:hidden}
+.scene{position:absolute;inset:0;background:linear-gradient(180deg,#0C1730 0%,#0B1226 40%,#070C18 75%,#05070F 100%)}
+.shaft{position:absolute;top:-15%;height:135%;background:linear-gradient(180deg,rgba(77,107,254,.14),rgba(43,212,196,.05) 55%,transparent 85%);filter:blur(28px);transform:skewX(-14deg);mix-blend-mode:screen;animation:sway 17s ease-in-out infinite alternate}
+.snowl{position:absolute;left:0;top:0;width:1px;height:1px;border-radius:50%;background:transparent}
+.vig{position:absolute;inset:0;z-index:2;pointer-events:none;background:radial-gradient(120% 90% at 50% 40%,transparent 55%,rgba(2,4,9,.66) 100%)}
+.scan{position:absolute;inset:0;pointer-events:none;z-index:3;background:repeating-linear-gradient(0deg,rgba(3,5,10,.28) 0 1px,transparent 1px 3px);opacity:.5}
+.pxc{image-rendering:pixelated;display:block}
+.orcaHeroP{position:absolute;top:6%;right:36%;z-index:3}
+.orcaHero{animation:bob 7s ease-in-out infinite alternate;filter:drop-shadow(0 0 22px rgba(43,212,196,.22))}
+.orcaSwim{position:fixed;left:-140px;bottom:44px;z-index:1;pointer-events:none;opacity:.85}
+.sec{max-width:1160px;margin:0 auto;padding:120px 44px 20px;position:relative;scroll-margin-top:44px}
+.hsec{padding-top:120px;padding-bottom:80px;z-index:4;display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center;width:100%}
+.eyeb{font-size:12.5px;letter-spacing:.12em;color:#5B6B8F}
+.h1{font-size:clamp(30px,4.4vw,56px);line-height:1.3;color:#EAF0FA;margin:18px 0 20px;text-shadow:0 0 26px rgba(77,107,254,.35)}
+.lede{font-size:15.5px;line-height:2;color:#8DA0C4;max-width:640px;text-wrap:pretty}
+.cta{display:flex;align-items:center;gap:14px;margin-top:30px;flex-wrap:wrap}
+.btnp{display:inline-block;background:#4D6BFE;color:#071022;padding:14px 24px;font-size:15px;box-shadow:inset -3px -3px 0 rgba(0,0,0,.28),inset 3px 3px 0 rgba(255,255,255,.16);cursor:pointer}
+.btng{display:inline-block;border:1px solid #2A3A5F;color:#C6D0E0;padding:13px 22px;font-size:14px;background:rgba(11,16,32,.5)}
+.stats{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:44px;font-size:12.5px;color:#5B6B8F}
+.sv{color:#EAF0FA;margin-right:6px}
+.term{position:relative;z-index:4;background:rgba(7,12,24,.82);backdrop-filter:blur(12px);border:1px solid #24345C;border-radius:10px;overflow:hidden;box-shadow:0 30px 80px rgba(1,3,8,.7),0 0 46px rgba(77,107,254,.12)}
+.thead{display:flex;align-items:center;gap:10px;padding:11px 16px;background:#101B33;border-bottom:1px solid #1D2C4E;font-size:12px}
+.tbody{padding:16px 18px 12px;min-height:322px;font-size:13px;line-height:1.95}
+.tline{white-space:pre-wrap;word-break:break-word;min-height:10px}
+.tfoot{display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16223C;font-size:11.5px}
+.mchip{padding:1px 8px;font-weight:700;color:#081120;background:#4D6BFE}
+.tcur{display:inline-block;width:8px;height:15px;vertical-align:-2px;background:#EAF0FA;animation:blink 1.05s steps(1) infinite}
+.tcurI{width:2px}
+.tcap{margin-top:12px;font-size:11.5px;color:#5B6B8F}
+.h2{font-size:clamp(24px,3.2vw,38px);color:#EAF0FA;margin:14px 0 12px;line-height:1.4}
+.slede{font-size:14.5px;line-height:2;color:#8DA0C4;max-width:700px;text-wrap:pretty}
+.capgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:40px}
+.capgrid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:40px}
+.card{position:relative;background:#0A0F1F;border:1px solid #1B2946;padding:24px 24px 22px}
+.wide{grid-column:span 2}
+.cnw{position:absolute;top:-1px;left:-1px;width:7px;height:7px;background:#4D6BFE;display:block}
+.cse{position:absolute;bottom:-1px;right:-1px;width:7px;height:7px;background:#2BD4C4;display:block}
+.cno{font-size:11px;color:#33405F;letter-spacing:.1em}
+.ct{font-size:16.5px;color:#EAF0FA;margin:10px 0 8px}
+.cp{font-size:13px;line-height:1.95;color:#7E92B8;margin:0}
+.kbrow{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;align-items:center}
+.kbd{border:1px solid #2A3A5F;border-bottom:3px solid #2A3A5F;background:#111A30;padding:2px 8px;font-size:12px;color:#C6D0E0}
+.mpill{padding:2px 8px;font-size:11px;font-weight:700;color:#081120}
+.tgrid{display:grid;grid-template-columns:.9fr 1.1fr;gap:44px;margin-top:40px;align-items:start}
+.tp{font-size:14px;line-height:2.1;color:#8DA0C4;margin:0 0 16px}
+.pbox{display:block;background:#080D1A;border:1px solid #1C2A4A;padding:14px 18px;font-size:12.5px;line-height:2.2;margin-top:22px;word-break:break-word}
+.wip{font-size:10px;letter-spacing:.08em;color:#4D6BFE;border:1px solid rgba(77,107,254,.4);padding:1px 6px;margin-left:8px;vertical-align:2px;white-space:nowrap}
+.bdev{color:#4D6BFE;border:1px solid rgba(77,107,254,.4)}
+.trow{display:grid;grid-template-columns:112px 70px 1fr;gap:14px;align-items:baseline;padding:10px 14px;border:1px solid #16213C;border-top:0}
+.trow1{border-top:1px solid #16213C}
+.alt{background:#080D1A}
+.tname{font-size:13px;color:#EAF0FA}
+.bdg{font-size:10px;letter-spacing:.1em;padding:2px 6px;text-align:center}
+.bsafe{color:#46C46E;border:1px solid rgba(70,196,110,.35)}
+.brisk{color:#E6B450;border:1px solid rgba(230,180,80,.35)}
+.tdesc{font-size:12.5px;color:#7E92B8}
+.tfootn{margin-top:12px;font-size:12px;color:#5B6B8F}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:40px}
+.snum{font-size:24px;color:#26355C}
+.code{display:block;position:relative;background:#080D1A;border:1px solid #1C2A4A;padding:13px 15px;font-size:12.5px;line-height:1.9;white-space:pre-wrap;word-break:break-all;margin-top:14px;color:#C6D0E0}
+.cmt{color:#5B6B8F}
+.copyb{position:absolute;top:6px;right:6px;cursor:pointer;border:1px solid #2A3A5F;background:#0F1830;color:#8DA0C4;font-size:11px;padding:3px 8px}
+.snote{margin-top:12px;font-size:12px;line-height:1.9;color:#5B6B8F}
+.sbcrow{display:flex;flex-wrap:wrap;gap:10px 24px;margin-top:26px;font-size:12.5px;color:#5B6B8F}
+.rwrap{margin-top:44px;border-left:2px solid #1B2946;margin-left:6px}
+.ritem{position:relative;padding:0 0 32px 34px}
+.rdot{position:absolute;left:-8px;top:4px;width:11px;height:11px;background:#0A0F1F;border:2px solid #4D6BFE;transform:rotate(45deg)}
+.rnow{background:#46C46E;border-color:#46C46E}
+.rone{background:#EAF0FA;border-color:#EAF0FA}
+.rv{font-size:14px;color:#2BD4C4;letter-spacing:.04em}
+.rt{font-size:15px;color:#EAF0FA;margin:6px 0 4px;font-weight:600}
+.rp{font-size:13px;color:#7E92B8;line-height:1.9;max-width:640px;margin:0}
+.alarm{position:relative;border:1px dashed rgba(255,91,91,.45);background:#120A10;padding:44px 44px 38px;margin-top:40px}
+.agrid{display:grid;grid-template-columns:1fr 1fr;gap:16px 36px;margin-top:8px}
+.aitem{display:flex;gap:12px;font-size:13px;line-height:1.9;color:#8DA0C4}
+.ax{color:#FF5B5B;flex:none}
+.ad{color:#4D6BFE;flex:none}
+.at{color:#EAF0FA}
+.abottom{margin-top:32px;padding-top:22px;border-top:1px dashed rgba(255,91,91,.25);font-size:14.5px;color:#EAF0FA}
+.ftr{border-top:1px solid #141F38;margin-top:110px}
+.fin{max-width:1160px;margin:0 auto;padding:54px 44px 40px;display:grid;grid-template-columns:1.2fr .8fr .8fr;gap:40px}
+.flogo{height:76px;width:auto;display:block;margin-bottom:16px}
+.fsm{font-size:12.5px;color:#5B6B8F;line-height:2}
+.fh{font-size:12px;color:#33405F;letter-spacing:.12em;margin-bottom:10px}
+.fl{display:block;font-size:13px;color:#8DA0C4;line-height:2.3}
+.fbot{max-width:1160px;margin:0 auto;padding:0 44px 34px;font-size:12px;color:#33405F;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.hov{position:fixed;inset:0;z-index:60;background:rgba(3,5,10,.72);backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center}
+.hpan{background:#0B1020;border:1px solid #24345C;padding:30px 34px;min-width:340px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.hrow{display:flex;justify-content:space-between;gap:36px;font-size:13px;line-height:2.5;color:#8DA0C4}
+.hft{margin-top:14px;font-size:11.5px;color:#33405F}
+@keyframes sway{from{transform:skewX(-17deg) translateX(-36px)}to{transform:skewX(-9deg) translateX(44px)}}
+@keyframes rise{to{transform:translateY(-1600px)}}
+@keyframes bob{from{transform:translateY(-10px)}to{transform:translateY(12px)}}
+@keyframes blink{50%{opacity:0}}
+@media(max-width:1180px){.tildes{display:none}}
+@media(max-width:1000px){.hsec{grid-template-columns:1fr;gap:44px}.orcaHeroP{right:10%;top:4%}.capgrid{grid-template-columns:1fr 1fr}.tgrid{grid-template-columns:1fr}.steps{grid-template-columns:1fr}.agrid{grid-template-columns:1fr}.fin{grid-template-columns:1fr 1fr}}
+@media(max-width:640px){.capgrid{grid-template-columns:1fr}.capgrid2{grid-template-columns:1fr}.wide{grid-column:auto}.sec{padding:100px 22px 10px}.hsec{padding-top:100px}.nlinks{display:none}.sseg{display:none}.fin{grid-template-columns:1fr;padding:44px 22px}.fbot{padding:0 22px 30px}.alarm{padding:30px 22px}}
+</style>
+</head>
+<body>
+<div class="page L-zh" id="page">
+<nav class="nav mono"><span class="brand">◆</span><span class="wordmark px">OrcaRein</span><span class="nlinks"><a class="nlink" href="#cap"><span class="zh">特色</span><span class="en">why</span></a><a class="nlink" href="#tools"><span class="zh">工具</span><span class="en">tools</span></a><a class="nlink" href="#install"><span class="zh">安装</span><span class="en">install</span></a><a class="nlink" href="#roadmap"><span class="zh">航线</span><span class="en">roadmap</span></a><a class="nlink" href="#honest"><span class="zh">直说</span><span class="en">plain talk</span></a></span><span class="f1"></span><a class="ghb" href="https://github.com/NickChuCode/orcarein" target="_blank" rel="noreferrer">GitHub ↗</a><button class="lbtn mono" id="navLang">EN</button></nav>
+<div class="tildes mono">~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~</div>
+<section class="hero" id="hero" data-sec="hero" data-screen-label="Hero 首屏">
+<div class="scene"><div class="shaft" style="left:16%;width:150px;animation-delay:-3s"></div><div class="shaft" style="left:38%;width:230px;opacity:.8"></div><div class="shaft" style="left:63%;width:120px;animation-delay:-9s;opacity:.7"></div><div class="snowl" id="snowA"></div><div class="snowl" id="snowB"></div><div class="snowl" id="snowC"></div></div>
+<div class="orcaHeroP" id="orcaPar"><div class="orcaHero"><canvas class="pxc" id="orcaHero"></canvas></div></div>
+<div class="vig"></div>
+<div class="scan"></div>
+<div class="sec hsec">
+<div>
+<div class="mono eyeb"><span class="acc">$</span> open-source rust cli agent · v0.3.0 · MIT / Apache-2.0</div>
+<h1 class="px h1"><span class="zh">大模型是虎鲸，<br>缰绳在你手里。</span><span class="en">THE MODEL IS AN ORCA.<br>YOU HOLD THE REINS.</span></h1>
+<p class="lede"><span class="zh">写给住在终端里的人：DeepSeek 的价格、vim 的手感、一个到处能跑的静态二进制。它能替你改文件、跑命令、修 issue——但动手之前，永远先问你。</span><span class="en">For people who live in the terminal: DeepSeek prices, vim muscle memory, one static binary that runs anywhere. It edits files, runs commands and works issues for you — and always asks before it acts.</span></p>
+<div class="cta"><a class="btnp px" href="https://github.com/NickChuCode/orcarein/releases/latest" target="_blank" rel="noreferrer"><span class="zh">下载 v0.3.0</span><span class="en">DOWNLOAD v0.3.0</span></a><a class="btng mono" href="https://github.com/NickChuCode/orcarein" target="_blank" rel="noreferrer">GitHub →</a></div>
+<div class="oneln"><code class="code mono">export DEEPSEEK_API_KEY="sk-..." && orcarein<button class="copyb mono js-copy" data-c="export DEEPSEEK_API_KEY=&quot;sk-...&quot; && orcarein" data-k="k0">copy</button></code></div>
+<div class="stats mono"><span><span class="sv">8</span><span class="zh">内置工具 + MCP</span><span class="en">built-in tools + MCP</span></span><span><span class="sv">360+</span><span class="zh">测试</span><span class="en">tests</span></span><span><span class="sv">6</span><span class="zh">平台二进制</span><span class="en">platform binaries</span></span><span><span class="sv">0</span><span class="zh">订阅费，按 token 付给 provider</span><span class="en">subscription — pay your provider per token</span></span><span><span class="sv">1</span><span class="zh">个静态二进制，零依赖</span><span class="en">static binary, zero deps</span></span></div>
+</div>
+<div>
+<div class="term mono"><div class="thead"><span class="brand">◆ OrcaRein v0.3.0</span><span class="dim">deepseek-v4-flash · ~/proj/orcarein</span><span class="f1"></span><span class="dim">tui</span></div><div class="tbody"><div id="demoLines"></div><div class="tline"><span class="brand">&gt; </span><span class="wt" id="typingTxt"></span><span class="tcur" id="tcur"></span></div></div><div class="tfoot"><span class="mchip" id="tMode">-- NORMAL --</span><span class="dim">/help · @file · Esc→NORMAL</span><span class="f1"></span><span class="dim" id="tUsage">ctx 0%</span></div></div>
+<div class="tcap mono"><span class="zh">↑ 按真实交互还原：vim 模态输入，权限确认 y/n/A/N，默认拒绝。</span><span class="en">↑ Faithful to the real thing: vim-modal input, y/n/A/N permission prompt, deny by default.</span></div>
+</div>
+</div>
+</section>
+<section class="sec" id="cap" data-sec="cap" data-screen-label="能力 Capabilities">
+<div class="mono eyeb"><span class="acc">:why-orcarein</span></div>
+<h2 class="px h2"><span class="zh">为什么用 OrcaRein</span><span class="en">WHY ORCAREIN</span></h2>
+<p class="slede"><span class="zh">四个理由，直接回答"我为什么要用它"；下面六张卡是证据，带"开发中"徽标的已在路线图、还没发布。</span><span class="en">Four straight answers to "why would I use this" — the six cards below are the receipts; WIP badges mark what is designed but not shipped yet.</span></p>
+<div class="capgrid2"><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">01</div><h3 class="px ct"><span class="zh">你的手感，原样保留</span><span class="en">KEEP YOUR MUSCLE MEMORY</span></h3><p class="cp"><span class="zh">练了多年的 vim 在这里原样生效：Esc、ciw、daw、visual 选区、u 撤销、@ 补全项目文件。不用开浏览器、不用换编辑器，ssh 到服务器照用；终端差就退回纯文本，永远不挡你干活。</span><span class="en">Years of vim muscle memory work as-is: Esc, ciw, daw, visual selection, u to undo, @ to reference files. No browser, no new editor; works over ssh, and on a weak terminal it falls back to plain text — it never blocks you.</span></p><div class="kbrow mono"><span class="kbd">Esc</span><span class="kbd">i</span><span class="kbd">v</span><span class="kbd">ciw</span><span class="kbd">daw</span><span class="kbd">u</span><span class="kbd">⌃r</span><span class="mpill" style="background:#4D6BFE">NORMAL</span><span class="mpill" style="background:#46C46E">INSERT</span><span class="mpill" style="background:#E6B450">VISUAL</span></div></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">02</div><h3 class="px ct"><span class="zh">省钱，也省事</span><span class="en">CHEAP AND FRICTIONLESS</span></h3><p class="cp"><span class="zh">自带 DeepSeek key，按 token 直接付给 provider——没有订阅、没有加价、没有中间商；国内网络直连，不需要信用卡和代理。装起来一样省事：一个静态二进制，树莓派和公司内网照跑。</span><span class="en">Bring your DeepSeek key and pay your provider per token — no subscription, no markup, no middleman; direct from mainland networks, no credit card, no proxy. Install is just as light: one static binary that runs on a Pi or behind a corporate firewall.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">03</div><h3 class="px ct"><span class="zh">敢放手，收得回</span><span class="en">LET GO, SAFELY</span></h3><p class="cp"><span class="zh">它能改文件、跑命令，但危险动作永远先问你，默认拒绝——你说了才算。规则化权限、hooks、Landlock / seccomp 沙箱、/restore 一键回滚都在开发中：目标是你敢开着它去倒杯咖啡。</span><span class="en">It edits files and runs commands, but risky actions always ask first — deny by default, you have the final word. Rule-based permissions, hooks, a Landlock / seccomp sandbox and /restore rollback are in development: the goal is an agent you can leave alone while you get coffee.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">04</div><h3 class="px ct"><span class="zh">不合手？改它</span><span class="en">DOES NOT FIT? HACK IT</span></h3><p class="cp"><span class="zh">这是一个你读得完的 Rust 代码库：核心是可嵌入的 orcarein-core 库，技能就是几个 markdown 文件，MCP 随手接你自己的工具，MIT / Apache-2.0 随便用。它是你的工具，不是谁的产品入口。</span><span class="en">A Rust codebase you can actually read end to end: an embeddable orcarein-core, skills that are just markdown files, MCP for your own tools, MIT / Apache-2.0. It is your tool, not someone’s product funnel.</span></p></div></div><div class="capgrid" style="margin-top:14px"><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">05</div><h3 class="px ct"><span class="zh">流式循环</span><span class="en">STREAMING LOOP</span></h3><p class="cp"><span class="zh">逐 token 输出，[思考] 与 [回复] 分开；畸形工具调用自动修复，不中断整轮。</span><span class="en">Token-by-token output with [思考] and [回复] shown separately; malformed tool calls are repaired, not fatal.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">06</div><h3 class="px ct"><span class="zh">技能与子 agent</span><span class="en">SKILLS &amp; SUBAGENTS</span></h3><p class="cp"><span class="zh">.orcarein/skills/*.md 按需加载；task 把子任务交给隔离上下文的子 agent，只带回结论；并行 fan-out 在 v0.7。</span><span class="en">.orcarein/skills/*.md load on demand; task hands work to a subagent with its own isolated context; parallel fan-out lands in v0.7.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">07</div><h3 class="px ct"><span class="zh">MCP 生态</span><span class="en">MCP ECOSYSTEM</span></h3><p class="cp"><span class="zh">stdio MCP server 即插即用，和内置工具并肩；配上 Playwright-MCP，agent 就能操作浏览器看网页。HTTP 传输在 v0.7。</span><span class="en">stdio MCP servers plug in beside the built-ins; add Playwright-MCP and the agent can drive a browser. HTTP transport lands in v0.7.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">08</div><h3 class="px ct"><span class="zh">会话与记忆</span><span class="en">SESSIONS &amp; MEMORY</span></h3><p class="cp"><span class="zh">每轮自动存盘，session resume 随时续聊；/compact 压缩上下文并诚实提示 cache 代价；AGENTS.md 项目记忆自动并入。</span><span class="en">Every turn auto-saves; resume any session. /compact flattens context (and is honest about the cache cost); AGENTS.md project memory merges in.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">09</div><h3 class="px ct"><span class="zh">检查点与回滚</span><span class="en">CHECKPOINTS</span><span class="mono wip"><span class="zh">开发中</span><span class="en">WIP</span></span></h3><p class="cp"><span class="zh">side-git 快照，/restore 一键撤销 agent 这一轮的所有改动。在 v0.8。</span><span class="en">side-git snapshots; /restore undoes everything one run changed. Lands in v0.8.</span></p></div><div class="card"><b class="cnw"></b><b class="cse"></b><div class="cno mono">10</div><h3 class="px ct"><span class="zh">Web 工具与 Repomap</span><span class="en">WEB TOOLS &amp; REPOMAP</span><span class="mono wip"><span class="zh">开发中</span><span class="en">WIP</span></span></h3><p class="cp"><span class="zh">web_fetch / web_search，检索后端可换(国内 Bocha / 国际 Tavily)；tree-sitter 全仓符号索引，离线可用。v0.7–v0.8。</span><span class="en">web_fetch / web_search with swappable backends (Bocha in China, Tavily elsewhere); a tree-sitter repo-wide symbol index, offline. v0.7–v0.8.</span></p></div></div>
+</section>
+<section class="sec" id="tools" data-sec="tools" data-screen-label="工具与权限 Tools">
+<div class="mono eyeb"><span class="acc">:tools</span></div>
+<h2 class="px h2"><span class="zh">每个工具，都套着缰绳</span><span class="en">EVERY TOOL WEARS THE REINS</span></h2>
+<div class="tgrid">
+<div>
+<p class="tp"><span class="zh"><span class="wt">Orca 是力量，Rein 是缰绳</span>——名字就是架构。读文件、写文件、跑 shell，这些工具每个 agent 都有；区别是谁说了算：OrcaRein 的每个工具声明自己的风险级别，risky 的必须先过你这一关。</span><span class="en"><span class="wt">Orca is the power, Rein is the harness</span> — the name is the architecture. Every agent has file and shell tools; the difference is who has the final say: each tool declares a risk level, and risky ones go through you first.</span></p>
+<p class="tp"><span class="zh"><span class="wt">默认拒绝。</span>空输入、EOF、意外输入都算"不"；答一次 A(always)，也只管本次会话。search 感知 .gitignore、bash 输出封顶 32 KiB、edit 只接受唯一匹配——行为可预测，才谈得上放权。</span><span class="en"><span class="wt">Deny by default.</span> Empty input, EOF, anything unexpected — all "no"; one A(lways) covers this session only. search respects .gitignore, bash output caps at 32 KiB, edit takes a unique match only — predictable behavior is what earns permissions.</span></p>
+<code class="pbox mono"><div class="fg">[tool: bash({"cmd":"rm -rf build/"})]</div><div class="warn">允许 bash? [y/n/A/N]<span class="tcur" style="margin-left:6px"></span></div><div class="dim">▸ <span class="zh">空输入 / EOF = 拒绝</span><span class="en">empty / EOF = deny</span></div></code>
+</div>
+<div>
+<div class="trow trow1 mono"><span class="tname">read_file</span><span class="bdg bsafe">SAFE</span><span class="tdesc"><span class="zh">读取 UTF-8 文本文件</span><span class="en">read a UTF-8 text file</span></span></div>
+<div class="trow alt mono"><span class="tname">search</span><span class="bdg brisk">RISKY</span><span class="tdesc"><span class="zh">全树正则检索，感知 .gitignore</span><span class="en">regex search, .gitignore-aware</span></span></div>
+<div class="trow mono"><span class="tname">list_dir</span><span class="bdg brisk">RISKY</span><span class="tdesc"><span class="zh">列目录</span><span class="en">list a directory</span></span></div>
+<div class="trow alt mono"><span class="tname">write_file</span><span class="bdg brisk">RISKY</span><span class="tdesc"><span class="zh">写入 / 覆盖文件</span><span class="en">write / overwrite a file</span></span></div>
+<div class="trow mono"><span class="tname">edit</span><span class="bdg brisk">RISKY</span><span class="tdesc"><span class="zh">替换文件中唯一匹配的子串</span><span class="en">replace a unique substring</span></span></div>
+<div class="trow alt mono"><span class="tname">bash</span><span class="bdg brisk">RISKY</span><span class="tdesc"><span class="zh">执行 shell 命令，输出封顶 32 KiB</span><span class="en">run shell commands, output capped at 32 KiB</span></span></div>
+<div class="trow mono"><span class="tname">skill</span><span class="bdg bsafe">SAFE</span><span class="tdesc"><span class="zh">按需加载具名指令包</span><span class="en">load a named instruction pack</span></span></div>
+<div class="trow alt mono"><span class="tname">task</span><span class="bdg bsafe">SAFE</span><span class="tdesc"><span class="zh">委派给隔离上下文的子 agent</span><span class="en">delegate to an isolated subagent</span></span></div>
+<div class="trow mono"><span class="tname">mcp · *</span><span class="bdg" style="color:#2BD4C4;border:1px solid rgba(43,212,196,.4)">MCP</span><span class="tdesc"><span class="zh">stdio server 即插即用：Playwright-MCP 操作浏览器，或你自己的工具</span><span class="en">stdio servers plug in: Playwright-MCP drives a browser, or your own tools</span></span></div>
+<div class="trow alt mono"><span class="tname">web_fetch / search</span><span class="bdg bdev"><span class="zh">开发中</span><span class="en">WIP</span></span><span class="tdesc"><span class="zh">检索后端可换，受限网络可用(v0.8)</span><span class="en">swappable search backends, restricted-network friendly (v0.8)</span></span></div>
+<div class="trow mono"><span class="tname">repomap</span><span class="bdg bdev"><span class="zh">开发中</span><span class="en">WIP</span></span><span class="tdesc"><span class="zh">tree-sitter 全仓符号索引，离线(v0.7)</span><span class="en">tree-sitter repo-wide symbol index, offline (v0.7)</span></span></div>
+<div class="tfootn mono"><span class="zh">工具白名单：--tools read_file,search 只开你要的。</span><span class="en">Tool allowlist: --tools read_file,search enables only what you need.</span></div>
+</div>
+</div>
+</section>
+<section class="sec" id="install" data-sec="install" data-screen-label="安装 Install">
+<div class="mono eyeb"><span class="acc">:install</span></div>
+<h2 class="px h2"><span class="zh">三步，进入终端</span><span class="en">THREE STEPS TO THE PROMPT</span></h2>
+<p class="slede"><span class="zh">不用 Node、不用 Python、不用 Docker：下载一个二进制就完了。</span><span class="en">No Node, no Python, no Docker — download one binary and you are done.</span></p>
+<div class="steps">
+<div class="card"><b class="cnw"></b><b class="cse"></b><div class="snum px">01</div><h3 class="px ct"><span class="zh">下载二进制</span><span class="en">GET THE BINARY</span></h3><code class="code mono"><span class="cmt"># Linux x86_64 / aarch64 · macOS · Windows</span>
+tar xzf orcarein-*.tar.gz
+mv orcarein ~/.local/bin/<button class="copyb mono js-copy" data-c="tar xzf orcarein-*.tar.gz && mv orcarein ~/.local/bin/" data-k="k1">copy</button></code><div class="snote"><a href="https://github.com/NickChuCode/orcarein/releases/latest" target="_blank" rel="noreferrer">Releases →</a> · <span class="zh">或从源码：</span><span class="en">or from source:</span> <span class="mono">cargo install --path crates/orcarein</span></div></div>
+<div class="card"><b class="cnw"></b><b class="cse"></b><div class="snum px">02</div><h3 class="px ct"><span class="zh">配好钥匙</span><span class="en">SET YOUR KEY</span></h3><code class="code mono">export DEEPSEEK_API_KEY="sk-..."<button class="copyb mono js-copy" data-c="export DEEPSEEK_API_KEY=&quot;sk-...&quot;" data-k="k2">copy</button></code><div class="snote"><span class="zh">只走环境变量，或 0600 权限的 secrets.toml——绝不当 CLI 参数。OpenAI 兼容端点用 --provider 切换。</span><span class="en">Environment only, or a 0600 secrets.toml — never a CLI flag. Switch OpenAI-compatible endpoints with --provider.</span></div></div>
+<div class="card"><b class="cnw"></b><b class="cse"></b><div class="snum px">03</div><h3 class="px ct"><span class="zh">体检，开聊</span><span class="en">DOCTOR, THEN CHAT</span></h3><code class="code mono">orcarein doctor
+orcarein<button class="copyb mono js-copy" data-c="orcarein doctor && orcarein" data-k="k3">copy</button></code><div class="snote"><span class="zh">doctor 离线检查配置是否就绪；进了 REPL 用 /help 看全部斜杠命令。</span><span class="en">doctor checks your setup offline; inside the REPL, /help lists every slash command.</span></div></div>
+</div>
+<div class="sbcrow mono"><span><span class="acc">◆</span> <span class="zh">树莓派 / 香橙派(aarch64)开箱即用</span><span class="en">Raspberry Pi / Orange Pi (aarch64) out of the box</span></span><span><span class="acc">◆</span> <span class="zh">rustls，自带根证书，不碰 OpenSSL</span><span class="en">rustls with bundled roots — no OpenSSL</span></span><span><span class="acc">◆</span> <span class="zh">自带 key，受限网络直连 provider</span><span class="en">your key, straight to your provider</span></span></div>
+</section>
+<section class="sec" id="roadmap" data-sec="roadmap" data-screen-label="航线 Roadmap">
+<div class="mono eyeb"><span class="acc">:roadmap</span></div>
+<h2 class="px h2"><span class="zh">航线图</span><span class="en">THE ROUTE AHEAD</span></h2>
+<p class="slede"><span class="zh">计划会随开发调整，进度以 releases 页为准；这里只列大项。</span><span class="en">Plans shift as development goes; the releases page is the source of truth. Only the big items are listed here.</span></p>
+<div class="rwrap">
+<div class="ritem"><span class="rdot rnow"></span><div class="rv mono ok">v0.3.0 · <span class="zh">你在这里</span><span class="en">YOU ARE HERE</span></div><div class="rt px"><span class="zh">已落地</span><span class="en">SHIPPED</span></div><p class="rp"><span class="zh">vim 模态编辑器、MCP 客户端、技能与子 agent、项目记忆、运行时切模型。</span><span class="en">Vim modal editor, MCP client, skills &amp; subagents, project memory, live model switching.</span></p></div>
+<div class="ritem"><span class="rdot"></span><div class="rv mono">v0.4</div><div class="rt px"><span class="zh">权限 v2 + Hooks</span><span class="en">PERMISSIONS V2 + HOOKS</span></div><p class="rp"><span class="zh">allow / ask / deny 规则与权限档位；~/.ssh、.env、*.pem 路径风险升级；PreToolUse / PostToolUse 由退出码强制执行。</span><span class="en">allow / ask / deny rules and permission profiles; path-risk escalation for ~/.ssh, .env, *.pem; PreToolUse / PostToolUse hooks enforced by exit code.</span></p></div>
+<div class="ritem"><span class="rdot"></span><div class="rv mono">v0.5</div><div class="rt px"><span class="zh">自动压缩</span><span class="en">AUTO-COMPACTION</span></div><p class="rp"><span class="zh">阈值触发压缩 + prompt_too_long 兜底；修剪陈旧工具输出，保住缓存前缀。</span><span class="en">Threshold-triggered compaction with a prompt_too_long fallback; stale tool output trimmed, cache prefix preserved.</span></p></div>
+<div class="ritem"><span class="rdot"></span><div class="rv mono">v0.6</div><div class="rt px"><span class="zh">沙箱</span><span class="en">SANDBOX</span></div><p class="rp"><span class="zh">orcarein-sandbox：Linux Landlock + seccomp(默认 workspace-write + 断网)，macOS Seatbelt，Windows 诚实降级。</span><span class="en">orcarein-sandbox: Linux Landlock + seccomp (workspace-write + no-net by default), macOS Seatbelt, honest degradation on Windows.</span></p></div>
+<div class="ritem"><span class="rdot"></span><div class="rv mono">v0.7</div><div class="rt px"><span class="zh">MCP over HTTP · 并行子 agent · Repomap</span><span class="en">MCP OVER HTTP · PARALLEL SUBAGENTS · REPOMAP</span></div><p class="rp"><span class="zh">Streamable HTTP 传输与 .mcp.json；task 并行 fan-out 与自定义 agent 类型；tree-sitter 符号索引，离线可用；自定义斜杠命令。</span><span class="en">Streamable HTTP transport and .mcp.json; parallel task fan-out with custom agent types; tree-sitter symbol index, offline; custom slash commands.</span></p></div>
+<div class="ritem"><span class="rdot"></span><div class="rv mono">v0.8</div><div class="rt px"><span class="zh">检查点 · 流式 Markdown · Web 工具</span><span class="en">CHECKPOINTS · STREAMING MARKDOWN · WEB TOOLS</span></div><p class="rp"><span class="zh">side-git 快照 + /restore 一键回滚；token 流中渐进渲染 Markdown；web_fetch / web_search，国内外检索后端可换。</span><span class="en">side-git snapshots with /restore rollback; Markdown rendered progressively mid-stream; web_fetch / web_search with swappable backends.</span></p></div>
+<div class="ritem"><span class="rdot rone"></span><div class="rv mono wt">1.0</div><div class="rt px"><span class="zh">1.0 的条件</span><span class="en">WHAT 1.0 TAKES</span></div><p class="rp"><span class="zh">orcarein-core 公共 API 冻结、审计通过，满足了才发。</span><span class="en">The orcarein-core public API frozen and audited — it ships when that holds.</span></p></div>
+</div>
+</section>
+<section class="sec" id="honest" data-sec="honest" data-screen-label="直说 Plain talk">
+<div class="mono eyeb"><span class="acc">:security</span></div>
+<h2 class="px h2 err"><span class="zh">OrcaRein 不是沙箱。</span><span class="en">ORCAREIN IS NOT A SANDBOX.</span></h2>
+<p class="slede"><span class="zh">下面每一条都写在 README 和源码里，可以逐条核对；看完再决定给多少信任。</span><span class="en">Every line below is written in the README and the source — check them one by one, then decide how much trust to give.</span></p>
+<div class="alarm">
+<div class="agrid">
+<div class="aitem mono"><span class="ax">✗</span><span><span class="at"><span class="zh">目前没有沙箱。</span><span class="en">No sandbox yet.</span></span> <span class="zh">权限确认是唯一的安全层，而且刻意做得很薄；真沙箱排在 v0.6。</span><span class="en">The permission prompt is the only safety layer, deliberately thin; the real sandbox is slated for v0.6.</span></span></div>
+<div class="aitem mono"><span class="ax">✗</span><span><span class="at"><span class="zh">允许即真执行。</span><span class="en">Allowed means executed.</span></span> <span class="zh">bash、write_file、edit 以你的完整用户权限运行。</span><span class="en">bash, write_file and edit run with your full user privileges.</span></span></div>
+<div class="aitem mono"><span class="ax">✗</span><span><span class="at"><span class="zh">"Always" 管到会话结束。</span><span class="en">"Always" lasts the session.</span></span> <span class="zh">对某工具答一次 A，本次会话内它不再询问。</span><span class="en">Answer A once and that tool stops asking for the rest of the run.</span></span></div>
+<div class="aitem mono"><span class="ax">✗</span><span><span class="at">--no-permission <span class="zh">只给管道。</span><span class="en">is pipes-only.</span></span> <span class="zh">交互式终端下直接拒绝，仅在非 tty stdin 下生效。</span><span class="en">Refused on an interactive terminal; it only works with non-tty stdin.</span></span></div>
+<div class="aitem mono"><span class="ad">◆</span><span><span class="at"><span class="zh">默认拒绝。</span><span class="en">Deny by default.</span></span> <span class="zh">空输入、EOF、任何意外输入，都当作"不"。</span><span class="en">Empty input, EOF, anything unexpected — all count as "no".</span></span></div>
+<div class="aitem mono"><span class="ad">◆</span><span><span class="at"><span class="zh">key 不落仓库。</span><span class="en">Keys never touch the repo.</span></span> <span class="zh">只走环境变量或 0600 的 secrets.toml，绝不当 CLI 参数。</span><span class="en">Environment or a 0600 secrets.toml — never a CLI flag.</span></span></div>
+<div class="aitem mono"><span class="ad">◆</span><span><span class="at"><span class="zh">诚实降级。</span><span class="en">Honest degradation.</span></span> <span class="zh">非 tty、TERM=dumb、串口、headless——退回干净的纯文本，不假装。</span><span class="en">Non-tty, TERM=dumb, serial, headless — it falls back to clean plain text instead of pretending.</span></span></div>
+<div class="aitem mono"><span class="ad">◆</span><span><span class="at"><span class="zh">双许可开源。</span><span class="en">Dual-licensed open source.</span></span> <span class="zh">MIT OR Apache-2.0，核心是可嵌入的 orcarein-core 库。</span><span class="en">MIT OR Apache-2.0, built on the embeddable orcarein-core library.</span></span></div>
+</div>
+<div class="abottom px"><span class="zh">请在有版本控制、或有备份的代码上运行 OrcaRein。</span><span class="en">RUN ORCAREIN ON CODE THAT IS UNDER VERSION CONTROL OR BACKED UP.</span></div>
+</div>
+</section>
+<footer class="ftr" data-screen-label="页脚 Footer">
+<div class="fin">
+<div><img class="flogo" src="assets/logo_dark.png" alt="OrcaRein"><div class="fsm"><span class="zh">为终端而生的 agent harness。DeepSeek 一级支持，开放端点即插即用。</span><span class="en">An agent harness built for the terminal. DeepSeek first-class, open endpoints plug in.</span><br>Rust 1.85+ · 360+ tests · Linux / macOS / Windows CI</div></div>
+<div><div class="fh mono"><span class="zh">产品</span><span class="en">PRODUCT</span></div><a class="fl" href="https://github.com/NickChuCode/orcarein/releases" target="_blank" rel="noreferrer">Releases</a><a class="fl" href="https://github.com/NickChuCode/orcarein#readme" target="_blank" rel="noreferrer">README</a><a class="fl" href="https://github.com/NickChuCode/orcarein/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">CHANGELOG</a><a class="fl" href="https://github.com/NickChuCode/orcarein/issues" target="_blank" rel="noreferrer">Issues</a></div>
+<div><div class="fh mono"><span class="zh">项目</span><span class="en">PROJECT</span></div><a class="fl" href="https://github.com/NickChuCode/orcarein/blob/main/CONTRIBUTING.md" target="_blank" rel="noreferrer"><span class="zh">参与贡献</span><span class="en">Contributing</span></a><a class="fl" href="https://github.com/NickChuCode/orcarein/blob/main/LICENSE-MIT" target="_blank" rel="noreferrer"><span class="zh">许可证 MIT · Apache-2.0</span><span class="en">License MIT · Apache-2.0</span></a><a class="fl" href="https://github.com/ultraworkers/claw-code" target="_blank" rel="noreferrer"><span class="zh">致谢 claw-code</span><span class="en">Thanks to claw-code</span></a><a class="fl" href="https://github.com/NickChuCode/orcarein/blob/main/README.zh-CN.md" target="_blank" rel="noreferrer"><span class="zh">中文 README</span><span class="en">README 中文版</span></a></div>
+</div>
+<div class="fbot mono"><span>~ © 2026 OrcaRein · MIT OR Apache-2.0 ~</span><span><span class="zh">像素字体 Fusion Pixel(OFL)· 页面配色取自源码 color.rs</span><span class="en">Pixel font: Fusion Pixel (OFL) · palette lifted from color.rs in the repo</span></span></div>
+</footer>
+<div class="hov" id="helpOverlay" style="display:none"><div class="hpan mono"><div class="hrow"><span>j / k</span><span class="dim"><span class="zh">滚动</span><span class="en">scroll</span></span></div><div class="hrow"><span>Ctrl-d / Ctrl-u</span><span class="dim"><span class="zh">半屏</span><span class="en">half page</span></span></div><div class="hrow"><span>gg / G</span><span class="dim"><span class="zh">顶部 / 底部</span><span class="en">top / bottom</span></span></div><div class="hrow"><span>i / Esc</span><span class="dim">INSERT / NORMAL</span></div><div class="hrow"><span>?</span><span class="dim"><span class="zh">开关此帮助</span><span class="en">toggle this help</span></span></div><div class="hft"><span class="zh">语言开关在底部状态栏右侧。</span><span class="en">The language toggle lives in the statusline, bottom right.</span></div></div></div>
+<div class="orcaSwim" id="swimWrap"><div id="swimInner"><canvas class="pxc" id="orcaSwim"></canvas></div></div>
+<div class="sbar mono"><span class="schip" id="sMode">-- NORMAL --</span><span class="sseg" id="sFile">~/orcarein/首页.zh.md [+]</span><span class="sseg">unix · utf-8</span><span class="f1"></span><button class="sbtn mono" id="helpBtn">? <span class="zh">快捷键</span><span class="en">keys</span></button><button class="sbtn mono" id="statusLang">:set lang=<span id="langNext">en</span></button><span class="sseg" id="sSect">§ 首页</span><span class="spct" id="sPct">Top</span></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
