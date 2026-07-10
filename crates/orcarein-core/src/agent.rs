@@ -22,8 +22,8 @@ use futures_util::StreamExt;
 
 use crate::tool::ToolError;
 use crate::{
-    ChatOptions, Decision, Message, Provider, RiskLevel, Session, StreamEvent, TokenUsage,
-    ToolCall, ToolDefinition, ToolRegistry,
+    Action, ChatOptions, Decision, Message, Provider, RiskLevel, Ruleset, Session, StreamEvent,
+    TokenUsage, ToolCall, ToolDefinition, ToolRegistry,
 };
 
 /// Upper bound on tool-call iterations within one user turn. Prevents an
@@ -213,6 +213,7 @@ pub struct Agent<'a> {
     tool_defs: &'a [ToolDefinition],
     cache_mode: CacheMode,
     max_iterations: usize,
+    ruleset: Ruleset,
 }
 
 impl<'a> Agent<'a> {
@@ -231,6 +232,7 @@ impl<'a> Agent<'a> {
             tool_defs,
             cache_mode: CacheMode::Economy,
             max_iterations: MAX_TOOL_ITERATIONS,
+            ruleset: Ruleset::with_defaults(),
         }
     }
 
@@ -246,6 +248,14 @@ impl<'a> Agent<'a> {
     /// edit several files in one turn.
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = n.max(1);
+        self
+    }
+
+    /// Sets the permission ruleset (default: [`Ruleset::with_defaults`] — only
+    /// the built-in sensitive-path escalations). The binary passes the user's
+    /// configured rules; tests and sub-agents keep the default.
+    pub fn with_ruleset(mut self, ruleset: Ruleset) -> Self {
+        self.ruleset = ruleset;
         self
     }
 
@@ -405,10 +415,20 @@ impl<'a> Agent<'a> {
             }
         };
 
-        if tool.risk_level() == RiskLevel::Risky {
-            let decision = policy.decide(tool.name(), &call.function.arguments, RiskLevel::Risky);
-            if !decision.is_allow() {
-                return format!("{ERROR_PREFIX} permission denied for '{}'", tool.name());
+        // Resolve the declarative ruleset for EVERY tool (a sensitive-path hit
+        // can escalate a Safe tool). Only an `Ask` result consults `policy`.
+        let request = crate::permission::rules::extract(tool.name(), &args);
+        match self.ruleset.evaluate(&request, tool.risk_level()) {
+            Action::Allow => {}
+            Action::Deny => {
+                return format!("{ERROR_PREFIX} permission denied for '{}'", tool.name())
+            }
+            Action::Ask => {
+                let decision =
+                    policy.decide(tool.name(), &call.function.arguments, tool.risk_level());
+                if !decision.is_allow() {
+                    return format!("{ERROR_PREFIX} permission denied for '{}'", tool.name());
+                }
             }
         }
 
@@ -798,5 +818,49 @@ mod tests {
             all.decide("anything", "{}", RiskLevel::Risky),
             Decision::AllowOnce
         );
+    }
+
+    #[tokio::test]
+    async fn sensitive_read_escalates_and_headless_denies() {
+        // A Safe tool named "read_file"; the ruleset escalates a `.env` read to
+        // Ask; the headless AllowlistPolicy::deny_all() then denies it
+        // (spec §4.8 / N5b — secrets aren't silently readable headless).
+        struct FakeRead;
+        #[async_trait]
+        impl Tool for FakeRead {
+            fn name(&self) -> &str {
+                "read_file"
+            }
+            fn description(&self) -> &str {
+                "read"
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            fn risk_level(&self) -> RiskLevel {
+                RiskLevel::Safe
+            }
+            async fn execute(&self, _a: serde_json::Value) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::new("secret"))
+            }
+        }
+        let provider = MockProvider::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeRead));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs).with_ruleset(Ruleset::with_defaults());
+        // Headless deny-all: the escalated Ask routes to AllowlistPolicy, which
+        // denies a non-allowlisted tool.
+        let mut policy = AllowlistPolicy::deny_all();
+        let call = ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: crate::FunctionCall {
+                name: "read_file".into(),
+                arguments: r#"{"path":".env"}"#.into(),
+            },
+        };
+        let out = agent.run_tool(&mut policy, &call).await;
+        assert!(out.contains("permission denied"), "got: {out}");
     }
 }
