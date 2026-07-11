@@ -3,7 +3,6 @@
 //! (no ratatui), so this compiles even under `--no-default-features`. The frame
 //! builders are pure and unit-tested; only `swim_once` does terminal I/O.
 
-#[allow(unused_imports)]
 use crate::color::ColorMode;
 
 /// The hero orca, 16 rows × 35 cols, copied character-for-character from
@@ -123,6 +122,113 @@ fn resolve_map(map: &[&str]) -> Vec<Vec<Option<WCol>>> {
     grid
 }
 
+/// The width of the hero whale in terminal columns (== `MAP` width).
+#[allow(dead_code)]
+pub(crate) const WHALE_W: usize = 36;
+
+/// One character cell packs two vertical pixels (upper=`top`, lower=`bottom`).
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct HalfCell {
+    top: Option<WCol>,
+    bottom: Option<WCol>,
+}
+
+/// Pack a pixel grid into half-block rows: output row `r` combines grid rows
+/// `2r` (top) and `2r+1` (bottom). Assumes an even number of rows.
+#[allow(dead_code)]
+fn pack(grid: &[Vec<Option<WCol>>]) -> Vec<Vec<HalfCell>> {
+    let mut out = Vec::with_capacity(grid.len() / 2);
+    let mut r = 0usize;
+    while r + 1 < grid.len() {
+        let (top, bot) = (&grid[r], &grid[r + 1]);
+        let w = top.len().max(bot.len());
+        let mut row = Vec::with_capacity(w);
+        for c in 0..w {
+            row.push(HalfCell {
+                top: top.get(c).copied().flatten(),
+                bottom: bot.get(c).copied().flatten(),
+            });
+        }
+        out.push(row);
+        r += 2;
+    }
+    out
+}
+
+/// SGR opener for a foreground color in `mode` (`""` if the mode can't paint).
+#[allow(dead_code)]
+fn fg_sgr(c: WCol, mode: ColorMode) -> String {
+    let (r, g, b) = c.rgb();
+    match mode {
+        ColorMode::Truecolor => format!("\x1b[38;2;{r};{g};{b}m"),
+        ColorMode::Ansi256 => format!("\x1b[38;5;{}m", to_ansi256(r, g, b)),
+        _ => String::new(),
+    }
+}
+
+/// SGR opener for a background color in `mode`.
+#[allow(dead_code)]
+fn bg_sgr(c: WCol, mode: ColorMode) -> String {
+    let (r, g, b) = c.rgb();
+    match mode {
+        ColorMode::Truecolor => format!("\x1b[48;2;{r};{g};{b}m"),
+        ColorMode::Ansi256 => format!("\x1b[48;5;{}m", to_ansi256(r, g, b)),
+        _ => String::new(),
+    }
+}
+
+/// Paint one half-block row to an ANSI string. Both pixels present & equal →
+/// `█` (fg only); differ → `▀` (fg=top, bg=bottom); one present → `▀`/`▄`;
+/// neither → space. Each emitted glyph is width-1, so the row's visible width
+/// equals its cell count.
+#[allow(dead_code)]
+fn paint_half_row(row: &[HalfCell], mode: ColorMode) -> String {
+    const RESET: &str = "\x1b[0m";
+    let mut out = String::new();
+    for cell in row {
+        match (cell.top, cell.bottom) {
+            (None, None) => out.push(' '),
+            (Some(t), None) => {
+                out.push_str(&fg_sgr(t, mode));
+                out.push('▀');
+                out.push_str(RESET);
+            }
+            (None, Some(b)) => {
+                out.push_str(&fg_sgr(b, mode));
+                out.push('▄');
+                out.push_str(RESET);
+            }
+            (Some(t), Some(b)) if t == b => {
+                out.push_str(&fg_sgr(t, mode));
+                out.push('█');
+                out.push_str(RESET);
+            }
+            (Some(t), Some(b)) => {
+                out.push_str(&fg_sgr(t, mode));
+                out.push_str(&bg_sgr(b, mode));
+                out.push('▀');
+                out.push_str(RESET);
+            }
+        }
+    }
+    out
+}
+
+/// The hero whale as painted ANSI lines (8 rows), or empty when the terminal
+/// can't do it justice (only Truecolor/Ansi256, and only when `cols` fits the
+/// 36-wide art). Honest degradation: everything else gets no banner.
+#[allow(dead_code)]
+pub(crate) fn whale_banner(mode: ColorMode, cols: u16) -> Vec<String> {
+    if !matches!(mode, ColorMode::Truecolor | ColorMode::Ansi256) || (cols as usize) < WHALE_W {
+        return Vec::new();
+    }
+    pack(&resolve_map(MAP))
+        .iter()
+        .map(|row| paint_half_row(row, mode))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +266,53 @@ mod tests {
         assert_eq!(g[0][1], None);
         assert_eq!(g[0][2], Some(WCol::Eye));
         assert_eq!(g[0][3], Some(WCol::Grey));
+    }
+
+    /// Remove SGR escapes so we can measure visible width.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for d in chars.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn banner_truecolor_is_8_rows_each_width_36() {
+        use unicode_width::UnicodeWidthStr;
+        let lines = whale_banner(ColorMode::Truecolor, 100);
+        assert_eq!(lines.len(), 8);
+        for l in &lines {
+            assert_eq!(UnicodeWidthStr::width(strip_sgr(l).as_str()), 36);
+        }
+    }
+
+    #[test]
+    fn banner_empty_under_none_or_narrow() {
+        assert!(whale_banner(ColorMode::None, 100).is_empty());
+        assert!(whale_banner(ColorMode::Ansi16, 100).is_empty());
+        assert!(whale_banner(ColorMode::Truecolor, 20).is_empty());
+    }
+
+    #[test]
+    fn paint_row_glyph_selection() {
+        let row = vec![
+            HalfCell { top: None, bottom: None },
+            HalfCell { top: Some(WCol::Belly), bottom: None },
+            HalfCell { top: None, bottom: Some(WCol::Belly) },
+            HalfCell { top: Some(WCol::Belly), bottom: Some(WCol::Belly) },
+            HalfCell { top: Some(WCol::Eye), bottom: Some(WCol::Belly) },
+        ];
+        let painted = strip_sgr(&paint_half_row(&row, ColorMode::Truecolor));
+        assert_eq!(painted, " ▀▄█▀");
     }
 }
