@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::hook::HooksConfig;
 use crate::permission::PermissionRule;
 
 /// Errors from loading or saving configuration / secrets.
@@ -73,6 +74,9 @@ pub struct Config {
     /// sensitive-path defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionConfig>,
+    /// User-configured tool hooks (PreToolUse / PostToolUse). None = no hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
 }
 
 /// One MCP server the client should launch and expose tools from.
@@ -470,5 +474,21 @@ TOKEN = "x"
         let empty = Config::default();
         assert!(empty.permissions.is_none());
         assert!(!toml::to_string(&empty).unwrap().contains("permissions"));
+    }
+
+    #[test]
+    fn config_roundtrips_hooks() {
+        let toml_src = "[[hooks.PreToolUse]]\nmatcher = \"bash\"\ncommand = \"guard.sh\"\n";
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let h = cfg.hooks.as_ref().unwrap();
+        assert_eq!(h.pre_tool_use.len(), 1);
+        assert_eq!(h.pre_tool_use[0].matcher, "bash");
+        assert_eq!(h.pre_tool_use[0].command, "guard.sh");
+        assert!(h.post_tool_use.is_empty());
+
+        // Default omits [hooks].
+        let empty = Config::default();
+        assert!(empty.hooks.is_none());
+        assert!(!toml::to_string(&empty).unwrap().contains("hooks"));
     }
 }
