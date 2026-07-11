@@ -1386,6 +1386,11 @@ async fn main() -> Result<()> {
                 ("/compact", "压缩上下文"),
             ],
         };
+        if fancy {
+            for line in whale::whale_banner(mode, cols) {
+                println!("{line}");
+            }
+        }
         for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
             println!("{line}");
         }
