@@ -36,6 +36,7 @@ mod modal;
 mod overlay;
 #[cfg(feature = "tui")]
 mod syntax;
+mod whale;
 
 /// Demo pins watched by `hw monitor` when `--pins` is omitted.
 #[cfg(feature = "hardware")]
