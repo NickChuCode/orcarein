@@ -13,7 +13,7 @@ use orcarein_core::cost;
 use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
-    CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, ListDirTool,
+    CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, HookSet, ListDirTool,
     OpenAIProvider, PermissionConfig, PermissionPolicy, PermissionRule, PermissionStore, Provider,
     ReadFileTool, RetryPolicy, RiskLevel, RuleAction, Ruleset, SearchTool, SecretStore, Session,
     SessionStore, SessionSummary, SkillTool, SubagentTool, Tool, ToolRegistry, WriteFileTool,
@@ -203,6 +203,10 @@ struct Resolved {
     /// merged into the Agent's [`Ruleset`] on top of the built-in sensitive-path
     /// defaults. Empty when the user has no `[permissions]` section.
     permission_rules: Vec<PermissionRule>,
+    /// User-authored PreToolUse/PostToolUse hooks from `config.toml`'s
+    /// `[[hooks.PreToolUse]]`/`[[hooks.PostToolUse]]`. Empty when the user has
+    /// no `[hooks]` section.
+    hooks: HookSet,
 }
 
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
@@ -285,12 +289,19 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         .map(|p| p.rules.clone())
         .unwrap_or_default();
 
+    let hooks = config
+        .hooks
+        .as_ref()
+        .map(HookSet::from_config)
+        .unwrap_or_default();
+
     Ok(Resolved {
         provider,
         model,
         system_prompt,
         tools_allowlist,
         permission_rules,
+        hooks,
     })
 }
 
@@ -872,7 +883,7 @@ async fn handle_compact(provider: &dyn Provider, model: &str, session: &mut Sess
 /// `/init`: have the agent explore the repo and write AGENTS.md. Provider is a
 /// parameter so this is testable with `MockProvider`. Never propagates errors
 /// — the REPL must survive a failed command.
-async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path) {
+async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path, hooks: &HookSet) {
     match init_precondition(cwd) {
         InitDecision::Exists => {
             println!("AGENTS.md exists; delete it first to regenerate.");
@@ -895,8 +906,9 @@ async fn handle_init(provider: &dyn Provider, model: &str, cwd: &std::path::Path
         .collect();
     let registry = build_registry(Some(&init_tools));
     let tool_defs = registry.definitions();
-    let agent =
-        Agent::new(provider, &registry, &tool_defs).with_max_iterations(ISSUE_MAX_ITERATIONS);
+    let agent = Agent::new(provider, &registry, &tool_defs)
+        .with_max_iterations(ISSUE_MAX_ITERATIONS)
+        .with_hooks(hooks.clone());
 
     // read_file is Safe (always allowed); allowlist the Risky read-only + write.
     let mut policy: Box<dyn PermissionPolicy> = Box::new(AllowlistPolicy::from_allowed([
@@ -1052,6 +1064,7 @@ async fn main() -> Result<()> {
         system_prompt,
         tools_allowlist,
         permission_rules,
+        hooks,
     } = resolved;
 
     // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
@@ -1182,7 +1195,8 @@ async fn main() -> Result<()> {
     // that supplies an interactive permission policy and a printing event sink.
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(&cli))
-        .with_ruleset(Ruleset::from_config(permission_rules));
+        .with_ruleset(Ruleset::from_config(permission_rules))
+        .with_hooks(hooks.clone());
     let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
         Box::new(AllowlistPolicy::allow_all())
     } else {
@@ -1269,7 +1283,7 @@ async fn main() -> Result<()> {
                 CommandAction::Quit => break,
                 CommandAction::RunInit => {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    handle_init(provider.as_ref(), &model, &cwd).await;
+                    handle_init(provider.as_ref(), &model, &cwd, &hooks).await;
                     continue;
                 }
                 CommandAction::RunCompact => {
@@ -1767,6 +1781,7 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         system_prompt,
         tools_allowlist,
         permission_rules,
+        hooks,
         ..
     } = resolved;
 
@@ -1816,7 +1831,8 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
     let tool_defs = registry.definitions();
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
-        .with_ruleset(Ruleset::from_config(permission_rules));
+        .with_ruleset(Ruleset::from_config(permission_rules))
+        .with_hooks(hooks);
     if cli.no_economy {
         eprintln!("orcarein: economy OFF (benchmark — prefix cache defeated)");
     }
@@ -2481,7 +2497,10 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
 
     // 4. Resolve the model/provider (DeepSeek by default, BYO key).
     let Resolved {
-        provider, model, ..
+        provider,
+        model,
+        hooks,
+        ..
     } = resolve(cli)?;
 
     // 5. Restricted toolset: read/list/search/edit/write only — NO shell.
@@ -2528,7 +2547,8 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
     let tool_defs = registry.definitions();
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
-        .with_max_iterations(ISSUE_MAX_ITERATIONS);
+        .with_max_iterations(ISSUE_MAX_ITERATIONS)
+        .with_hooks(hooks);
 
     // 6. Let the agent work the issue. The Risky tools it may use are gated to
     //    exactly the edit set; read_file is Safe and always allowed.
@@ -2868,7 +2888,7 @@ mod tests {
         provider.push_tool_call("c1", "write_file", &args);
         provider.push_text("Wrote AGENTS.md.");
 
-        super::handle_init(&provider, "mock-model", dir.path()).await;
+        super::handle_init(&provider, "mock-model", dir.path(), &HookSet::empty()).await;
 
         assert!(
             target.is_file(),
