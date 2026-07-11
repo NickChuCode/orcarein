@@ -1,8 +1,8 @@
 //! Unified TUI header/chrome (v02-24, redesigned per the Claude Design
-//! "OrcaRein 终端设计系统"): a bordered welcome box with a 4-line orca mascot
-//! beside labeled identity, a `getting started` command strip, and the model
-//! echoed in the title bar. Pure rendering — no terminal I/O — so it is fully
-//! unit-tested.
+//! "OrcaRein 终端设计系统"): a bordered welcome box with labeled identity, a
+//! `getting started` command strip, and the model echoed in the title bar.
+//! A full-size pixel whale banner is printed separately, above this box.
+//! Pure rendering — no terminal I/O — so it is fully unit-tested.
 //!
 //! Color model: [`render_header`] builds a structured `Vec<Vec<Span>>` (text +
 //! semantic [`Token`]). [`header_plain`] concatenates the text (the authoritative
@@ -13,26 +13,11 @@
 use crate::color::{self, ColorMode, Token};
 use unicode_width::UnicodeWidthStr;
 
-/// Pixel-art whale mascot (faceless, traced from the project logo): a plump orca
-/// with head to the left and tail flukes flicking up at the right. Rendered in
-/// the left cell of the wide header; rows 0..=2 are the brand-blue body, row 3 is
-/// the orca-white belly. Every line is a verified, equal display width (16
-/// columns); only width-1 solid-block glyphs are used so the box never skews. The
-/// narrow / plain headers omit it.
-pub const MASCOT: &[&str] = &[
-    "     ▄▄     ▄▄▄ ",
-    " ▄████████▄████ ",
-    "████████████▀▀  ",
-    " ▀▀████████▀    ",
-];
-
 /// Box-drawing width thresholds.
 pub const NARROW: u16 = 60;
 pub const MIN_BOX_WIDTH: u16 = 24;
 
-/// Gap between the mascot cell and the identity block (also the left margin in
-/// the narrow box), and the fixed width of the identity label field.
-const GAP: usize = 2;
+/// Fixed width of the identity label field.
 const LABEL_W: usize = 8;
 
 /// A run of text carrying one semantic color [`Token`]. Concatenating a line's
@@ -217,45 +202,6 @@ fn bottom(inner: usize) -> Vec<Span> {
     ]
 }
 
-/// One body row of the wide box: `│ <mascot> <labeled identity / belly> │`.
-fn wide_body_row(m: &HeaderModel, i: usize, inner: usize) -> Vec<Span> {
-    let mascot_tok = if i < 3 {
-        Token::Brand
-    } else {
-        Token::OrcaWhite
-    };
-    let mut pieces = vec![sp(MASCOT[i], mascot_tok)];
-    let label = |name: &str| {
-        sp(
-            format!("{}{}", " ".repeat(GAP), pad_to(name, LABEL_W)),
-            Token::Dim,
-        )
-    };
-    match i {
-        0 => {
-            pieces.push(label("model"));
-            pieces.push(sp(m.model, Token::Accent));
-            pieces.push(sp(format!(" · {}", m.provider), Token::Dim));
-        }
-        1 => {
-            pieces.push(label("cwd"));
-            pieces.push(sp(m.cwd.clone(), Token::OrcaWhite));
-        }
-        2 => {
-            pieces.push(label("session"));
-            pieces.push(sp(m.session, Token::Fg));
-            if m.saved {
-                pieces.push(sp(" · auto-saved", Token::Success));
-            }
-        }
-        _ => {} // belly row: mascot only
-    }
-    let mut line = vec![sp("│", Token::Brand)];
-    line.extend(assemble(pieces, inner, true));
-    line.push(sp("│", Token::Brand));
-    line
-}
-
 /// The getting-started command strip (wide), `│ /cmd 说明 … │`.
 fn cmd_strip(tips: &[(&str, &str)], inner: usize) -> Vec<Span> {
     let mut pieces = vec![sp(" ", Token::Dim)];
@@ -275,8 +221,27 @@ fn cmd_strip(tips: &[(&str, &str)], inner: usize) -> Vec<Span> {
 fn render_double(m: &HeaderModel, inner: usize) -> Vec<Vec<Span>> {
     let width = inner + 2;
     let mut out = vec![top_border(m.title, m.model, width)];
-    for i in 0..MASCOT.len() {
-        out.push(wide_body_row(m, i, inner));
+
+    let row = |pieces: Vec<Span>| -> Vec<Span> {
+        let mut line = vec![sp("│", Token::Brand)];
+        line.extend(assemble(pieces, inner, true));
+        line.push(sp("│", Token::Brand));
+        line
+    };
+    let label = |name: &str| sp(format!(" {}", pad_to(name, LABEL_W)), Token::Dim);
+
+    out.push(row(vec![
+        label("model"),
+        sp(m.model, Token::Accent),
+        sp(format!(" · {}", m.provider), Token::Dim),
+    ]));
+    out.push(row(vec![label("cwd"), sp(m.cwd.clone(), Token::OrcaWhite)]));
+    {
+        let mut id = vec![label("session"), sp(m.session, Token::Fg)];
+        if m.saved {
+            id.push(sp(" · auto-saved", Token::Success));
+        }
+        out.push(row(id));
     }
     out.push(divider("getting started", width));
     out.push(cmd_strip(&m.tips, inner));
@@ -453,23 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn mascot_lines_all_equal_width() {
-        // Load-bearing: any ragged or width-2 glyph would skew the left column.
-        assert!(!MASCOT.is_empty());
-        for l in MASCOT {
-            assert_eq!(disp_width(l), 16, "mascot line not 16 wide: {l:?}");
-        }
-    }
-
-    #[test]
     fn double_col_golden() {
         let lines = plain(&demo_model(), 100, true);
         let expected = vec![
             "╭─ OrcaRein ─────────────────────────────────────────────────────────────────── deepseek-v4-flash ─╮",
-            "│     ▄▄     ▄▄▄   model   deepseek-v4-flash · deepseek                                            │",
-            "│ ▄████████▄████   cwd     ~/projects/foo                                                          │",
-            "│████████████▀▀    session 0a1b2c3d · auto-saved                                                   │",
-            "│ ▀▀████████▀                                                                                      │",
+            "│ model   deepseek-v4-flash · deepseek                                                             │",
+            "│ cwd     ~/projects/foo                                                                           │",
+            "│ session 0a1b2c3d · auto-saved                                                                    │",
             "├─ getting started ────────────────────────────────────────────────────────────────────────────────┤",
             "│ /help 命令一览   /init 初始化   /compact 压缩上下文                                              │",
             "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
