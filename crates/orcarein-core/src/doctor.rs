@@ -161,7 +161,9 @@ pub fn api_key_check(
     } else {
         Check::warn(
             "api_key",
-            format!("no API key for '{provider}' — set {env_var} or run `orcarein config` / store it in secrets.toml"),
+            format!(
+                "no API key for '{provider}' — run `orcarein login` to store one, or set {env_var}"
+            ),
         )
     }
 }
@@ -330,6 +332,7 @@ mod tests {
         let c = api_key_check("deepseek", false, None, "DEEPSEEK_API_KEY");
         assert_eq!(c.status, CheckStatus::Warn);
         assert!(c.detail.contains("DEEPSEEK_API_KEY"));
+        assert!(c.detail.contains("orcarein login"));
     }
 
     #[test]

@@ -237,8 +237,8 @@ fn build_provider(
     let var = env_key_var(name).expect("provider validated above");
     let key = api_key.with_context(|| {
         format!(
-            "no API key for provider '{name}'. In PowerShell: $env:{var} = '<your-key>' \
-             (or store it once in secrets.toml)"
+            "no API key for provider '{name}'. Run 'orcarein login' to store one, \
+             or set $env:{var} = '<your-key>'"
         )
     })?;
     match name {
