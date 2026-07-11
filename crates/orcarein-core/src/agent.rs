@@ -22,8 +22,8 @@ use futures_util::StreamExt;
 
 use crate::tool::ToolError;
 use crate::{
-    Action, ChatOptions, Decision, Message, Provider, RiskLevel, Ruleset, Session, StreamEvent,
-    TokenUsage, ToolCall, ToolDefinition, ToolRegistry,
+    Action, ChatOptions, Decision, HookOutcome, HookSet, Message, Provider, RiskLevel, Ruleset,
+    Session, StreamEvent, TokenUsage, ToolCall, ToolDefinition, ToolRegistry,
 };
 
 /// Upper bound on tool-call iterations within one user turn. Prevents an
@@ -214,6 +214,7 @@ pub struct Agent<'a> {
     cache_mode: CacheMode,
     max_iterations: usize,
     ruleset: Ruleset,
+    hooks: HookSet,
 }
 
 impl<'a> Agent<'a> {
@@ -233,6 +234,7 @@ impl<'a> Agent<'a> {
             cache_mode: CacheMode::Economy,
             max_iterations: MAX_TOOL_ITERATIONS,
             ruleset: Ruleset::with_defaults(),
+            hooks: HookSet::empty(),
         }
     }
 
@@ -256,6 +258,13 @@ impl<'a> Agent<'a> {
     /// configured rules; tests and sub-agents keep the default.
     pub fn with_ruleset(mut self, ruleset: Ruleset) -> Self {
         self.ruleset = ruleset;
+        self
+    }
+
+    /// Sets the tool hooks (default: none). The binary passes the user's
+    /// configured hooks; tests and sub-agents keep the empty default.
+    pub fn with_hooks(mut self, hooks: HookSet) -> Self {
+        self.hooks = hooks;
         self
     }
 
@@ -415,6 +424,19 @@ impl<'a> Agent<'a> {
             }
         };
 
+        // PreToolUse hooks fire BEFORE the permission gate (Claude Code
+        // ordering): a hook can only tighten — block the call — never loosen.
+        // Only `exit 2` short-circuits; every other outcome falls through to the
+        // permission gate below.
+        let mut hook_error: Option<String> = None;
+        match self.hooks.run_pre(tool.name(), &args).await {
+            HookOutcome::Proceed => {}
+            HookOutcome::Block(reason) => {
+                return format!("{ERROR_PREFIX} blocked by PreToolUse hook: {reason}");
+            }
+            HookOutcome::ProceedWithError(note) => hook_error = Some(note),
+        }
+
         // Resolve the declarative ruleset for EVERY tool (a sensitive-path hit
         // can escalate a Safe tool). Only an `Ask` result consults `policy`.
         let request = crate::permission::rules::extract(tool.name(), &args);
@@ -432,8 +454,21 @@ impl<'a> Agent<'a> {
             }
         }
 
-        match tool.execute(args).await {
-            Ok(out) => out.content,
+        // Keep a copy of the tool input for PostToolUse only if post hooks
+        // exist — preserves zero overhead when no hooks are configured.
+        let post_input = self.hooks.has_post().then(|| args.clone());
+        let mut result = match tool.execute(args).await {
+            Ok(out) => match post_input {
+                Some(input) => {
+                    let ctx = self.hooks.run_post(tool.name(), &input, &out.content).await;
+                    if ctx.is_empty() {
+                        out.content
+                    } else {
+                        format!("{}\n\n[PostToolUse context]\n{ctx}", out.content)
+                    }
+                }
+                None => out.content,
+            },
             // The args were valid JSON but did not match the tool's schema —
             // echo the schema so the model can correct the shape.
             Err(ToolError::InvalidArguments(e)) => format!(
@@ -442,7 +477,15 @@ impl<'a> Agent<'a> {
                 tool.schema()
             ),
             Err(e) => format!("{ERROR_PREFIX} {e}"),
+        };
+
+        // Surface a non-blocking PreToolUse hook error as a SUFFIX — never a
+        // prefix, which would break `dispatch`'s `starts_with(ERROR_PREFIX)`
+        // check when the tool itself also failed.
+        if let Some(note) = hook_error {
+            result.push_str(&format!("\n[hook error: {note}]"));
         }
+        result
     }
 }
 
@@ -862,5 +905,120 @@ mod tests {
         };
         let out = agent.run_tool(&mut policy, &call).await;
         assert!(out.contains("permission denied"), "got: {out}");
+    }
+
+    // A Safe tool used to exercise the hook gate without a permission prompt.
+    struct FakeSafe;
+    #[async_trait]
+    impl Tool for FakeSafe {
+        fn name(&self) -> &str {
+            "faketool"
+        }
+        fn description(&self) -> &str {
+            "fake"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Safe
+        }
+        async fn execute(&self, _a: serde_json::Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new("TOOL_RAN"))
+        }
+    }
+
+    fn faketool_call() -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: crate::FunctionCall {
+                name: "faketool".into(),
+                arguments: "{}".into(),
+            },
+        }
+    }
+
+    fn hookset(pre: Vec<(&str, &str)>, post: Vec<(&str, &str)>) -> crate::HookSet {
+        let mk = |v: Vec<(&str, &str)>| {
+            v.into_iter()
+                .map(|(m, c)| crate::HookEntry {
+                    matcher: m.to_string(),
+                    command: c.to_string(),
+                    timeout: None,
+                })
+                .collect()
+        };
+        crate::HookSet::from_config(&crate::HooksConfig {
+            pre_tool_use: mk(pre),
+            post_tool_use: mk(post),
+        })
+    }
+
+    #[tokio::test]
+    async fn pretooluse_block_fires_before_permission_gate() {
+        // Property 2: a Safe tool the ruleset would Allow is still blocked by an
+        // exit-2 PreToolUse hook (hook runs before the gate, tightens).
+        let provider = MockProvider::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeSafe));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs)
+            .with_hooks(hookset(vec![("faketool", "exit 2")], vec![]));
+        let mut policy = AllowlistPolicy::deny_all();
+        let out = agent.run_tool(&mut policy, &faketool_call()).await;
+        assert!(out.contains("blocked by PreToolUse hook"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn empty_hookset_runs_safe_tool_unchanged() {
+        // Backward-compat: no hooks ⇒ the Safe tool runs, output verbatim.
+        let provider = MockProvider::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeSafe));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs); // empty HookSet by default
+        let mut policy = AllowlistPolicy::deny_all();
+        let out = agent.run_tool(&mut policy, &faketool_call()).await;
+        assert_eq!(out, "TOOL_RAN");
+    }
+
+    #[tokio::test]
+    async fn exit0_hook_does_not_bypass_permission_deny() {
+        // Property 3: an exit-0 PreToolUse hook proceeds to the gate, which
+        // denies — the hook cannot loosen a Deny.
+        let provider = MockProvider::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeSafe));
+        let defs = registry.definitions();
+        let ruleset = Ruleset::from_config(vec![crate::PermissionRule {
+            tool: "faketool".into(),
+            command: None,
+            path: None,
+            action: crate::RuleAction::Deny,
+        }]);
+        let agent = Agent::new(&provider, &registry, &defs)
+            .with_ruleset(ruleset)
+            .with_hooks(hookset(vec![("faketool", "exit 0")], vec![]));
+        let mut policy = AllowlistPolicy::deny_all();
+        let out = agent.run_tool(&mut policy, &faketool_call()).await;
+        assert!(out.contains("permission denied"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn posttooluse_appends_context() {
+        let provider = MockProvider::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeSafe));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs)
+            .with_hooks(hookset(vec![], vec![("faketool", "echo ctx")]));
+        let mut policy = AllowlistPolicy::deny_all();
+        let out = agent.run_tool(&mut policy, &faketool_call()).await;
+        assert!(out.contains("TOOL_RAN"), "tool output preserved: {out}");
+        assert!(
+            out.contains("[PostToolUse context]") && out.contains("ctx"),
+            "got: {out}"
+        );
     }
 }
