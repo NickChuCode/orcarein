@@ -241,6 +241,44 @@ fn non_blank(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.trim().is_empty())
 }
 
+/// The result of an optional pre-save key verification (`/v1/models` probe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Task 2 consumes
+enum VerifyOutcome {
+    /// The key worked (models listed).
+    Verified,
+    /// The provider positively rejected the key (401/403) — do not save.
+    Rejected,
+    /// Couldn't tell (network/5xx/offline) — save with a warning.
+    Inconclusive,
+}
+
+/// Classify a verify attempt. `None` = the request succeeded (`Ok`). `Some(e)`
+/// is the error's `Display`. Only the **status line** (before the `":\n"` body
+/// separator) is inspected, so a non-auth status whose body happens to contain
+/// "401"/"403" is never a false rejection.
+#[allow(dead_code)] // Task 2 consumes
+fn classify_verify(err_display: Option<&str>) -> VerifyOutcome {
+    let Some(s) = err_display else {
+        return VerifyOutcome::Verified;
+    };
+    let status_line = s.split(":\n").next().unwrap_or(s);
+    if status_line.contains(" 401") || status_line.contains(" 403") {
+        VerifyOutcome::Rejected
+    } else {
+        VerifyOutcome::Inconclusive
+    }
+}
+
+/// Whether an env var value (the provider's `*_API_KEY`) is set and non-blank,
+/// so it would override the stored secret in `SecretStore::resolve` (env-first).
+/// Pure: the caller does the `std::env::var` read and passes the value in
+/// (keeps this deterministic — no process-global env in tests).
+#[allow(dead_code)] // Task 2 consumes
+fn env_overrides_stored(var_value: Option<&str>) -> bool {
+    matches!(var_value, Some(v) if !v.trim().is_empty())
+}
+
 /// Truncate `s` to at most `max_bytes`, on a char boundary (never splits UTF-8).
 /// Used to cap @mention file injections so a huge file can't blow up the prompt.
 fn cap_chars(s: &str, max_bytes: usize) -> String {
@@ -3338,6 +3376,39 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, corrupt, "corrupt config must be left untouched");
         assert!(!after.contains("[permissions]"));
+    }
+
+    #[test]
+    fn classify_verify_reads_status_line_not_body() {
+        // Ok → Verified.
+        assert_eq!(super::classify_verify(None), super::VerifyOutcome::Verified);
+        // A real auth rejection (status line carries 401) → Rejected.
+        assert_eq!(
+            super::classify_verify(Some(
+                "models endpoint returned 401 Unauthorized:\n{\"error\":\"bad key\"}"
+            )),
+            super::VerifyOutcome::Rejected
+        );
+        // A 502 whose BODY mentions 401 must NOT be a false Rejected.
+        assert_eq!(
+            super::classify_verify(Some(
+                "models endpoint returned 502 Bad Gateway:\n{\"error\":\"upstream 401\"}"
+            )),
+            super::VerifyOutcome::Inconclusive
+        );
+        // A network/timeout error → Inconclusive.
+        assert_eq!(
+            super::classify_verify(Some("models request timed out before response headers")),
+            super::VerifyOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn env_overrides_stored_true_only_for_nonblank() {
+        assert!(!super::env_overrides_stored(None));
+        assert!(!super::env_overrides_stored(Some("")));
+        assert!(!super::env_overrides_stored(Some("   ")));
+        assert!(super::env_overrides_stored(Some("sk-abc")));
     }
 
     #[cfg(feature = "tui")]
