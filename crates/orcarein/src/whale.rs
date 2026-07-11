@@ -11,22 +11,22 @@ use crate::color::ColorMode;
 /// detail, `T`=teal eye.
 #[allow(dead_code)]
 pub(crate) const MAP: &[&str] = &[
-    "...............KK..................",
-    "...............KKK.................",
-    "..............KKKK.................",
-    "..............KKKKK................",
-    ".............KKKKKKK...............",
-    ".KKK.....KKKKKKKKKKKKKKKKKK........",
-    ".KKKK..KKKKKKTKKKGGGKKKKKKWWWWK....",
-    "..KKKKKKKKKKKKKKKKKKKKKKKKWWWWWKK..",
-    "...KKKKKKKKKKKKKKKKKKKKKKKKWWWKKKKK",
-    "...KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
-    ".KKK.KKKKKKKKKKKKKKKKKKKKKKWWWWWWWK",
-    ".KK...KKKKKKWWWWWWWKKKKKKKWWWWWWWK.",
-    "........KKWWWWWWWWWWWWWWWWWWWWKK...",
-    "...........WWWWWWKKKWWWWWWWW.......",
-    ".................KKK...............",
-    "..................KK...............",
+    "...............KK...................",
+    "...............KKK..................",
+    "..............KKKK..................",
+    "..............KKKKK.................",
+    ".............KKKKKKK................",
+    ".KKK.....KKKKKKKKKKKKKKKKKK.........",
+    ".KKKK..KKKKKKTKKKGGGKKKKKKWWWWK.....",
+    "..KKKKKKKKKKKKKKKKKKKKKKKKWWWWWKK...",
+    "...KKKKKKKKKKKKKKKKKKKKKKKKWWWKKKKK.",
+    "...KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+    ".KKK.KKKKKKKKKKKKKKKKKKKKKKWWWWWWWK.",
+    ".KK...KKKKKKWWWWWWWKKKKKKKWWWWWWWK..",
+    "........KKWWWWWWWWWWWWWWWWWWWWKK....",
+    "...........WWWWWWKKKWWWWWWWW........",
+    ".................KKK................",
+    "..................KK................",
 ];
 
 /// A resolved concrete color. Values are the design's hexes (see `site/app.js`
@@ -135,10 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn map_is_16x35() {
+    fn map_is_16x36() {
         assert_eq!(MAP.len(), 16);
         for l in MAP {
-            assert_eq!(l.len(), 35, "map row not 35 wide: {l:?}");
+            assert_eq!(l.len(), 36, "map row not 36 wide: {l:?}");
         }
     }
 
