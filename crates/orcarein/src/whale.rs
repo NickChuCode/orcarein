@@ -229,6 +229,62 @@ pub(crate) fn whale_banner(mode: ColorMode, cols: u16) -> Vec<String> {
         .collect()
 }
 
+/// The tiny swimming orca, 4 rows × 14 cols (head to the right by default).
+/// Simpler than the hero whale on purpose — a light accent, not a faithful
+/// shrink. `K`/`W`/`T`/`.` as in `MAP`.
+#[allow(dead_code)]
+const MINI: &[&str] = &[
+    "......KKKKK...",
+    ".KKKKKKKKKKKT.",
+    ".KKKKKKKKKKKK.",
+    "....WWWWWWW...",
+];
+
+/// The mini whale packed to 2 half-block rows; `flip` mirrors it horizontally
+/// (so it faces left when swimming right→left).
+#[allow(dead_code)]
+fn mini_cells(flip: bool) -> Vec<Vec<HalfCell>> {
+    let mut rows = pack(&resolve_map(MINI));
+    if flip {
+        for row in &mut rows {
+            row.reverse();
+        }
+    }
+    rows
+}
+
+/// The whale's width in columns (== `MINI` width).
+#[allow(dead_code)]
+pub(crate) const MINI_W: usize = 14;
+
+/// Render the mini whale onto a `cols`-wide field with its left edge at column
+/// `x` (may be negative / past the edge — cells off-field are clipped). Returns
+/// 2 painted rows; trailing blank cells are trimmed (the animator uses `\x1b[K`
+/// to clear leftovers), so each row's visible width is ≤ `cols`.
+#[allow(dead_code)]
+pub(crate) fn swim_frame(mode: ColorMode, x: i32, cols: usize, flip: bool) -> Vec<String> {
+    let blank = HalfCell { top: None, bottom: None };
+    mini_cells(flip)
+        .iter()
+        .map(|whale_row| {
+            let mut field = vec![blank; cols];
+            for (i, cell) in whale_row.iter().enumerate() {
+                let fx = x + i as i32;
+                if fx >= 0 && (fx as usize) < cols {
+                    field[fx as usize] = *cell;
+                }
+            }
+            // Trim trailing blank cells to keep frames short.
+            let end = field
+                .iter()
+                .rposition(|c| c.top.is_some() || c.bottom.is_some())
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            paint_half_row(&field[..end], mode)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +370,38 @@ mod tests {
         ];
         let painted = strip_sgr(&paint_half_row(&row, ColorMode::Truecolor));
         assert_eq!(painted, " ▀▄█▀");
+    }
+
+    #[test]
+    fn mini_is_4x14() {
+        assert_eq!(MINI.len(), 4);
+        for l in MINI {
+            assert_eq!(l.len(), 14);
+        }
+    }
+
+    #[test]
+    fn swim_frame_offset_shifts_right() {
+        let near = strip_sgr(&swim_frame(ColorMode::Truecolor, 0, 60, false)[1]);
+        let far = strip_sgr(&swim_frame(ColorMode::Truecolor, 20, 60, false)[1]);
+        let lead = |s: &str| s.chars().take_while(|c| *c == ' ').count();
+        assert!(lead(&far) > lead(&near), "larger x → more leading spaces");
+    }
+
+    #[test]
+    fn swim_frame_fully_offscreen_is_blank() {
+        // Far to the left: nothing visible, no color escapes.
+        let rows = swim_frame(ColorMode::Truecolor, -100, 40, false);
+        for r in rows {
+            assert!(!r.contains('\x1b'), "no color when off-field");
+            assert!(r.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn swim_frame_flip_differs() {
+        let a = swim_frame(ColorMode::Truecolor, 5, 60, false);
+        let b = swim_frame(ColorMode::Truecolor, 5, 60, true);
+        assert_ne!(a, b, "flip mirrors the whale");
     }
 }
