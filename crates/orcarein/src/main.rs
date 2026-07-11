@@ -146,6 +146,20 @@ enum Command {
         #[command(subcommand)]
         action: HwAction,
     },
+    /// Store an API key once in secrets.toml (no per-session env var needed).
+    ///
+    /// Prompts for the key without echoing it, verifies it against the
+    /// provider (unless `--no-verify`), and writes it 0600. Never accepts the
+    /// key as a flag (that would leak it in shell history / the process list).
+    Login {
+        /// Provider to store the key for (default: your configured provider,
+        /// else `deepseek`).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Skip the `/v1/models` verification call and just save the key.
+        #[arg(long)]
+        no_verify: bool,
+    },
 }
 
 /// Actions for the `hw` subcommand.
@@ -243,7 +257,6 @@ fn non_blank(s: Option<String>) -> Option<String> {
 
 /// The result of an optional pre-save key verification (`/v1/models` probe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Task 2 consumes
 enum VerifyOutcome {
     /// The key worked (models listed).
     Verified,
@@ -257,7 +270,6 @@ enum VerifyOutcome {
 /// is the error's `Display`. Only the **status line** (before the `":\n"` body
 /// separator) is inspected, so a non-auth status whose body happens to contain
 /// "401"/"403" is never a false rejection.
-#[allow(dead_code)] // Task 2 consumes
 fn classify_verify(err_display: Option<&str>) -> VerifyOutcome {
     let Some(s) = err_display else {
         return VerifyOutcome::Verified;
@@ -274,9 +286,100 @@ fn classify_verify(err_display: Option<&str>) -> VerifyOutcome {
 /// so it would override the stored secret in `SecretStore::resolve` (env-first).
 /// Pure: the caller does the `std::env::var` read and passes the value in
 /// (keeps this deterministic — no process-global env in tests).
-#[allow(dead_code)] // Task 2 consumes
 fn env_overrides_stored(var_value: Option<&str>) -> bool {
     matches!(var_value, Some(v) if !v.trim().is_empty())
+}
+
+/// Reads a line without echoing it, when possible.
+///
+/// - piped stdin (non-tty): reads a plain line (for `echo $KEY | orcarein login`).
+/// - tty + `tui`: raw-mode masked read (no characters shown at all).
+/// - tty + `--no-default-features` (no crossterm): plain `read_line` — the key
+///   IS echoed (accepted degradation; documented in the QA checklist).
+#[cfg(feature = "tui")]
+fn read_secret_line(prompt: &str) -> std::io::Result<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        read_secret_masked(prompt)
+    } else {
+        read_line_plain()
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+fn read_secret_line(prompt: &str) -> std::io::Result<String> {
+    use std::io::{IsTerminal, Write};
+    if std::io::stdin().is_terminal() {
+        // No crossterm without `tui`: cannot mask — the key will be visible.
+        print!("{prompt}");
+        std::io::stdout().flush()?;
+    }
+    read_line_plain()
+}
+
+/// Plain line read from stdin (used for piped input, and as the no-tui fallback).
+fn read_line_plain() -> std::io::Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line)
+}
+
+/// Restores cooked terminal mode on drop — covers the `?`-early-return and
+/// panic paths (Rust has no `finally`). Mirrors overlay.rs raw-mode handling.
+#[cfg(feature = "tui")]
+struct RawGuard;
+#[cfg(feature = "tui")]
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Masked read: enable raw mode, collect chars without echoing, Enter submits,
+/// Backspace deletes, Esc/Ctrl-C cancels (returns empty → caller treats as no key).
+#[cfg(feature = "tui")]
+fn read_secret_masked(prompt: &str) -> std::io::Result<String> {
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    use std::io::Write;
+
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+
+    let mut buf = String::new();
+    {
+        enable_raw_mode()?;
+        let _guard = RawGuard; // restores raw mode on any exit from this block
+        loop {
+            if let Event::Key(k) = event::read()? {
+                // Windows delivers a Press AND a Release per keystroke; without
+                // this filter every char doubles (sk-abcd -> sskk--aabbccdd).
+                // Mirrors overlay.rs:472-474 — REQUIRED, not optional.
+                if k.kind == KeyEventKind::Release {
+                    continue;
+                }
+                match k.code {
+                    KeyCode::Enter => break,
+                    KeyCode::Esc => {
+                        buf.clear();
+                        break;
+                    }
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buf.clear();
+                        break;
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                    }
+                    KeyCode::Char(c) => buf.push(c),
+                    _ => {}
+                }
+            }
+        } // _guard drops here (or on `?` early-return above) → disable_raw_mode
+    }
+    let _ = disable_raw_mode(); // idempotent belt-and-suspenders
+    println!(); // raw mode swallowed the Enter's newline
+    Ok(buf)
 }
 
 /// Truncate `s` to at most `max_bytes`, on a char boundary (never splits UTF-8).
@@ -341,6 +444,70 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         permission_rules,
         hooks,
     })
+}
+
+/// Store an API key in secrets.toml. See `Command::Login`.
+async fn run_login(cli: &Cli, provider_arg: Option<String>, no_verify: bool) -> Result<()> {
+    let config = Config::load().context("failed to load config.toml")?;
+
+    // Provider precedence: --provider, then the same order the REPL uses.
+    let provider = non_blank(provider_arg)
+        .or_else(|| non_blank(cli.provider.clone()))
+        .or_else(|| non_blank(std::env::var("ORCAREIN_PROVIDER").ok()))
+        .or_else(|| non_blank(config.provider.clone()))
+        .unwrap_or_else(|| "deepseek".to_owned());
+
+    // Validate (env_key_var is Some only for known providers).
+    let var = env_key_var(&provider)
+        .with_context(|| format!("unknown provider: '{provider}' (expected: deepseek | openai)"))?;
+
+    // Read the key (masked on a tty, plain when piped / no-tui).
+    let key = read_secret_line(&format!("Enter API key for {provider}: "))
+        .context("failed to read the API key")?
+        .trim()
+        .to_string();
+    if key.is_empty() {
+        bail!("no key entered");
+    }
+
+    // Optional verification via /v1/models (short retry so offline returns fast).
+    if !no_verify {
+        let verify_provider = build_provider(
+            &provider,
+            Some(key.clone()),
+            RetryPolicy::from_config(Some(0)),
+        )?;
+        let outcome = match verify_provider.list_models().await {
+            Ok(_) => classify_verify(None),
+            Err(e) => classify_verify(Some(&e.to_string())),
+        };
+        match outcome {
+            VerifyOutcome::Verified => println!("✓ key verified"),
+            VerifyOutcome::Rejected => {
+                bail!("key was rejected by {provider} (check the key) — not saved")
+            }
+            VerifyOutcome::Inconclusive => {
+                eprintln!("could not verify (offline?), saved anyway — run 'orcarein doctor' later")
+            }
+        }
+    }
+
+    // Persist to secrets.toml (0600 on Unix; save() creates parents).
+    let path =
+        SecretStore::secrets_path().context("no config directory available to store the key")?;
+    let mut store = SecretStore::load().context("failed to load secrets.toml")?;
+    if store.get(&provider).is_some() {
+        eprintln!("replacing existing {provider} key");
+    }
+    store.set(&provider, &key);
+    store.save().context("failed to write secrets.toml")?;
+    println!("saved {provider} API key to {}", path.display());
+
+    // env-first precedence note: a set env var still wins over what we just saved.
+    if env_overrides_stored(std::env::var(var).ok().as_deref()) {
+        eprintln!("note: ${var} is set and takes precedence over secrets.toml");
+    }
+    Ok(())
 }
 
 /// Runs an `orcarein config get/set/list` invocation, then returns.
@@ -1005,6 +1172,10 @@ async fn main() -> Result<()> {
         Some(Command::Session {
             action: SessionAction::Delete { id },
         }) => return run_session_delete(&id),
+        Some(Command::Login {
+            provider,
+            no_verify,
+        }) => return run_login(&cli, provider, no_verify).await,
         Some(Command::Doctor) => run_doctor(&cli), // diverges (process::exit)
         Some(Command::Run { prompt, allow }) => {
             let code = run_once(&cli, prompt, allow).await;
