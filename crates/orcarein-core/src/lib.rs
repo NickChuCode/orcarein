@@ -9,6 +9,7 @@ pub mod config;
 pub mod cost;
 pub mod doctor;
 pub mod github;
+pub mod hook;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;
@@ -31,6 +32,7 @@ pub use config::{
 pub use cost::{CostEstimate, Prices};
 pub use doctor::{Check, CheckStatus, Tally};
 pub use github::{fetch_issue, parse_owner_repo, GithubError, Issue};
+pub use hook::{HookEntry, HookEvent, HookOutcome, HookSet, HooksConfig};
 pub use memory::{find_agents_md, format_memory_block, load_project_memory, ProjectMemory};
 pub use message::Message;
 pub use permission::{
