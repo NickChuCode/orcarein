@@ -36,6 +36,11 @@ mod modal;
 mod overlay;
 #[cfg(feature = "tui")]
 mod syntax;
+// A terminal-UI ornament. `whale` itself needs no ratatui — it is escape codes,
+// not widgets — but the lean `--no-default-features` build reports `fancy=false`
+// (see `header_env`), so a whale could never surface there. Gated to keep the
+// lean binary honest rather than carrying code that can't run.
+#[cfg(feature = "tui")]
 mod whale;
 
 /// Demo pins watched by `hw monitor` when `--pins` is omitted.
@@ -1388,6 +1393,7 @@ async fn main() -> Result<()> {
                 ("/compact", "压缩上下文"),
             ],
         };
+        #[cfg(feature = "tui")]
         if fancy {
             for line in whale::whale_banner(mode, cols) {
                 println!("{line}");
@@ -1408,6 +1414,7 @@ async fn main() -> Result<()> {
         println!();
     }
 
+    #[cfg(feature = "tui")]
     whale::swim_once(mode, cols).await;
 
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
@@ -1590,7 +1597,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 CommandAction::Swim => {
-                    whale::swim_once(mode, cols).await;
+                    // Fresh width, not the one captured at startup: after a
+                    // resize, frames built for the old width wrap, and the
+                    // animator's relative cursor moves would chew the scrollback.
+                    #[cfg(feature = "tui")]
+                    whale::swim_once(mode, overlay::term_cols()).await;
+                    #[cfg(not(feature = "tui"))]
+                    println!("此构建未编译 tui，鲸鱼游不动。");
                     continue;
                 }
             }
