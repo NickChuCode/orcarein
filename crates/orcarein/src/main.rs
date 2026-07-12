@@ -1544,6 +1544,29 @@ async fn main() -> Result<()> {
             (Session::new(&prompt), created.to_string(), created)
         }
     };
+
+    // The key gate's *judgment* runs here — before the welcome box — so a
+    // `Bail` (no key, nobody to ask) can fail the way it always has: one error
+    // line, no chrome. `Proceed`/`Prompt` still draw the box below first; only
+    // `Prompt`'s actual login prompt happens after it. That box-before-prompt
+    // ordering is the deliberate part of this design, not a bug to fix.
+    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
+    let stored = secrets.resolve(&provider_name);
+    let tty = {
+        use std::io::IsTerminal;
+        interactive(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    };
+    let first_run = first_run_decision(stored.as_deref(), tty);
+    if first_run == FirstRun::Bail {
+        // No key and nobody to ask: build_provider(_, None, _) always errors
+        // here and owns the message/exit code, unchanged by this cut — it's
+        // just reached before the box now instead of after it.
+        build_provider(&provider_name, None, retry.clone())?;
+    }
+
     // Terminal width + capability, resolved once and reused by the header, the
     // streaming sink, the permission prompt, and /help. `fancy` gates the boxed
     // chrome; `mode` is the color capability (None on non-tty / NO_COLOR / dumb,
@@ -1581,18 +1604,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // The key gate. Everything above ran without an API key; everything below
-    // needs one.
-    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
-    let stored = secrets.resolve(&provider_name);
-    let tty = {
-        use std::io::IsTerminal;
-        interactive(
-            std::io::stdin().is_terminal(),
-            std::io::stdout().is_terminal(),
-        )
-    };
-    let (api_key, prefetched_models) = match first_run_decision(stored.as_deref(), tty) {
+    // The key gate. The judgment (`first_run`) already ran above, before the
+    // box — a `Bail` returned from there, so only `Proceed`/`Prompt` reach here.
+    let (api_key, prefetched_models) = match first_run {
         FirstRun::Proceed => (stored, None),
         FirstRun::Prompt => match first_run_login(&provider_name).await? {
             Some((key, models)) => (Some(key), models),
@@ -1606,9 +1620,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         },
-        // No key and nobody to ask (piped stdin / redirected stdout): fail exactly
-        // the way we always have. build_provider owns that message.
-        FirstRun::Bail => (None, None),
+        FirstRun::Bail => unreachable!("Bail already returned above, before the welcome box"),
     };
     let provider = build_provider(&provider_name, api_key, retry)?;
 
@@ -1640,7 +1652,6 @@ async fn main() -> Result<()> {
     }
     println!();
 
-    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
     let mut registry = build_registry(tools_allowlist.as_deref());
     #[cfg(feature = "mcp")]
     let _mcp_clients = {
