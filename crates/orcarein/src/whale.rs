@@ -285,6 +285,56 @@ pub(crate) fn swim_frame(mode: ColorMode, x: i32, cols: usize, flip: bool) -> Ve
         .collect()
 }
 
+/// Play the mini whale swimming across the terminal once, then leave the region
+/// clean. No-op unless the terminal can paint it (Truecolor/Ansi256) and is at
+/// least `MINI_W` wide — callers should already gate on `fancy`. Direction is
+/// pseudo-random (nanosecond parity); the whale faces the way it swims. This is
+/// the only function here that touches the terminal, and it is best-effort:
+/// cursor moves are relative and assume the rows it just printed are intact.
+pub(crate) async fn swim_once(mode: ColorMode, cols: u16) {
+    use std::io::Write;
+    if !matches!(mode, ColorMode::Truecolor | ColorMode::Ansi256) || (cols as usize) < MINI_W {
+        return;
+    }
+    const FRAME_MS: u64 = 35;
+    const STEP: i32 = 3;
+    let flip = nanos() % 2 == 1; // true → swim right→left (faces left)
+    let w = MINI_W as i32;
+    let cols_i = cols as i32;
+    let (mut x, past) = if flip { (cols_i, -w) } else { (-w, cols_i) };
+
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "\x1b[?25l"); // hide cursor
+    let mut first = true;
+    loop {
+        let done = if flip { x < past } else { x > past };
+        if done {
+            break;
+        }
+        if !first {
+            let _ = write!(out, "\x1b[2A"); // back to top of the 2-row region
+        }
+        first = false;
+        let rows = swim_frame(mode, x, cols as usize, flip);
+        let _ = writeln!(out, "\r\x1b[K{}", rows[0]);
+        let _ = writeln!(out, "\r\x1b[K{}", rows[1]);
+        let _ = out.flush();
+        tokio::time::sleep(std::time::Duration::from_millis(FRAME_MS)).await;
+        x += if flip { -STEP } else { STEP };
+    }
+    // Wipe the region and restore the cursor.
+    let _ = write!(out, "\x1b[2A\r\x1b[J\x1b[?25h");
+    let _ = out.flush();
+}
+
+/// Nanoseconds since the epoch, for a cheap coin flip without adding `rand`.
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

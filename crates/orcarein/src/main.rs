@@ -68,6 +68,8 @@ enum CommandAction {
     SwitchSession(String),
     /// `/new` — start a fresh session (new id/file, empty history) at runtime.
     NewSession,
+    /// `/orca` — play the swimming-whale animation once (cosmetic).
+    Swim,
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -1406,6 +1408,8 @@ async fn main() -> Result<()> {
         println!();
     }
 
+    whale::swim_once(mode, cols).await;
+
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
     // that supplies an interactive permission policy and a printing event sink.
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
@@ -1583,6 +1587,10 @@ async fn main() -> Result<()> {
                     created_at_ms = created;
                     last_prompt_tokens = 0;
                     println!("已新建 session {session_id}（空白对话）。");
+                    continue;
+                }
+                CommandAction::Swim => {
+                    whale::swim_once(mode, cols).await;
                     continue;
                 }
             }
@@ -2437,7 +2445,7 @@ fn render_help(mode: color::ColorMode) -> String {
         [("/history", "浏览记录"), ("/model", "切换模型")],
         [("/sessions", "列出会话"), ("/resume", "切换会话")],
         [("/new", "新建会话"), ("/skills", "列出可用 skill")],
-        [("/exit", "退出会话"), ("", "")],
+        [("/exit", "退出会话"), ("/orca", "召唤鲸鱼")],
     ];
     const LCMD: usize = 11; // left command field width
     const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
@@ -2581,6 +2589,7 @@ fn handle_command(
             }
         }
         "new" => CommandAction::NewSession,
+        "orca" => CommandAction::Swim,
         "history" => {
             #[cfg(feature = "tui")]
             {
@@ -2878,6 +2887,7 @@ mod tests {
             "/resume",
             "/new",
             "/skills",
+            "/orca",
         ] {
             assert!(out.contains(cmd), "help missing {cmd}");
         }
@@ -2886,7 +2896,7 @@ mod tests {
             .lines()
             .skip(2) // title + rule
             .zip([
-                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/skills",
+                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/skills", "/orca",
             ])
         {
             let pos = line.find(rcmd).expect("right command present");
