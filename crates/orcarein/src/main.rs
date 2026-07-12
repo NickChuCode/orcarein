@@ -310,7 +310,8 @@ fn env_overrides_stored(var_value: Option<&str>) -> bool {
 /// Reads a line without echoing it, when possible.
 ///
 /// - piped stdin (non-tty): reads a plain line (for `echo $KEY | orcarein login`).
-/// - tty + `tui`: raw-mode masked read (no characters shown at all).
+/// - tty + `tui`: raw-mode masked read — one `*` per character (see
+///   [`read_secret_masked`] for why stars and not nothing).
 /// - tty + `--no-default-features` (no crossterm): plain `read_line` — the key
 ///   IS echoed (accepted degradation; documented in the QA checklist).
 #[cfg(feature = "tui")]
@@ -352,11 +353,66 @@ impl Drop for RawGuard {
     }
 }
 
-/// Masked read: enable raw mode, collect chars without echoing, Enter submits,
-/// Backspace deletes, Esc/Ctrl-C cancels (returns empty → caller treats as no key).
+/// What one key press means while reading a secret. Split out from the event
+/// loop so the ugly, platform-specific parts are unit-testable — the Windows
+/// Release filter and the Ctrl+C arm order are exactly the two things that
+/// silently corrupt a pasted key, and neither was covered before.
+#[cfg(feature = "tui")]
+#[derive(Debug, PartialEq, Eq)]
+enum SecretAction {
+    Push(char),
+    Pop,
+    Submit,
+    Cancel,
+    Ignore,
+}
+
+#[cfg(feature = "tui")]
+fn secret_key_action(
+    kind: ratatui::crossterm::event::KeyEventKind,
+    code: ratatui::crossterm::event::KeyCode,
+    mods: ratatui::crossterm::event::KeyModifiers,
+) -> SecretAction {
+    use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    // Windows delivers a Press AND a Release per keystroke; without this every
+    // char doubles. Must come first — before any code match.
+    if kind == KeyEventKind::Release {
+        return SecretAction::Ignore;
+    }
+    match code {
+        KeyCode::Enter => SecretAction::Submit,
+        KeyCode::Esc => SecretAction::Cancel,
+        // MUST precede the Char(c) arm below, or Ctrl+C reads as the letter 'c'.
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => SecretAction::Cancel,
+        KeyCode::Backspace => SecretAction::Pop,
+        KeyCode::Char(c) => SecretAction::Push(c),
+        _ => SecretAction::Ignore,
+    }
+}
+
+/// Masked read: raw mode, one `*` per character, Enter submits, Backspace
+/// deletes, Esc/Ctrl-C cancels (returns empty → caller treats as no key).
+///
+/// The stars are deliberate, and they reverse v02-37's "show nothing, like
+/// `sudo`" choice. That threat model was wrong: a `sudo` password is *typed*
+/// (so hiding its length defeats shoulder-surfing), but an API key is *pasted*
+/// and its length is a public constant. Zero feedback made users doubt the paste
+/// landed, paste again, silently concatenate two keys, and get a 401 that told
+/// them their key was bad. Leaking a length nobody cares about beats that.
+///
+/// Raw mode cleared `OPOST`, so a '\n' written in here would NOT become "\r\n"
+/// and the display would stair-step. Only `*` and the erase sequence go out
+/// before `disable_raw_mode()`.
+///
+/// A paste arrives here as one `KeyEvent(Char)` per character, because nothing
+/// enables bracketed paste. If someone ever turns on `EnableBracketedPaste` for
+/// the modal editor, the whole paste becomes a single `Event::Paste`, this
+/// `Event::Key` arm stops matching it, and pasted keys vanish silently. Handle
+/// `Event::Paste` here if that day comes.
 #[cfg(feature = "tui")]
 fn read_secret_masked(prompt: &str) -> std::io::Result<String> {
-    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::event::{self, Event};
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use std::io::Write;
 
@@ -366,30 +422,27 @@ fn read_secret_masked(prompt: &str) -> std::io::Result<String> {
     let mut buf = String::new();
     {
         enable_raw_mode()?;
-        let _guard = RawGuard; // restores raw mode on any exit from this block
+        let _guard = RawGuard; // restores cooked mode on any exit from this block
         loop {
             if let Event::Key(k) = event::read()? {
-                // Windows delivers a Press AND a Release per keystroke; without
-                // this filter every char doubles (sk-abcd -> sskk--aabbccdd).
-                // Mirrors overlay.rs:472-474 — REQUIRED, not optional.
-                if k.kind == KeyEventKind::Release {
-                    continue;
-                }
-                match k.code {
-                    KeyCode::Enter => break,
-                    KeyCode::Esc => {
+                match secret_key_action(k.kind, k.code, k.modifiers) {
+                    SecretAction::Push(c) => {
+                        buf.push(c);
+                        print!("*");
+                        std::io::stdout().flush()?;
+                    }
+                    SecretAction::Pop => {
+                        if buf.pop().is_some() {
+                            print!("\x08 \x08"); // back, overwrite with a space, back
+                            std::io::stdout().flush()?;
+                        }
+                    }
+                    SecretAction::Submit => break,
+                    SecretAction::Cancel => {
                         buf.clear();
                         break;
                     }
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        buf.clear();
-                        break;
-                    }
-                    KeyCode::Backspace => {
-                        buf.pop();
-                    }
-                    KeyCode::Char(c) => buf.push(c),
-                    _ => {}
+                    SecretAction::Ignore => {}
                 }
             }
         } // _guard drops here (or on `?` early-return above) → disable_raw_mode
@@ -3689,6 +3742,73 @@ mod tests {
                 assert_eq!(interval, 500); // default
             }
             other => panic!("expected hw monitor, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    mod secret_keys {
+        use crate::{secret_key_action, SecretAction};
+        use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+        #[test]
+        fn release_events_are_ignored() {
+            // Windows delivers Press AND Release per keystroke. Without this the
+            // key doubles (sk-abcd -> sskk--aabbccdd) and 51 chars show 102 stars.
+            // The filter existed in the loop as a comment with ZERO tests.
+            assert_eq!(
+                secret_key_action(
+                    KeyEventKind::Release,
+                    KeyCode::Char('a'),
+                    KeyModifiers::NONE
+                ),
+                SecretAction::Ignore
+            );
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Char('a'), KeyModifiers::NONE),
+                SecretAction::Push('a')
+            );
+        }
+
+        #[test]
+        fn ctrl_c_cancels_and_is_not_the_letter_c() {
+            // Arm order is load-bearing: if `Char(c)` were matched first, Ctrl+C
+            // would silently push a 'c' into the key.
+            assert_eq!(
+                secret_key_action(
+                    KeyEventKind::Press,
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL
+                ),
+                SecretAction::Cancel
+            );
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Char('c'), KeyModifiers::NONE),
+                SecretAction::Push('c')
+            );
+        }
+
+        #[test]
+        fn enter_submits_esc_cancels_backspace_pops() {
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Enter, KeyModifiers::NONE),
+                SecretAction::Submit
+            );
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Esc, KeyModifiers::NONE),
+                SecretAction::Cancel
+            );
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Backspace, KeyModifiers::NONE),
+                SecretAction::Pop
+            );
+        }
+
+        #[test]
+        fn other_keys_do_nothing() {
+            assert_eq!(
+                secret_key_action(KeyEventKind::Press, KeyCode::Left, KeyModifiers::NONE),
+                SecretAction::Ignore
+            );
         }
     }
 }
