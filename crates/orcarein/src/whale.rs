@@ -263,7 +263,10 @@ pub(crate) const MINI_W: usize = 14;
 /// to clear leftovers), so each row's visible width is ≤ `cols`.
 #[allow(dead_code)]
 pub(crate) fn swim_frame(mode: ColorMode, x: i32, cols: usize, flip: bool) -> Vec<String> {
-    let blank = HalfCell { top: None, bottom: None };
+    let blank = HalfCell {
+        top: None,
+        bottom: None,
+    };
     mini_cells(flip)
         .iter()
         .map(|whale_row| {
@@ -412,11 +415,26 @@ mod tests {
     #[test]
     fn paint_row_glyph_selection() {
         let row = vec![
-            HalfCell { top: None, bottom: None },
-            HalfCell { top: Some(WCol::Belly), bottom: None },
-            HalfCell { top: None, bottom: Some(WCol::Belly) },
-            HalfCell { top: Some(WCol::Belly), bottom: Some(WCol::Belly) },
-            HalfCell { top: Some(WCol::Eye), bottom: Some(WCol::Belly) },
+            HalfCell {
+                top: None,
+                bottom: None,
+            },
+            HalfCell {
+                top: Some(WCol::Belly),
+                bottom: None,
+            },
+            HalfCell {
+                top: None,
+                bottom: Some(WCol::Belly),
+            },
+            HalfCell {
+                top: Some(WCol::Belly),
+                bottom: Some(WCol::Belly),
+            },
+            HalfCell {
+                top: Some(WCol::Eye),
+                bottom: Some(WCol::Belly),
+            },
         ];
         let painted = strip_sgr(&paint_half_row(&row, ColorMode::Truecolor));
         assert_eq!(painted, " ▀▄█▀");
