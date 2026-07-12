@@ -259,6 +259,44 @@ fn validate_provider(name: &str) -> Result<()> {
     }
 }
 
+/// What to do at startup about the API key.
+#[derive(Debug, PartialEq, Eq)]
+enum FirstRun {
+    /// A key is already available (env or secrets.toml).
+    Proceed,
+    /// No key, but a human is sitting there — run the inline login.
+    Prompt,
+    /// No key and nobody to ask — fail the way we always have.
+    Bail,
+}
+
+/// Both ends must be a terminal before we may prompt for a secret.
+///
+/// `&&`, emphatically not `||`: with stdout a tty and stdin a file
+/// (`orcarein < prompts.txt`), prompting would read the first line of the user's
+/// script as their API key — and an offline verify would then save it.
+fn interactive(stdin_tty: bool, stdout_tty: bool) -> bool {
+    stdin_tty && stdout_tty
+}
+
+/// Blank counts as absent, mirroring `SecretStore::resolve`'s trim.
+fn first_run_decision(key: Option<&str>, interactive: bool) -> FirstRun {
+    match key {
+        Some(k) if !k.trim().is_empty() => FirstRun::Proceed,
+        _ if interactive => FirstRun::Prompt,
+        _ => FirstRun::Bail,
+    }
+}
+
+/// Where a first-time user goes to get a key.
+fn signup_url(provider: &str) -> Option<&'static str> {
+    match provider {
+        "deepseek" => Some("https://platform.deepseek.com/api_keys"),
+        "openai" => Some("https://platform.openai.com/api-keys"),
+        _ => None,
+    }
+}
+
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
 /// provider name first so a missing key never masks a typo'd provider.
 fn build_provider(
@@ -567,7 +605,6 @@ async fn run_login(cli: &Cli, provider_arg: Option<String>, no_verify: bool) -> 
         .unwrap_or_else(|| "deepseek".to_owned());
 
     validate_provider(&provider)?;
-    let var = env_key_var(&provider).expect("provider validated above");
 
     // Read the key (masked on a tty, plain when piped / no-tui).
     let key = read_secret_line(&format!("Enter API key for {provider}: "))
@@ -600,22 +637,106 @@ async fn run_login(cli: &Cli, provider_arg: Option<String>, no_verify: bool) -> 
         }
     }
 
-    // Persist to secrets.toml (0600 on Unix; save() creates parents).
+    save_key(&provider, &key)?;
+    Ok(())
+}
+
+/// Persist a key to secrets.toml (0600) and tell the user where it went — they
+/// need to know which file to edit later. The path never contains the key.
+///
+/// Shared by `orcarein login` and the first-run flow so the two can't drift.
+fn save_key(provider: &str, key: &str) -> Result<()> {
     let path =
         SecretStore::secrets_path().context("no config directory available to store the key")?;
     let mut store = SecretStore::load().context("failed to load secrets.toml")?;
-    if store.get(&provider).is_some() {
+    if store.get(provider).is_some() {
         eprintln!("replacing existing {provider} key");
     }
-    store.set(&provider, &key);
+    store.set(provider, key);
     store.save().context("failed to write secrets.toml")?;
     println!("saved {provider} API key to {}", path.display());
 
-    // env-first precedence note: a set env var still wins over what we just saved.
-    if env_overrides_stored(std::env::var(var).ok().as_deref()) {
-        eprintln!("note: ${var} is set and takes precedence over secrets.toml");
+    // env-first precedence: a set env var still wins over what we just saved.
+    if let Some(var) = env_key_var(provider) {
+        if env_overrides_stored(std::env::var(var).ok().as_deref()) {
+            eprintln!("note: ${var} is set and takes precedence over secrets.toml");
+        }
     }
     Ok(())
+}
+
+/// The first-run inline login: guide, read the key, verify, save — then hand the
+/// key back so startup can continue into the REPL.
+///
+/// `Ok(None)` means **the user declined** (empty input / Esc / Ctrl-C); the caller
+/// prints guidance and exits 0, because choosing not to log in is not an error.
+/// A key the server rejects three times is a *failure*, not a decline — that path
+/// bails, exactly like `orcarein login` does.
+///
+/// Returns the model list from the verifying `/v1/models` call when we have one,
+/// so startup doesn't immediately fetch it a second time.
+///
+/// No `--no-verify` here on purpose: the first run is exactly when a bad key is
+/// most likely and most confusing. Being offline is already handled (Inconclusive
+/// saves the key with a warning).
+async fn first_run_login(provider: &str) -> Result<Option<(String, Option<Vec<String>>)>> {
+    const ATTEMPTS: usize = 3;
+
+    println!();
+    println!("首次使用：需要一个 {provider} API key。");
+    if let Some(url) = signup_url(provider) {
+        println!("获取：{url}");
+    }
+    println!("直接回车可跳过并退出。");
+    println!();
+
+    for attempt in 1..=ATTEMPTS {
+        let key = read_secret_line(&format!("Enter API key for {provider}: "))
+            .context("failed to read the API key")?
+            .trim()
+            .to_string();
+        if key.is_empty() {
+            return Ok(None); // declined
+        }
+
+        // Verify with zero retries so an offline machine returns fast instead of
+        // sleeping through the backoff ladder.
+        let verifier = build_provider(
+            provider,
+            Some(key.clone()),
+            RetryPolicy::from_config(Some(0)),
+        )?;
+        let (outcome, models) = match verifier.list_models().await {
+            Ok(v) => (classify_verify(None), Some(v)),
+            Err(e) => (classify_verify(Some(&e.to_string())), None),
+        };
+
+        match outcome {
+            VerifyOutcome::Verified => {
+                println!("✓ key verified");
+                save_key(provider, &key)?;
+                return Ok(Some((key, models)));
+            }
+            VerifyOutcome::Inconclusive => {
+                eprintln!(
+                    "could not verify (offline?), saved anyway — run 'orcarein doctor' later"
+                );
+                save_key(provider, &key)?;
+                return Ok(Some((key, None)));
+            }
+            VerifyOutcome::Rejected => {
+                // NOT saved (spec P2). Retry in place: a mis-pasted key is the
+                // single most likely first-run failure, and making the user quit
+                // and re-run `orcarein login` for it is punishment, not guidance.
+                let left = ATTEMPTS - attempt;
+                if left == 0 {
+                    bail!("key was rejected by {provider} (check the key) — not saved");
+                }
+                eprintln!("key 被 {provider} 拒绝，再试一次（还剩 {left} 次）。");
+            }
+        }
+    }
+    unreachable!("the loop either returns or bails on the last attempt")
 }
 
 /// Runs an `orcarein config get/set/list` invocation, then returns.
@@ -1374,15 +1495,17 @@ async fn main() -> Result<()> {
         None => None,
     };
 
-    let resolved = resolve(&cli)?;
-    let Resolved {
-        provider,
+    // Everything up to the key gate below must work WITHOUT an API key: the
+    // welcome box is drawn first, and only then do we ask for one.
+    let Settings {
+        provider: provider_name,
         mut model,
         system_prompt,
         tools_allowlist,
         permission_rules,
         hooks,
-    } = resolved;
+        retry,
+    } = resolve_settings(&cli)?;
 
     // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
     // build a fresh session that re-reads the current project memory.
@@ -1421,7 +1544,101 @@ async fn main() -> Result<()> {
             (Session::new(&prompt), created.to_string(), created)
         }
     };
+    // Terminal width + capability, resolved once and reused by the header, the
+    // streaming sink, the permission prompt, and /help. `fancy` gates the boxed
+    // chrome; `mode` is the color capability (None on non-tty / NO_COLOR / dumb,
+    // so a NO_COLOR tty still draws the box, just uncolored).
+    let (cols, fancy) = header_env();
+    let mode = color::detect(fancy);
+
+    {
+        use header::{header_ansi, render_header, status_line, HeaderModel};
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let hm = HeaderModel {
+            title: "OrcaRein",
+            model: &model,
+            provider: &provider_name,
+            cwd: header::abbreviate_home(&cwd),
+            session: header::short_id(&session_id),
+            saved: true,
+            tips: vec![
+                ("/help", "命令一览"),
+                ("/init", "初始化"),
+                ("/compact", "压缩上下文"),
+            ],
+        };
+        #[cfg(feature = "tui")]
+        if fancy {
+            for line in whale::whale_banner(mode, cols) {
+                println!("{line}");
+            }
+        }
+        for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
+            println!("{line}");
+        }
+        if let Some(s) = status_line(cli.no_permission, cli.no_economy) {
+            println!("{}", color::paint(mode, color::Token::Warning, &s));
+        }
+    }
+
+    // The key gate. Everything above ran without an API key; everything below
+    // needs one.
+    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
+    let stored = secrets.resolve(&provider_name);
+    let tty = {
+        use std::io::IsTerminal;
+        interactive(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    };
+    let (api_key, prefetched_models) = match first_run_decision(stored.as_deref(), tty) {
+        FirstRun::Proceed => (stored, None),
+        FirstRun::Prompt => match first_run_login(&provider_name).await? {
+            Some((key, models)) => (Some(key), models),
+            None => {
+                // The user declined. Not an error — say how to come back, exit 0.
+                let var = env_key_var(&provider_name).expect("provider validated above");
+                println!();
+                println!(
+                    "未设置 API key。随时可以运行 'orcarein login'，或设置 $env:{var} = '<your-key>'。"
+                );
+                return Ok(());
+            }
+        },
+        // No key and nobody to ask (piped stdin / redirected stdout): fail exactly
+        // the way we always have. build_provider owns that message.
+        FirstRun::Bail => (None, None),
+    };
+    let provider = build_provider(&provider_name, api_key, retry)?;
+
     let mut editor = DefaultEditor::new().context("failed to start the line editor")?;
+
+    // Resolve the selectable model list once (used by `/model` validation and the
+    // picker popup). A short timeout keeps a slow/offline endpoint from stalling
+    // startup. NOT tui-gated — validation reads it on the non-tui path too.
+    //
+    // Reuse the list the login's /v1/models call already fetched; only hit the
+    // network again when we don't have one.
+    let (mut model_choices, models_fell_back) = match prefetched_models {
+        Some(v) if !v.is_empty() => (v, false),
+        _ => {
+            use std::time::Duration;
+            match tokio::time::timeout(Duration::from_secs(2), provider.list_models()).await {
+                Ok(Ok(v)) if !v.is_empty() => (v, false),
+                _ => (fallback_models(provider.name(), &model), true),
+            }
+        }
+    };
+    ensure_current_present(&mut model_choices, &model);
+
+    if models_fell_back {
+        println!(
+            "{}",
+            color::paint(mode, color::Token::Dim, "· 模型列表拉取失败，使用内置列表")
+        );
+    }
+    println!();
 
     #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
     let mut registry = build_registry(tools_allowlist.as_deref());
@@ -1430,13 +1647,6 @@ async fn main() -> Result<()> {
         let mcp_cfg = orcarein_core::Config::load().unwrap_or_default();
         orcarein_core::mcp::setup_servers(&mcp_cfg.mcp_servers, &mut registry).await
     };
-
-    // Terminal width + capability, resolved once and reused by the header, the
-    // streaming sink, the permission prompt, and /help. `fancy` gates the boxed
-    // chrome; `mode` is the color capability (None on non-tty / NO_COLOR / dumb,
-    // so a NO_COLOR tty still draws the box, just uncolored).
-    let (cols, fancy) = header_env();
-    let mode = color::detect(fancy);
 
     // Register the `task` subagent tool. Its children mirror the REPL's own
     // permission posture: interactive (with a subagent-tagged prompt) unless
@@ -1464,55 +1674,6 @@ async fn main() -> Result<()> {
         registry.register(Box::new(SkillTool::new(skills.clone())));
     }
     let tool_defs = registry.definitions();
-
-    // Resolve the selectable model list once (used by `/model` validation and the
-    // picker popup). A short timeout keeps a slow/offline endpoint from stalling
-    // startup. NOT tui-gated — validation reads it on the non-tui path too.
-    let (mut model_choices, models_fell_back) = {
-        use std::time::Duration;
-        match tokio::time::timeout(Duration::from_secs(2), provider.list_models()).await {
-            Ok(Ok(v)) if !v.is_empty() => (v, false),
-            _ => (fallback_models(provider.name(), &model), true),
-        }
-    };
-    ensure_current_present(&mut model_choices, &model);
-
-    {
-        use header::{header_ansi, render_header, status_line, HeaderModel};
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let hm = HeaderModel {
-            title: "OrcaRein",
-            model: &model,
-            provider: provider.name(),
-            cwd: header::abbreviate_home(&cwd),
-            session: header::short_id(&session_id),
-            saved: true,
-            tips: vec![
-                ("/help", "命令一览"),
-                ("/init", "初始化"),
-                ("/compact", "压缩上下文"),
-            ],
-        };
-        #[cfg(feature = "tui")]
-        if fancy {
-            for line in whale::whale_banner(mode, cols) {
-                println!("{line}");
-            }
-        }
-        for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
-            println!("{line}");
-        }
-        if let Some(s) = status_line(cli.no_permission, cli.no_economy) {
-            println!("{}", color::paint(mode, color::Token::Warning, &s));
-        }
-        if models_fell_back {
-            println!(
-                "{}",
-                color::paint(mode, color::Token::Dim, "· 模型列表拉取失败，使用内置列表")
-            );
-        }
-        println!();
-    }
 
     #[cfg(feature = "tui")]
     whale::swim_once(mode, cols).await;
@@ -2996,6 +3157,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown provider"), "{err}");
+    }
+
+    #[test]
+    fn interactive_requires_both_ends_to_be_a_tty() {
+        // `&&`, not `||`. Getting this wrong is P1: with stdout a tty and stdin a
+        // file (`orcarein < prompts.txt`), a `||` would send us down the prompt
+        // path, `read_secret_line` would read the FIRST LINE OF THE SCRIPT as the
+        // API key, and an offline verify (Inconclusive) would save it to
+        // secrets.toml.
+        assert!(super::interactive(true, true));
+        assert!(!super::interactive(false, true));
+        assert!(!super::interactive(true, false));
+        assert!(!super::interactive(false, false));
+    }
+
+    #[test]
+    fn first_run_decision_prompts_only_when_interactive_and_keyless() {
+        use super::FirstRun;
+        assert_eq!(
+            super::first_run_decision(Some("sk-abc"), true),
+            FirstRun::Proceed
+        );
+        assert_eq!(
+            super::first_run_decision(Some("sk-abc"), false),
+            FirstRun::Proceed
+        );
+        assert_eq!(super::first_run_decision(None, true), FirstRun::Prompt);
+        assert_eq!(super::first_run_decision(None, false), FirstRun::Bail);
+        // A blank key is no key (mirrors SecretStore::resolve's trim).
+        assert_eq!(
+            super::first_run_decision(Some("   "), true),
+            FirstRun::Prompt
+        );
+        assert_eq!(
+            super::first_run_decision(Some("   "), false),
+            FirstRun::Bail
+        );
+    }
+
+    #[test]
+    fn signup_url_maps_known_providers() {
+        assert_eq!(
+            super::signup_url("deepseek"),
+            Some("https://platform.deepseek.com/api_keys")
+        );
+        assert_eq!(
+            super::signup_url("openai"),
+            Some("https://platform.openai.com/api-keys")
+        );
+        assert_eq!(super::signup_url("mystery"), None);
     }
 
     #[test]
