@@ -36,6 +36,12 @@ mod modal;
 mod overlay;
 #[cfg(feature = "tui")]
 mod syntax;
+// A terminal-UI ornament. `whale` itself needs no ratatui — it is escape codes,
+// not widgets — but the lean `--no-default-features` build reports `fancy=false`
+// (see `header_env`), so a whale could never surface there. Gated to keep the
+// lean binary honest rather than carrying code that can't run.
+#[cfg(feature = "tui")]
+mod whale;
 
 /// Demo pins watched by `hw monitor` when `--pins` is omitted.
 #[cfg(feature = "hardware")]
@@ -67,6 +73,8 @@ enum CommandAction {
     SwitchSession(String),
     /// `/new` — start a fresh session (new id/file, empty history) at runtime.
     NewSession,
+    /// `/orca` — play the swimming-whale animation once (cosmetic).
+    Swim,
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -1385,6 +1393,12 @@ async fn main() -> Result<()> {
                 ("/compact", "压缩上下文"),
             ],
         };
+        #[cfg(feature = "tui")]
+        if fancy {
+            for line in whale::whale_banner(mode, cols) {
+                println!("{line}");
+            }
+        }
         for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
             println!("{line}");
         }
@@ -1399,6 +1413,9 @@ async fn main() -> Result<()> {
         }
         println!();
     }
+
+    #[cfg(feature = "tui")]
+    whale::swim_once(mode, cols).await;
 
     // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
     // that supplies an interactive permission policy and a printing event sink.
@@ -1577,6 +1594,16 @@ async fn main() -> Result<()> {
                     created_at_ms = created;
                     last_prompt_tokens = 0;
                     println!("已新建 session {session_id}（空白对话）。");
+                    continue;
+                }
+                CommandAction::Swim => {
+                    // Fresh width, not the one captured at startup: after a
+                    // resize, frames built for the old width wrap, and the
+                    // animator's relative cursor moves would chew the scrollback.
+                    #[cfg(feature = "tui")]
+                    whale::swim_once(mode, overlay::term_cols()).await;
+                    #[cfg(not(feature = "tui"))]
+                    println!("此构建未编译 tui，鲸鱼游不动。");
                     continue;
                 }
             }
@@ -2431,7 +2458,7 @@ fn render_help(mode: color::ColorMode) -> String {
         [("/history", "浏览记录"), ("/model", "切换模型")],
         [("/sessions", "列出会话"), ("/resume", "切换会话")],
         [("/new", "新建会话"), ("/skills", "列出可用 skill")],
-        [("/exit", "退出会话"), ("", "")],
+        [("/exit", "退出会话"), ("/orca", "召唤鲸鱼")],
     ];
     const LCMD: usize = 11; // left command field width
     const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
@@ -2575,6 +2602,7 @@ fn handle_command(
             }
         }
         "new" => CommandAction::NewSession,
+        "orca" => CommandAction::Swim,
         "history" => {
             #[cfg(feature = "tui")]
             {
@@ -2872,6 +2900,7 @@ mod tests {
             "/resume",
             "/new",
             "/skills",
+            "/orca",
         ] {
             assert!(out.contains(cmd), "help missing {cmd}");
         }
@@ -2880,7 +2909,7 @@ mod tests {
             .lines()
             .skip(2) // title + rule
             .zip([
-                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/skills",
+                "/init", "/compact", "/usage", "/show", "/model", "/resume", "/skills", "/orca",
             ])
         {
             let pos = line.find(rcmd).expect("right command present");

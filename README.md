@@ -239,7 +239,7 @@ orcarein session list|resume|delete  # manage saved sessions
 
 **Slash commands** (in the REPL): `/help`, `/clear`, `/model`, `/tools`,
 `/skills`, `/compact`, `/usage`, `/save`, `/show`, `/history`, `/init`,
-`/sessions`, `/resume`, `/new`, `/exit`.
+`/sessions`, `/resume`, `/new`, `/orca`, `/exit`.
 
 Environment: `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`, `ORCAREIN_PROVIDER`,
 `RUST_LOG` (e.g. `RUST_LOG=orcarein=debug` for diagnostics).
