@@ -21,7 +21,7 @@ use crate::{Message, ToolDefinition};
 
 const API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const MODELS_URL: &str = "https://api.openai.com/v1/models";
-const DEFAULT_MODEL: &str = "gpt-4o-mini";
+pub(crate) const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
 pub struct OpenAIProvider {
     client: reqwest::Client,

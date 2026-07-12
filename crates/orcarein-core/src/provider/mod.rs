@@ -90,6 +90,20 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// The model a provider falls back to when neither the CLI nor `config.toml`
+/// names one — resolvable **without an API key**, because the startup header
+/// must print the model name before the provider (and therefore the key) exists.
+///
+/// Delegates to each impl's own `DEFAULT_MODEL` so there is exactly one source
+/// of truth; adding a provider means adding an arm here and nowhere else.
+pub fn default_model_for(provider: &str) -> Option<&'static str> {
+    match provider {
+        "deepseek" => Some(deepseek::DEFAULT_MODEL),
+        "openai" => Some(openai::DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +125,29 @@ mod tests {
         let s = format!("{:?}", StreamEvent::Content("hi".into()));
         assert!(s.contains("Content"));
         assert!(s.contains("hi"));
+    }
+
+    #[test]
+    fn default_model_for_known_providers() {
+        assert_eq!(default_model_for("deepseek"), Some(deepseek::DEFAULT_MODEL));
+        assert_eq!(default_model_for("openai"), Some(openai::DEFAULT_MODEL));
+        assert_eq!(default_model_for("mystery"), None);
+    }
+
+    /// A guard, NOT a drift test: `default_model_for` and `Provider::default_model`
+    /// return the same constant today, so they cannot disagree. What this pins is
+    /// the *contract* — if someone later makes `default_model()` dynamic (per-key,
+    /// fetched, whatever), this fails and forces them to decide what the keyless
+    /// startup header should show.
+    #[test]
+    fn trait_default_model_still_returns_the_constant() {
+        assert_eq!(
+            DeepSeekProvider::new("k").default_model(),
+            default_model_for("deepseek").unwrap()
+        );
+        assert_eq!(
+            OpenAIProvider::new("k").default_model(),
+            default_model_for("openai").unwrap()
+        );
     }
 }

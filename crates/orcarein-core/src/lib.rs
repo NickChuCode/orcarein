@@ -39,7 +39,8 @@ pub use permission::{
     Action, Decision, PermissionRequest, PermissionRule, PermissionStore, RuleAction, Ruleset,
 };
 pub use provider::{
-    ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider, RetryPolicy, StreamEvent,
+    default_model_for, ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider,
+    RetryPolicy, StreamEvent,
 };
 pub use session::{Session, SessionError, SessionStore, SessionSummary, TokenUsage};
 pub use skill::{discover_skills, find_skills_dir, skills_index, skills_list, Skill};

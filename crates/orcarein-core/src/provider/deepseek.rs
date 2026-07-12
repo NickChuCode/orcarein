@@ -15,7 +15,7 @@ use crate::{Message, ToolDefinition};
 
 const API_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 const MODELS_URL: &str = "https://api.deepseek.com/v1/models";
-const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+pub(crate) const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 pub struct DeepSeekProvider {
     client: reqwest::Client,

@@ -205,6 +205,22 @@ pub fn env_key_var(provider: &str) -> Option<&'static str> {
     }
 }
 
+/// env-first key resolution, as a pure function so it can be tested without
+/// touching the process environment (`std::env::set_var` races across cargo's
+/// test threads — the same reason the bin's `env_overrides_stored` is pure).
+///
+/// Blank is treated as unset. A whitespace-only env var must NOT beat a stored
+/// key, or the user gets prompted to log in on every start while secrets.toml
+/// already holds the key they just saved.
+fn effective_key(env_val: Option<&str>, stored: Option<&str>) -> Option<String> {
+    if let Some(v) = env_val {
+        if !v.trim().is_empty() {
+            return Some(v.to_owned());
+        }
+    }
+    stored.map(str::to_owned)
+}
+
 /// API keys persisted to `secrets.toml`, keyed by provider id.
 ///
 /// Kept separate from [`Config`] so the secret file can be locked down
@@ -252,14 +268,8 @@ impl SecretStore {
     /// Resolves the effective API key for `provider`: the environment
     /// variable wins, then the stored secret. `None` if neither is set.
     pub fn resolve(&self, provider: &str) -> Option<String> {
-        if let Some(var) = env_key_var(provider) {
-            if let Ok(val) = std::env::var(var) {
-                if !val.is_empty() {
-                    return Some(val);
-                }
-            }
-        }
-        self.get(provider).map(str::to_owned)
+        let env_val = env_key_var(provider).and_then(|var| std::env::var(var).ok());
+        effective_key(env_val.as_deref(), self.get(provider))
     }
 
     /// Saves to the default path.
@@ -474,6 +484,32 @@ TOKEN = "x"
         let empty = Config::default();
         assert!(empty.permissions.is_none());
         assert!(!toml::to_string(&empty).unwrap().contains("permissions"));
+    }
+
+    #[test]
+    fn effective_key_treats_a_blank_env_var_as_unset() {
+        // The deadlock this prevents: with DEEPSEEK_API_KEY=" ", the env value used
+        // to win over the stored key forever, so the REPL would demand a fresh login
+        // on every single start while secrets.toml already held a perfectly good key.
+        assert_eq!(
+            effective_key(Some(" "), Some("stored")),
+            Some("stored".to_owned())
+        );
+        assert_eq!(
+            effective_key(Some(""), Some("stored")),
+            Some("stored".to_owned())
+        );
+        assert_eq!(
+            effective_key(Some("env"), Some("stored")),
+            Some("env".to_owned())
+        );
+        assert_eq!(
+            effective_key(None, Some("stored")),
+            Some("stored".to_owned())
+        );
+        assert_eq!(effective_key(Some("env"), None), Some("env".to_owned()));
+        assert_eq!(effective_key(Some("  "), None), None);
+        assert_eq!(effective_key(None, None), None);
     }
 
     #[test]
