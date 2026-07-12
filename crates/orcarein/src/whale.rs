@@ -75,9 +75,15 @@ fn to_ansi256(r: u8, g: u8, b: u8) -> u8 {
         }
         best
     }
+    /// Weighted, not plain Euclidean. Raw RGB distance is a poor perceptual
+    /// metric: it puts the body's #33437A on grey 239 over cube 60 by a 3.5%
+    /// margin — brightness preserved, brand blue thrown away, whale rendered as
+    /// a grey blob with blue edges. Weighting the channels the way the eye does
+    /// (green most, red least) keeps every body color in the cube and still
+    /// sends the belly to the grey ramp, which is the whole point of having one.
     fn dist(a: (i32, i32, i32), b: (i32, i32, i32)) -> i32 {
         let (dr, dg, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
-        dr * dr + dg * dg + db * db
+        2 * dr * dr + 4 * dg * dg + 3 * db * db
     }
 
     let target = (r as i32, g as i32, b as i32);
@@ -409,6 +415,24 @@ mod tests {
         let (r, g, b) = WCol::Belly.rgb();
         assert_eq!((r, g, b), (234, 240, 250));
         assert_eq!(to_ansi256(r, g, b), 255);
+    }
+
+    #[test]
+    fn ansi256_tiers_for_every_whale_color() {
+        // Pin all six, not just the interesting ones. An earlier cut asserted
+        // only Brand/Accent/Belly and shipped a `to_ansi256` that quietly sent
+        // BodyBase — the whale's entire torso — to grey 239.
+        for (c, want) in [
+            (WCol::BodyBase, 60),
+            (WCol::BodyTop, 104),
+            (WCol::BodySide, 61),
+            (WCol::Belly, 255),
+            (WCol::Grey, 110),
+            (WCol::Eye, 44),
+        ] {
+            let (r, g, b) = c.rgb();
+            assert_eq!(to_ansi256(r, g, b), want, "{c:?}");
+        }
     }
 
     #[test]
