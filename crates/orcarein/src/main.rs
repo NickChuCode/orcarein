@@ -231,6 +231,18 @@ struct Resolved {
     hooks: HookSet,
 }
 
+/// The single source of truth for "is this a provider we support".
+///
+/// This message used to exist in more than one place (`build_provider`, and
+/// `run_login` via `env_key_var`'s contract). Adding a provider must touch one
+/// arm, not hunt for copies.
+fn validate_provider(name: &str) -> Result<()> {
+    match name {
+        "deepseek" | "openai" => Ok(()),
+        other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
+    }
+}
+
 /// Builds a `Provider` from a resolved name + optional API key. Validates the
 /// provider name first so a missing key never masks a typo'd provider.
 fn build_provider(
@@ -238,10 +250,7 @@ fn build_provider(
     api_key: Option<String>,
     retry: RetryPolicy,
 ) -> Result<Arc<dyn Provider>> {
-    match name {
-        "deepseek" | "openai" => {}
-        other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
-    }
+    validate_provider(name)?;
     let var = env_key_var(name).expect("provider validated above");
     let key = api_key.with_context(|| {
         format!(
@@ -465,9 +474,8 @@ async fn run_login(cli: &Cli, provider_arg: Option<String>, no_verify: bool) -> 
         .or_else(|| non_blank(config.provider.clone()))
         .unwrap_or_else(|| "deepseek".to_owned());
 
-    // Validate (env_key_var is Some only for known providers).
-    let var = env_key_var(&provider)
-        .with_context(|| format!("unknown provider: '{provider}' (expected: deepseek | openai)"))?;
+    validate_provider(&provider)?;
+    let var = env_key_var(&provider).expect("provider validated above");
 
     // Read the key (masked on a tty, plain when piped / no-tui).
     let key = read_secret_line(&format!("Enter API key for {provider}: "))
@@ -2864,6 +2872,39 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use orcarein_core::Message;
+
+    #[test]
+    fn build_provider_without_a_key_names_login_and_the_env_var() {
+        // P5: the headless (`run` / `issue`) no-key error is a contract. It had
+        // zero coverage — "the existing tests still pass" proved nothing about it.
+        let err = super::build_provider("deepseek", None, RetryPolicy::from_config(Some(0)))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("no API key"), "{err}");
+        assert!(err.contains("orcarein login"), "{err}");
+        assert!(err.contains("DEEPSEEK_API_KEY"), "{err}");
+    }
+
+    #[test]
+    fn build_provider_rejects_an_unknown_provider_before_asking_for_a_key() {
+        // Order matters: a typo'd provider must not be masked by a missing key.
+        let err = super::build_provider("mystery", None, RetryPolicy::from_config(Some(0)))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("unknown provider"), "{err}");
+    }
+
+    #[test]
+    fn validate_provider_accepts_known_and_rejects_unknown() {
+        assert!(super::validate_provider("deepseek").is_ok());
+        assert!(super::validate_provider("openai").is_ok());
+        let err = super::validate_provider("anthropic")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown provider"), "{err}");
+    }
 
     #[test]
     fn project_memory_block_appends_when_present_and_skips_when_absent() {
