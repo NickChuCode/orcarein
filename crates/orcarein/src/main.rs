@@ -440,6 +440,19 @@ fn secret_key_action(
         // MUST precede the Char(c) arm below, or Ctrl+C reads as the letter 'c'.
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => SecretAction::Cancel,
         KeyCode::Backspace => SecretAction::Pop,
+        // Other control chords (Ctrl+U "kill line", Ctrl+D, Ctrl+W, …) are reflexes
+        // people bring from their shell. Without this they'd land in the Char(c) arm
+        // below and quietly push a letter into the key — the exact "your key is bad,
+        // no it isn't" failure this whole cut exists to eliminate.
+        //
+        // The ALT exclusion is load-bearing: on Windows AltGr reports as CTRL+ALT, so
+        // a German/French keyboard types '@' and '\' with both modifiers set. Dropping
+        // every CONTROL'd char would make those keyboards unable to enter an API key.
+        KeyCode::Char(_)
+            if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
+        {
+            SecretAction::Ignore
+        }
         KeyCode::Char(c) => SecretAction::Push(c),
         _ => SecretAction::Ignore,
     }
@@ -665,6 +678,15 @@ fn save_key(provider: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the first-run login learned about the model list while verifying the key.
+#[derive(Debug)]
+enum ModelsHint {
+    /// `/v1/models` succeeded — reuse this list, don't hit the network again.
+    Fetched(Vec<String>),
+    /// The verify call couldn't reach the API. Don't waste another 2s timeout on it.
+    Offline,
+}
+
 /// The first-run inline login: guide, read the key, verify, save — then hand the
 /// key back so startup can continue into the REPL.
 ///
@@ -679,7 +701,7 @@ fn save_key(provider: &str, key: &str) -> Result<()> {
 /// No `--no-verify` here on purpose: the first run is exactly when a bad key is
 /// most likely and most confusing. Being offline is already handled (Inconclusive
 /// saves the key with a warning).
-async fn first_run_login(provider: &str) -> Result<Option<(String, Option<Vec<String>>)>> {
+async fn first_run_login(provider: &str) -> Result<Option<(String, ModelsHint)>> {
     const ATTEMPTS: usize = 3;
 
     println!();
@@ -687,7 +709,7 @@ async fn first_run_login(provider: &str) -> Result<Option<(String, Option<Vec<St
     if let Some(url) = signup_url(provider) {
         println!("获取：{url}");
     }
-    println!("直接回车可跳过并退出。");
+    println!("直接回车（或 Esc / Ctrl+C）可跳过并退出。");
     println!();
 
     for attempt in 1..=ATTEMPTS {
@@ -715,14 +737,18 @@ async fn first_run_login(provider: &str) -> Result<Option<(String, Option<Vec<St
             VerifyOutcome::Verified => {
                 println!("✓ key verified");
                 save_key(provider, &key)?;
-                return Ok(Some((key, models)));
+                let hint = match models {
+                    Some(v) => ModelsHint::Fetched(v),
+                    None => ModelsHint::Offline,
+                };
+                return Ok(Some((key, hint)));
             }
             VerifyOutcome::Inconclusive => {
                 eprintln!(
                     "could not verify (offline?), saved anyway — run 'orcarein doctor' later"
                 );
                 save_key(provider, &key)?;
-                return Ok(Some((key, None)));
+                return Ok(Some((key, ModelsHint::Offline)));
             }
             VerifyOutcome::Rejected => {
                 // NOT saved (spec P2). Retry in place: a mis-pasted key is the
@@ -1606,10 +1632,10 @@ async fn main() -> Result<()> {
 
     // The key gate. The judgment (`first_run`) already ran above, before the
     // box — a `Bail` returned from there, so only `Proceed`/`Prompt` reach here.
-    let (api_key, prefetched_models) = match first_run {
+    let (api_key, models_hint) = match first_run {
         FirstRun::Proceed => (stored, None),
         FirstRun::Prompt => match first_run_login(&provider_name).await? {
-            Some((key, models)) => (Some(key), models),
+            Some((key, hint)) => (Some(key), Some(hint)),
             None => {
                 // The user declined. Not an error — say how to come back, exit 0.
                 let var = env_key_var(&provider_name).expect("provider validated above");
@@ -1620,7 +1646,12 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         },
-        FirstRun::Bail => unreachable!("Bail already returned above, before the welcome box"),
+        // Reachable only if a future keyless provider makes `build_provider(_,
+        // None, _)` succeed instead of erroring above — see the comment on that
+        // early-return. Falling through to the normal provider build below (with
+        // no prefetched model list) is the correct behavior for that day, not a
+        // bug to guard against.
+        FirstRun::Bail => (None, None),
     };
     let provider = build_provider(&provider_name, api_key, retry)?;
 
@@ -1631,10 +1662,13 @@ async fn main() -> Result<()> {
     // startup. NOT tui-gated — validation reads it on the non-tui path too.
     //
     // Reuse the list the login's /v1/models call already fetched; only hit the
-    // network again when we don't have one.
-    let (mut model_choices, models_fell_back) = match prefetched_models {
-        Some(v) if !v.is_empty() => (v, false),
-        _ => {
+    // network again when we don't have one. When the login already learned we're
+    // offline, don't spend another 2s timeout re-confirming it, and don't repeat
+    // the "couldn't fetch" news — the user was just told.
+    let (mut model_choices, models_fell_back) = match models_hint {
+        Some(ModelsHint::Fetched(v)) if !v.is_empty() => (v, false),
+        Some(ModelsHint::Offline) => (fallback_models(provider.name(), &model), false),
+        None | Some(ModelsHint::Fetched(_)) => {
             use std::time::Duration;
             match tokio::time::timeout(Duration::from_secs(2), provider.list_models()).await {
                 Ok(Ok(v)) if !v.is_empty() => (v, false),
@@ -4069,6 +4103,32 @@ mod tests {
             assert_eq!(
                 secret_key_action(KeyEventKind::Press, KeyCode::Left, KeyModifiers::NONE),
                 SecretAction::Ignore
+            );
+        }
+
+        #[test]
+        fn other_control_chords_are_ignored_not_typed() {
+            // Ctrl+U is "kill line" muscle memory; without the guard it pushed a 'u'.
+            for c in ['u', 'd', 'a', 'w'] {
+                assert_eq!(
+                    secret_key_action(KeyEventKind::Press, KeyCode::Char(c), KeyModifiers::CONTROL),
+                    SecretAction::Ignore,
+                    "Ctrl+{c} must not type a character"
+                );
+            }
+        }
+
+        #[test]
+        fn altgr_chars_still_type() {
+            // Windows reports AltGr as CTRL+ALT. A German keyboard types '@' that way,
+            // and API keys contain such characters.
+            assert_eq!(
+                secret_key_action(
+                    KeyEventKind::Press,
+                    KeyCode::Char('@'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                ),
+                SecretAction::Push('@')
             );
         }
     }
