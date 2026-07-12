@@ -231,6 +231,22 @@ struct Resolved {
     hooks: HookSet,
 }
 
+/// Everything the CLI/env/config chain yields that does **not** need an API key.
+///
+/// This split is the whole point of the cut: `resolve()` used to build the
+/// `Provider` in the middle of settings resolution, so a missing key killed the
+/// entire startup prologue — including the welcome box we now want to draw
+/// *before* asking for a key.
+struct Settings {
+    provider: String,
+    model: String,
+    system_prompt: String,
+    tools_allowlist: Option<Vec<String>>,
+    permission_rules: Vec<PermissionRule>,
+    hooks: HookSet,
+    retry: RetryPolicy,
+}
+
 /// The single source of truth for "is this a provider we support".
 ///
 /// This message used to exist in more than one place (`build_provider`, and
@@ -465,23 +481,28 @@ fn cap_chars(s: &str, max_bytes: usize) -> String {
     s[..end].to_string()
 }
 
-/// Resolves effective settings from the precedence chain
+/// Resolves everything that does not need an API key, from the precedence chain
 /// CLI flag > env var > `config.toml` > built-in default.
-fn resolve(cli: &Cli) -> Result<Resolved> {
+fn resolve_settings(cli: &Cli) -> Result<Settings> {
     let config = Config::load().context("failed to load config.toml")?;
 
-    let provider_name = non_blank(cli.provider.clone())
+    let provider = non_blank(cli.provider.clone())
         .or_else(|| non_blank(std::env::var("ORCAREIN_PROVIDER").ok()))
         .or_else(|| non_blank(config.provider.clone()))
         .unwrap_or_else(|| "deepseek".to_owned());
+    // Validate the name up front so a missing key never masks a typo'd provider
+    // (and so `default_model_for` below is guaranteed to have an arm).
+    validate_provider(&provider)?;
 
-    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
     let retry = RetryPolicy::from_config(config.retry.as_ref().and_then(|r| r.max_retries));
-    let provider = build_provider(&provider_name, secrets.resolve(&provider_name), retry)?;
 
     let model = non_blank(cli.model.clone())
         .or_else(|| non_blank(config.model.clone()))
-        .unwrap_or_else(|| provider.default_model().to_owned());
+        .unwrap_or_else(|| {
+            orcarein_core::default_model_for(&provider)
+                .expect("provider validated above")
+                .to_owned()
+        });
 
     let tools_allowlist = cli.tools.clone().or_else(|| config.tools_allowlist.clone());
 
@@ -506,13 +527,31 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         .map(HookSet::from_config)
         .unwrap_or_default();
 
-    Ok(Resolved {
+    Ok(Settings {
         provider,
         model,
         system_prompt,
         tools_allowlist,
         permission_rules,
         hooks,
+        retry,
+    })
+}
+
+/// Settings **plus** a live `Provider` — i.e. the headless path, which must have
+/// an API key or fail. `run` / `issue` keep using this; only the REPL splits the
+/// two so it can ask for a key after drawing the welcome box.
+fn resolve(cli: &Cli) -> Result<Resolved> {
+    let s = resolve_settings(cli)?;
+    let secrets = SecretStore::load().context("failed to load secrets.toml")?;
+    let provider = build_provider(&s.provider, secrets.resolve(&s.provider), s.retry)?;
+    Ok(Resolved {
+        provider,
+        model: s.model,
+        system_prompt: s.system_prompt,
+        tools_allowlist: s.tools_allowlist,
+        permission_rules: s.permission_rules,
+        hooks: s.hooks,
     })
 }
 
