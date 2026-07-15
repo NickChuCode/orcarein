@@ -98,6 +98,23 @@ impl Session {
         self.messages.pop()
     }
 
+    /// Replaces the system prompt in place. Rewrites BOTH `messages[0]` (what
+    /// the model sees now) AND the `system` field (what `clear()` re-seats), so
+    /// a later `/clear` cannot silently revert it. No-op if `messages[0]` is
+    /// absent or not a system message — a resumed/corrupt session must never
+    /// panic (Session's Deserialize does not validate).
+    pub fn set_system_prompt(&mut self, s: impl Into<String>) {
+        let msg = Message::system(s);
+        self.system = msg.clone();
+        match self.messages.first_mut() {
+            Some(first) if first.role == "system" => *first = msg,
+            // messages[0] absent or not a system message (corrupt/hand-edited
+            // resumed session) — no-op rather than panic. `system` is already
+            // updated above, so a later `clear()` still recovers correctly.
+            _ => {}
+        }
+    }
+
     /// Resets the conversation to just the system prompt.
     /// Cumulative usage is preserved across clears — it counts spend, not
     /// active context.
@@ -559,5 +576,25 @@ mod tests {
         s.push_user("x".repeat(200));
         assert!(summarize_title(&s).ends_with('…'));
         assert!(summarize_title(&s).chars().count() <= 61);
+    }
+
+    #[test]
+    fn set_system_prompt_survives_clear() {
+        let mut s = Session::new("old");
+        s.push_user("hi");
+        s.set_system_prompt("new");
+        assert_eq!(s.messages()[0].content, "new");
+        s.clear(); // re-seats from the `system` field, not messages[0]
+        assert_eq!(s.messages()[0].content, "new");
+    }
+
+    #[test]
+    fn set_system_prompt_noop_on_empty_messages() {
+        // A corrupt/hand-edited resumed session must not panic.
+        let mut s = Session::new("x");
+        s.messages.clear(); // simulate corruption (messages[0] absent)
+        s.set_system_prompt("new"); // must not panic
+        // system field is still updated so a later clear() recovers.
+        assert_eq!(s.system.content, "new");
     }
 }
