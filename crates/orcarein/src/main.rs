@@ -243,10 +243,9 @@ struct Resolved {
     /// no `[hooks]` section.
     hooks: HookSet,
     /// Effective session permission mode: `--permission-mode` >
-    /// `--no-permission` (yolo) > `[permissions] mode` > default.
-    // Not read via `run`/`issue` yet (their `Resolved { .. }` destructures
-    // don't name it) — a follow-up cut wires it into a runtime `SharedMode`.
-    #[allow(dead_code)]
+    /// `--no-permission` (yolo) > `[permissions] mode` > default. Read by the
+    /// REPL (wrapped in a runtime `SharedMode`) and by headless `run`
+    /// (`run_once`, one-shot); `issue` never applies a mode.
     perm_mode: PermissionMode,
 }
 
@@ -3229,6 +3228,7 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         provider,
         model,
         hooks,
+        permission_rules,
         ..
     } = resolve(cli)?;
 
@@ -3262,15 +3262,17 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
                     "write_file",
                 ]))
             });
+        let rules_for_child = permission_rules.clone();
+        let ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync> =
+            Arc::new(move || Ruleset::from_config(rules_for_child.clone()));
         register_subagent(
             &mut registry,
             Arc::clone(&provider),
             Some(child_tools),
             model.clone(),
             policy_factory,
-            // Default placeholders (issue mode has no `permission_rules`
-            // either) — wired to the child properly in a later cut.
-            Arc::new(Ruleset::with_defaults),
+            ruleset_factory,
+            // issue never applies a permission mode — see `.with_ruleset` below.
             SharedMode::new(PermissionMode::Default),
             hooks.clone(),
         );
@@ -3282,6 +3284,7 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
         .with_max_iterations(ISSUE_MAX_ITERATIONS)
+        .with_ruleset(Ruleset::from_config(permission_rules))
         .with_hooks(hooks);
 
     // 6. Let the agent work the issue. The Risky tools it may use are gated to
