@@ -318,7 +318,10 @@ mod tests {
 
     #[test]
     fn mode_from_str_case_insensitive() {
-        assert_eq!(PermissionMode::from_str("plan").unwrap(), PermissionMode::Plan);
+        assert_eq!(
+            PermissionMode::from_str("plan").unwrap(),
+            PermissionMode::Plan
+        );
         assert_eq!(
             PermissionMode::from_str("acceptEdits").unwrap(),
             PermissionMode::AcceptEdits

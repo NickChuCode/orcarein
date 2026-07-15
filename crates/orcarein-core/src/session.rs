@@ -594,7 +594,7 @@ mod tests {
         let mut s = Session::new("x");
         s.messages.clear(); // simulate corruption (messages[0] absent)
         s.set_system_prompt("new"); // must not panic
-        // system field is still updated so a later clear() recovers.
+                                    // system field is still updated so a later clear() recovers.
         assert_eq!(s.system.content, "new");
     }
 }
