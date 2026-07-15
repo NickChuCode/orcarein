@@ -1718,7 +1718,7 @@ async fn main() -> Result<()> {
         for line in header_ansi(&render_header(&hm, cols, fancy), mode) {
             println!("{line}");
         }
-        if let Some(s) = status_line(cli.no_permission, cli.no_economy) {
+        if let Some(s) = status_line(perm_mode.get(), cli.no_economy) {
             println!("{}", color::paint(mode, color::Token::Warning, &s));
         }
     }

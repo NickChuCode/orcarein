@@ -11,6 +11,7 @@
 //! slim title bar shared by overlay surfaces lives here too.
 
 use crate::color::{self, ColorMode, Token};
+use orcarein_core::PermissionMode;
 use unicode_width::UnicodeWidthStr;
 
 /// Box-drawing width thresholds.
@@ -79,13 +80,16 @@ pub fn truncate_to_width(s: &str, budget: usize) -> String {
 }
 
 /// A single combined `!` warning line for non-default states, or `None`.
-pub fn status_line(no_permission: bool, economy_off: bool) -> Option<String> {
+pub fn status_line(perm_mode: PermissionMode, economy_off: bool) -> Option<String> {
     let mut parts = Vec::new();
-    if no_permission {
-        parts.push("权限已禁用");
+    match perm_mode {
+        PermissionMode::Default => {}
+        PermissionMode::AcceptEdits => parts.push("档位 acceptEdits".to_string()),
+        PermissionMode::Plan => parts.push("档位 plan（只读）".to_string()),
+        PermissionMode::Yolo => parts.push("YOLO：无确认、无回滚网".to_string()),
     }
     if economy_off {
-        parts.push("缓存节流 OFF");
+        parts.push("缓存节流 OFF".to_string());
     }
     if parts.is_empty() {
         None
@@ -526,12 +530,38 @@ mod tests {
 
     #[test]
     fn status_line_only_on_nondefault() {
-        assert_eq!(status_line(false, false), None);
-        assert_eq!(status_line(true, false).unwrap(), "! 权限已禁用");
-        assert_eq!(status_line(false, true).unwrap(), "! 缓存节流 OFF");
+        assert_eq!(status_line(PermissionMode::Default, false), None);
         assert_eq!(
-            status_line(true, true).unwrap(),
-            "! 权限已禁用 · 缓存节流 OFF"
+            status_line(PermissionMode::Default, true).unwrap(),
+            "! 缓存节流 OFF"
+        );
+        assert_eq!(
+            status_line(PermissionMode::Yolo, true).unwrap(),
+            "! YOLO：无确认、无回滚网 · 缓存节流 OFF"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_accept_edits_mode() {
+        assert_eq!(
+            status_line(PermissionMode::AcceptEdits, false).unwrap(),
+            "! 档位 acceptEdits"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_plan_mode() {
+        assert_eq!(
+            status_line(PermissionMode::Plan, false).unwrap(),
+            "! 档位 plan（只读）"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_yolo_mode() {
+        assert_eq!(
+            status_line(PermissionMode::Yolo, false).unwrap(),
+            "! YOLO：无确认、无回滚网"
         );
     }
 
