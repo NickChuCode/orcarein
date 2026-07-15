@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::hook::HooksConfig;
-use crate::permission::PermissionRule;
+use crate::permission::{PermissionMode, PermissionRule};
 
 /// Errors from loading or saving configuration / secrets.
 #[derive(Debug, thiserror::Error)]
@@ -40,10 +40,19 @@ pub enum ConfigError {
 
     #[error("could not locate a config directory for this platform")]
     NoConfigDir,
+
+    #[error("invalid config value: {0}")]
+    InvalidValue(String),
 }
 
 /// The set of keys the `config get/set/list` subcommand understands.
-pub const CONFIG_KEYS: &[&str] = &["provider", "model", "tools", "system_prompt"];
+pub const CONFIG_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "tools",
+    "system_prompt",
+    "permission_mode",
+];
 
 /// Non-secret user preferences, round-tripped to `config.toml`.
 ///
@@ -109,6 +118,10 @@ pub struct RetryConfig {
 pub struct PermissionConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<PermissionRule>,
+    /// Session default permission mode. `None` → fall through to CLI/default.
+    /// Option + skip_serializing_if so routine config rewrites never inject it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PermissionMode>,
 }
 
 /// The qualifier/org/app triple identifying OrcaRein's config directory.
@@ -163,6 +176,11 @@ impl Config {
             "model" => Ok(self.model.clone()),
             "system_prompt" => Ok(self.system_prompt.clone()),
             "tools" => Ok(self.tools_allowlist.as_ref().map(|v| v.join(","))),
+            "permission_mode" => Ok(self
+                .permissions
+                .as_ref()
+                .and_then(|p| p.mode)
+                .map(|m| m.to_string())),
             other => Err(ConfigError::UnknownKey(other.to_owned())),
         }
     }
@@ -181,6 +199,12 @@ impl Config {
                     .filter(|s| !s.is_empty())
                     .collect();
                 self.tools_allowlist = Some(list);
+            }
+            "permission_mode" => {
+                let m: PermissionMode = value.parse().map_err(ConfigError::InvalidValue)?;
+                self.permissions
+                    .get_or_insert_with(PermissionConfig::default)
+                    .mode = Some(m);
             }
             other => return Err(ConfigError::UnknownKey(other.to_owned())),
         }
@@ -510,6 +534,34 @@ TOKEN = "x"
         assert_eq!(effective_key(Some("env"), None), Some("env".to_owned()));
         assert_eq!(effective_key(Some("  "), None), None);
         assert_eq!(effective_key(None, None), None);
+    }
+
+    #[test]
+    fn permission_mode_roundtrips_via_set_get() {
+        let mut c = Config::default();
+        c.set("permission_mode", "plan").unwrap();
+        assert_eq!(c.get("permission_mode").unwrap().as_deref(), Some("plan"));
+        assert!(c.set("permission_mode", "nope").is_err());
+    }
+
+    #[test]
+    fn mode_serialization_is_opt_in() {
+        // Absent mode must NOT be written (routine rewrites like persist_bash_rule
+        // shouldn't inject `mode = "default"`); a set mode MUST round-trip.
+        let mut c = Config::default();
+        c.set("permission_mode", "plan").unwrap(); // permissions section now Some
+        let toml = toml::to_string_pretty(&c).unwrap();
+        assert!(
+            toml.contains("mode = \"plan\""),
+            "set mode should serialize: {toml}"
+        );
+
+        let mut c2 = Config::default();
+        // Deliberately not "model": that key's serialized form ("model = ...")
+        // contains "mode" as a substring and would false-positive below.
+        c2.set("provider", "x").unwrap(); // unrelated key; mode still None
+        let toml2 = toml::to_string_pretty(&c2).unwrap();
+        assert!(!toml2.contains("mode"), "absent mode leaked: {toml2}");
     }
 
     #[test]
