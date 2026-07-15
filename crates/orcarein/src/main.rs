@@ -2474,6 +2474,7 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         tools_allowlist,
         permission_rules,
         hooks,
+        perm_mode,
         ..
     } = resolved;
 
@@ -2509,26 +2510,27 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
                     Box::new(AllowlistPolicy::deny_all())
                 }
             });
+        let rules_for_child = permission_rules.clone();
+        let ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync> =
+            Arc::new(move || Ruleset::from_config(rules_for_child.clone()));
         register_subagent(
             &mut registry,
             Arc::clone(&provider),
             tools_allowlist.clone(),
             model.clone(),
             policy_factory,
-            // Default placeholders — this headless run's own ruleset/mode are
-            // wired to the child in a later cut.
-            Arc::new(Ruleset::with_defaults),
-            SharedMode::new(PermissionMode::Default),
+            ruleset_factory,
+            SharedMode::new(perm_mode),
             hooks.clone(),
         );
     }
     if !skills.is_empty() {
         registry.register(Box::new(SkillTool::new(skills)));
     }
-    let tool_defs = registry.definitions();
+    let tool_defs = perm_mode.filter_defs(registry.definitions());
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
-        .with_ruleset(Ruleset::from_config(permission_rules))
+        .with_ruleset(Ruleset::from_config(permission_rules).with_mode(perm_mode))
         .with_hooks(hooks);
     if cli.no_economy {
         eprintln!("orcarein: economy OFF (benchmark — prefix cache defeated)");
