@@ -1332,6 +1332,37 @@ fn append_skills_index(prompt: String, index: Option<&str>) -> String {
     }
 }
 
+/// Sentinels wrapping the runtime permission-mode block appended to the system
+/// prompt. Kept distinct from the AGENTS.md/skills blocks above: those are
+/// fixed per-session, this one is rewritten every time `/mode` (or `/new` /
+/// `/clear` / `/resume`) reseats the prompt.
+const MODE_BLOCK_OPEN: &str = "\n\n<!--orcarein:mode-->\n";
+const MODE_BLOCK_CLOSE: &str = "\n<!--/orcarein:mode-->";
+
+/// Strip any existing mode block, then append the block for `mode`. Idempotent:
+/// calling this again with the same mode (or any mode) never leaves more than
+/// one block. Only `Plan` has body text; every other mode strips only. Operates
+/// on the CURRENT prompt (never rebuilds from `base_system`) so a resumed
+/// session keeps everything else about its frozen prompt untouched.
+fn apply_mode_block(prompt: String, mode: PermissionMode) -> String {
+    let stripped = match (prompt.find(MODE_BLOCK_OPEN), prompt.find(MODE_BLOCK_CLOSE)) {
+        (Some(a), Some(b)) if b >= a => {
+            let end = b + MODE_BLOCK_CLOSE.len();
+            format!("{}{}", &prompt[..a], &prompt[end..])
+        }
+        _ => prompt,
+    };
+    match mode {
+        PermissionMode::Plan => format!(
+            "{stripped}{MODE_BLOCK_OPEN}You are in read-only plan mode. Investigate \
+and produce a concrete plan. Do NOT attempt to modify files, run shell \
+commands, or call write tools — they are unavailable. Present the plan and \
+stop.{MODE_BLOCK_CLOSE}"
+        ),
+        _ => stripped,
+    }
+}
+
 /// Whether `/init` may write AGENTS.md in `cwd`.
 #[derive(Debug)]
 enum InitDecision {
@@ -3513,6 +3544,21 @@ mod tests {
     #[test]
     fn append_skills_index_is_noop_when_absent() {
         assert_eq!(super::append_skills_index("BASE".to_string(), None), "BASE");
+    }
+
+    #[test]
+    fn mode_block_is_idempotent() {
+        let base = "You are OrcaRein.";
+        let planned = super::apply_mode_block(base.to_string(), PermissionMode::Plan);
+        assert!(planned.contains("read-only"));
+        assert_eq!(planned.matches(super::MODE_BLOCK_OPEN).count(), 1);
+        // switching plan -> plan keeps exactly one block
+        let again = super::apply_mode_block(planned.clone(), PermissionMode::Plan);
+        assert_eq!(again.matches(super::MODE_BLOCK_OPEN).count(), 1);
+        // plan -> default strips the block entirely
+        let cleared = super::apply_mode_block(again, PermissionMode::Default);
+        assert!(!cleared.contains(super::MODE_BLOCK_OPEN));
+        assert_eq!(cleared, base);
     }
 
     #[test]
