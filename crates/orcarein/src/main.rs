@@ -1978,9 +1978,17 @@ async fn main() -> Result<()> {
                                 let turns = loaded.turn_count();
                                 // Reapply the live mode block: the loaded session's
                                 // frozen prompt may carry a stale (or no) block from
-                                // whenever it was last saved.
+                                // whenever it was last saved. `.first()` (not `[0]`)
+                                // so a corrupt/empty resumed session can't panic the
+                                // REPL — `set_system_prompt` is already hardened to
+                                // no-op on that case, but indexing before calling it
+                                // would defeat that hardening.
                                 loaded.set_system_prompt(apply_mode_block(
-                                    loaded.messages()[0].content.clone(),
+                                    loaded
+                                        .messages()
+                                        .first()
+                                        .map(|m| m.content.clone())
+                                        .unwrap_or_default(),
                                     perm_mode.get(),
                                 ));
                                 session = loaded;
@@ -2035,7 +2043,12 @@ async fn main() -> Result<()> {
                 }
                 CommandAction::SwitchMode(m) => {
                     perm_mode.set(m);
-                    let cur = session.messages()[0].content.clone();
+                    // `.first()` (not `[0]`) — see the /resume reapply above for why.
+                    let cur = session
+                        .messages()
+                        .first()
+                        .map(|msg| msg.content.clone())
+                        .unwrap_or_default();
                     session.set_system_prompt(apply_mode_block(cur, m));
                     if m == PermissionMode::Yolo {
                         println!(
