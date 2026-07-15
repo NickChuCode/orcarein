@@ -35,7 +35,9 @@ pub enum ConfigError {
     #[error("could not serialize TOML: {0}")]
     SerializeToml(#[from] toml::ser::Error),
 
-    #[error("unknown config key '{0}' (known: provider, model, tools, system_prompt)")]
+    #[error(
+        "unknown config key '{0}' (known: provider, model, tools, system_prompt, permission_mode)"
+    )]
     UnknownKey(String),
 
     #[error("could not locate a config directory for this platform")]

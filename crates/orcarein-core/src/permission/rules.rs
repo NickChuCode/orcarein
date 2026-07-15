@@ -1,10 +1,22 @@
 //! allow/ask/deny permission rule engine.
 //!
 //! A [`Ruleset`] maps a `(tool, [bash command], [file paths])` request to an
-//! [`Action`] (Allow / Ask / Deny). Rules come from the user's `config.toml`; a
-//! built-in set of sensitive-path defaults (escalating `.env`, SSH keys, etc.
-//! to `Ask`) is always present. Deny wins over everything; an explicit user
-//! `allow` wins over the sensitive defaults — hence the two-tier split.
+//! [`Action`] (Allow / Ask / Deny), scoped by a session [`PermissionMode`]
+//! (`default` / `acceptEdits` / `plan` / `yolo`). [`Ruleset::evaluate`] runs
+//! five steps:
+//!
+//! - ⓪ **mode ceiling** — a tool the mode hides (e.g. write tools in `plan`)
+//!   is denied outright, above every rule, so an explicit user `allow` can
+//!   never unlock a tool the mode has hidden.
+//! - ① **deny** — a matching deny rule wins, from either tier below.
+//! - ② **user rules** (from `config.toml`) — ask before allow, so an explicit
+//!   user `allow` beats the built-in sensitive-path defaults.
+//! - ③ **sensitive-path defaults** — a built-in ask-only set (`.env`, SSH
+//!   keys, etc.) that always escalates, absent a user rule.
+//! - ④ **base-risk fallback**, mode-aware: `acceptEdits` auto-allows a
+//!   base-risk `edit`/`write_file` ask; `plan` allows its read-only tool
+//!   whitelist outright instead of asking; `yolo` post-processes any
+//!   remaining `Ask` into `Allow` (a `Deny` from step ① still wins).
 //!
 //! Pure and silent (no tracing) — the interactive prompt and config
 //! persistence live in the binary.
@@ -52,8 +64,10 @@ pub struct PermissionRequest {
     pub paths: Vec<String>,
 }
 
-/// A two-tier ruleset: user rules (config) are evaluated before the built-in
-/// sensitive-path defaults, so an explicit user `allow` beats a default `ask`.
+/// A ruleset: user rules (config) are evaluated before the built-in
+/// sensitive-path defaults, so an explicit user `allow` beats a default `ask`
+/// — plus a session `mode` whose ceiling (step ⓪ of [`Ruleset::evaluate`])
+/// sits above both tiers and shapes the base-risk fallback.
 #[derive(Clone, Debug)]
 pub struct Ruleset {
     user_rules: Vec<PermissionRule>,
