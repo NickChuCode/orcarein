@@ -36,7 +36,8 @@ pub use hook::{HookEntry, HookEvent, HookOutcome, HookSet, HooksConfig};
 pub use memory::{find_agents_md, format_memory_block, load_project_memory, ProjectMemory};
 pub use message::Message;
 pub use permission::{
-    Action, Decision, PermissionRequest, PermissionRule, PermissionStore, RuleAction, Ruleset,
+    Action, Decision, PermissionMode, PermissionRequest, PermissionRule, PermissionStore,
+    RuleAction, Ruleset, SharedMode,
 };
 pub use provider::{
     default_model_for, ChatOptions, DeepSeekProvider, MockProvider, OpenAIProvider, Provider,
