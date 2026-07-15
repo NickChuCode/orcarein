@@ -14,10 +14,10 @@ use orcarein_core::doctor::{self, Check, CheckStatus};
 use orcarein_core::{
     env_key_var, fetch_issue, parse_owner_repo, Agent, AgentEvent, AllowlistPolicy, BashTool,
     CacheMode, Config, Decision, DeepSeekProvider, EditTool, EventSink, HookSet, ListDirTool,
-    OpenAIProvider, PermissionConfig, PermissionPolicy, PermissionRule, PermissionStore, Provider,
-    ReadFileTool, RetryPolicy, RiskLevel, RuleAction, Ruleset, SearchTool, SecretStore, Session,
-    SessionStore, SessionSummary, SkillTool, SubagentTool, Tool, ToolRegistry, WriteFileTool,
-    DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
+    OpenAIProvider, PermissionConfig, PermissionMode, PermissionPolicy, PermissionRule,
+    PermissionStore, Provider, ReadFileTool, RetryPolicy, RiskLevel, RuleAction, Ruleset,
+    SearchTool, SecretStore, Session, SessionStore, SessionSummary, SharedMode, SkillTool,
+    SubagentTool, Tool, ToolRegistry, WriteFileTool, DEFAULT_SUBAGENT_PERSONA, MAX_TOOL_ITERATIONS,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -1195,12 +1195,16 @@ const MAX_SUBAGENT_ITERATIONS: usize = 12;
 /// from [`build_registry`] (built-ins only — never `task`), so a subagent cannot
 /// spawn its own subagents (no recursion). The caller supplies a `policy_factory`
 /// so each agent path mirrors its own permission posture for its children.
+#[allow(clippy::too_many_arguments)]
 fn register_subagent(
     registry: &mut ToolRegistry,
     provider: Arc<dyn Provider>,
     allowlist: Option<Vec<String>>,
     model: String,
     policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+    ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync>,
+    mode: SharedMode,
+    hooks: HookSet,
 ) {
     let af = allowlist.clone();
     let registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync> =
@@ -1209,6 +1213,9 @@ fn register_subagent(
         provider,
         registry_factory,
         policy_factory,
+        ruleset_factory,
+        mode,
+        hooks,
         model,
         MAX_SUBAGENT_ITERATIONS,
         DEFAULT_SUBAGENT_PERSONA.to_string(),
@@ -1713,6 +1720,11 @@ async fn main() -> Result<()> {
             tools_allowlist.clone(),
             model.clone(),
             policy_factory,
+            // Default placeholders — the REPL's own `perm_mode`/ruleset are
+            // wired to the child in a later cut.
+            Arc::new(Ruleset::with_defaults),
+            SharedMode::new(PermissionMode::Default),
+            hooks.clone(),
         );
     }
     if !skills.is_empty() {
@@ -2365,6 +2377,11 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
             tools_allowlist.clone(),
             model.clone(),
             policy_factory,
+            // Default placeholders — this headless run's own ruleset/mode are
+            // wired to the child in a later cut.
+            Arc::new(Ruleset::with_defaults),
+            SharedMode::new(PermissionMode::Default),
+            hooks.clone(),
         );
     }
     if !skills.is_empty() {
@@ -3082,6 +3099,11 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
             Some(child_tools),
             model.clone(),
             policy_factory,
+            // Default placeholders (issue mode has no `permission_rules`
+            // either) — wired to the child properly in a later cut.
+            Arc::new(Ruleset::with_defaults),
+            SharedMode::new(PermissionMode::Default),
+            hooks.clone(),
         );
     }
     if !skills.is_empty() {

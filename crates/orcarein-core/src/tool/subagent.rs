@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use super::{RiskLevel, Tool, ToolError, ToolOutput, ToolRegistry};
 use crate::{Agent, AgentEvent, PermissionPolicy, Provider, Session};
+use crate::{HookSet, PermissionMode, Ruleset, SharedMode};
 
 /// Upper bound on the text returned to the parent (mirrors the bash tool's
 /// cap) so a runaway child cannot blow up the parent's context window.
@@ -44,6 +45,9 @@ pub struct SubagentTool {
     provider: Arc<dyn Provider>,
     registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
     policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+    ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync>,
+    mode: SharedMode,
+    hooks: HookSet,
     model: String,
     max_iterations: usize,
     persona: String,
@@ -51,11 +55,19 @@ pub struct SubagentTool {
 
 impl SubagentTool {
     /// Builds a `task` tool. The factories are invoked once per `execute` so
-    /// each child run gets its own registry + policy (no shared state).
+    /// each child run gets its own registry + policy (no shared state). The
+    /// child inherits the parent's live permission mode (`mode`), permission
+    /// ruleset (`ruleset_factory`), and hooks (`hooks`) — otherwise a `plan`
+    /// mode session's `task(...)` call would be a jailbreak: the child would
+    /// see every write tool and run under the un-restricted default ruleset.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn Provider>,
         registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
         policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync>,
+        ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync>,
+        mode: SharedMode,
+        hooks: HookSet,
         model: String,
         max_iterations: usize,
         persona: String,
@@ -64,6 +76,9 @@ impl SubagentTool {
             provider,
             registry_factory,
             policy_factory,
+            ruleset_factory,
+            mode,
+            hooks,
             model,
             max_iterations,
             persona,
@@ -128,10 +143,13 @@ everything it needs in `description`."
         let mut child_session = Session::new(&self.persona);
         child_session.push_user(&description);
 
+        let m: PermissionMode = self.mode.get();
         let registry = (self.registry_factory)();
-        let defs = registry.definitions();
-        let agent =
-            Agent::new(&*self.provider, &registry, &defs).with_max_iterations(self.max_iterations);
+        let defs = m.filter_defs(registry.definitions());
+        let agent = Agent::new(&*self.provider, &registry, &defs)
+            .with_max_iterations(self.max_iterations)
+            .with_ruleset((self.ruleset_factory)().with_mode(m))
+            .with_hooks(self.hooks.clone());
         let mut policy = (self.policy_factory)();
         let mut quiet = |_ev: AgentEvent| {}; // events stay in the child
 
@@ -160,8 +178,10 @@ everything it needs in `description`."
 mod tests {
     use super::*;
     use crate::{AllowlistPolicy, ChatOptions, MockProvider, StreamEvent, ToolOutput};
+    use crate::{HookEntry, HooksConfig, PermissionRule, RuleAction};
     use anyhow::Result;
-    use futures_util::stream::BoxStream;
+    use futures_util::stream::{self, BoxStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     /// A `Safe` tool that echoes its raw arguments back as the result.
@@ -227,6 +247,9 @@ mod tests {
                 r
             }),
             deny_all_factory(),
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
             "m".into(),
             8,
             DEFAULT_SUBAGENT_PERSONA.into(),
@@ -248,6 +271,9 @@ mod tests {
             provider,
             Arc::new(ToolRegistry::new),
             deny_all_factory(),
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
             "m".into(),
             8,
             DEFAULT_SUBAGENT_PERSONA.into(),
@@ -263,6 +289,9 @@ mod tests {
             Arc::new(FailProvider),
             Arc::new(ToolRegistry::new),
             deny_all_factory(),
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
             "m".into(),
             8,
             DEFAULT_SUBAGENT_PERSONA.into(),
@@ -295,6 +324,9 @@ mod tests {
             child_provider,
             child_factory,
             deny_all_factory(),
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
             "m".into(),
             8,
             DEFAULT_SUBAGENT_PERSONA.into(),
@@ -354,6 +386,9 @@ mod tests {
                 r
             }),
             deny_all_factory(),
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
             "m".into(),
             1,
             DEFAULT_SUBAGENT_PERSONA.into(),
@@ -392,5 +427,261 @@ mod tests {
         let out = cap(s);
         assert_eq!(out, s);
         assert!(!out.ends_with(TRUNC_MARKER));
+    }
+
+    // --- ruleset/mode/hooks inheritance (jailbreak closure) ---
+
+    /// A `Provider` double for exercising exactly one child tool call: its
+    /// first response calls `tool_name`; every later response echoes back the
+    /// content of the most recent `tool`-role message as final text.
+    ///
+    /// `TurnOutcome::content` (what `SubagentTool::execute` returns to its
+    /// caller) is only ever the model's *final* turn text — a mid-turn tool
+    /// result never resurfaces there on its own (see
+    /// `parent_session_sees_only_the_result_not_child_intermediate` above,
+    /// which relies on exactly that isolation). This double simulates a
+    /// model that relays what it was just told, so a denied/blocked/executed
+    /// tool call becomes observable through the one channel the public
+    /// `execute()` API exposes.
+    struct EchoOneCall {
+        tool_name: &'static str,
+        args: &'static str,
+    }
+
+    #[async_trait]
+    impl Provider for EchoOneCall {
+        fn name(&self) -> &str {
+            "echo-one-call"
+        }
+        fn default_model(&self) -> &str {
+            "m"
+        }
+        async fn chat_stream(
+            &self,
+            messages: &[crate::Message],
+            _tools: &[crate::ToolDefinition],
+            _opts: &ChatOptions,
+        ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+            let events = match messages.iter().rev().find(|m| m.role == "tool") {
+                Some(tool_msg) => vec![StreamEvent::Content(tool_msg.content.clone())],
+                None => vec![StreamEvent::ToolCalls(vec![crate::ToolCall {
+                    id: "c".into(),
+                    kind: "function".into(),
+                    function: crate::FunctionCall {
+                        name: self.tool_name.into(),
+                        arguments: self.args.into(),
+                    },
+                }])],
+            };
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_inherits_parent_deny_rule() {
+        // Parent denies bash -> child must be denied bash too. Today the
+        // child gets `Ruleset::with_defaults()` and would run it: this test
+        // fails on that code path (bash executes, `ran` > 0) and passes once
+        // `execute()` builds the child ruleset from `ruleset_factory` +
+        // `mode` instead.
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        struct RiskyBash(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Tool for RiskyBash {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "run a shell command"
+            }
+            fn schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk_level(&self) -> RiskLevel {
+                RiskLevel::Risky
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolOutput::new("BASH RAN"))
+            }
+        }
+
+        let probe = ran.clone();
+        let child_registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync> =
+            Arc::new(move || {
+                let mut r = ToolRegistry::new();
+                r.register(Box::new(RiskyBash(probe.clone())));
+                r
+            });
+        let allow_all_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
+            Arc::new(|| Box::new(AllowlistPolicy::allow_all()));
+        let deny_bash_factory: Arc<dyn Fn() -> Ruleset + Send + Sync> = Arc::new(|| {
+            Ruleset::from_config(vec![PermissionRule {
+                tool: "bash".into(),
+                command: None,
+                path: None,
+                action: RuleAction::Deny,
+            }])
+        });
+
+        let tool = SubagentTool::new(
+            Arc::new(EchoOneCall {
+                tool_name: "bash",
+                args: "{}",
+            }),
+            child_registry_factory,
+            allow_all_factory,
+            deny_bash_factory,
+            SharedMode::new(PermissionMode::Default),
+            HookSet::empty(),
+            "m".into(),
+            8,
+            DEFAULT_SUBAGENT_PERSONA.into(),
+        );
+
+        let out = tool
+            .execute(json!({ "description": "try bash" }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "bash must never execute once the parent's deny rule is inherited"
+        );
+        assert!(
+            out.content.contains("permission denied"),
+            "got: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn subagent_child_defs_hide_write_tools_in_plan() {
+        // With mode=Plan, the defs the child advertises exclude write tools —
+        // the same ceiling `PermissionMode::filter_defs` applies to the
+        // parent's own tool list (spec 2026-07-13 §3.1).
+        struct ReadFileMock;
+        #[async_trait]
+        impl Tool for ReadFileMock {
+            fn name(&self) -> &str {
+                "read_file"
+            }
+            fn description(&self) -> &str {
+                "read a file"
+            }
+            fn schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk_level(&self) -> RiskLevel {
+                RiskLevel::Safe
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::new("contents"))
+            }
+        }
+        struct BashMock;
+        #[async_trait]
+        impl Tool for BashMock {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "run a shell command"
+            }
+            fn schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk_level(&self) -> RiskLevel {
+                RiskLevel::Risky
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::new("ran"))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ReadFileMock));
+        registry.register(Box::new(BashMock));
+
+        let mode = SharedMode::new(PermissionMode::Plan);
+        let defs = mode.get().filter_defs(registry.definitions());
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"read_file"),
+            "plan must keep read-only tools: {names:?}"
+        );
+        assert!(!names.contains(&"bash"), "plan must hide bash: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn subagent_inherits_parent_prehook_block() {
+        // Mirrors agent.rs's `pretooluse_block_fires_before_permission_gate`:
+        // a PreToolUse hook that exits 2 blocks the child's tool before the
+        // permission gate ever runs, even though the ruleset/policy here
+        // would otherwise allow it outright.
+        struct FakeSafe;
+        #[async_trait]
+        impl Tool for FakeSafe {
+            fn name(&self) -> &str {
+                "faketool"
+            }
+            fn description(&self) -> &str {
+                "fake"
+            }
+            fn schema(&self) -> serde_json::Value {
+                json!({ "type": "object" })
+            }
+            fn risk_level(&self) -> RiskLevel {
+                RiskLevel::Safe
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::new("TOOL_RAN"))
+            }
+        }
+
+        let child_registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync> = Arc::new(|| {
+            let mut r = ToolRegistry::new();
+            r.register(Box::new(FakeSafe));
+            r
+        });
+        let allow_all_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
+            Arc::new(|| Box::new(AllowlistPolicy::allow_all()));
+        let hooks = HookSet::from_config(&HooksConfig {
+            pre_tool_use: vec![HookEntry {
+                matcher: "faketool".into(),
+                command: "exit 2".into(),
+                timeout: None,
+            }],
+            post_tool_use: vec![],
+        });
+
+        let tool = SubagentTool::new(
+            Arc::new(EchoOneCall {
+                tool_name: "faketool",
+                args: "{}",
+            }),
+            child_registry_factory,
+            allow_all_factory,
+            Arc::new(|| Ruleset::with_defaults()),
+            SharedMode::new(PermissionMode::Default),
+            hooks,
+            "m".into(),
+            8,
+            DEFAULT_SUBAGENT_PERSONA.into(),
+        );
+
+        let out = tool
+            .execute(json!({ "description": "try faketool" }))
+            .await
+            .unwrap();
+
+        assert!(
+            out.content.contains("blocked by PreToolUse hook"),
+            "got: {}",
+            out.content
+        );
     }
 }
