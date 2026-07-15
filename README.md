@@ -69,6 +69,24 @@ Plus any **MCP-server tools** registered dynamically from your config.
   anything unexpected denies the call.
 - Allow / deny decisions are **cached for the session**; answer "always" once
   and that tool runs unprompted for the rest of the run.
+- **Permission rule engine** — persist `allow` / `ask` / `deny` rules in
+  `config.toml`, matched by tool name plus an optional bash-command or
+  file-path glob. `deny` always wins; a built-in set of sensitive-path
+  defaults (`.env`, `*.pem`, SSH keys, `~/.aws/credentials`) escalates even a
+  safe read to a confirmation, unless you write an explicit `allow` for that
+  path.
+- **Permission modes** (`--permission-mode` / `/mode`) — a session-wide
+  authorization posture layered on top of the rule engine: `default`,
+  `acceptEdits`, `plan` (read-only — write tools are hidden from the model,
+  not merely refused), and `yolo`. See [Permission modes](#permission-modes)
+  below.
+- **Hooks** — `PreToolUse` / `PostToolUse` command hooks enforced by exit
+  code, not prompt requests, including a recipe for feeding compiler errors
+  straight back into context. See [Hooks](#hooks) below.
+- **Subagents inherit the parent's posture** — a `task`-delegated sub-agent
+  runs under the same permission rules, the same permission mode, and the
+  same hooks as its parent (so `plan` mode's read-only guarantee, and any
+  `deny` rule, both hold for sub-agent tool calls too).
 
 ### Providers & models
 
@@ -129,7 +147,9 @@ Plus any **MCP-server tools** registered dynamically from your config.
 
 - **`run`** — execute a single task non-interactively (prompt as an argument or
   from stdin); the answer goes to stdout, diagnostics to stderr.
-- **`--no-permission`** (non-tty stdin only), **`--tools`** allowlist, and
+- **`--permission-mode <mode>`** to set the session's authorization posture
+  (`--no-permission`, non-tty stdin only, still works as a deprecated alias
+  for `--permission-mode yolo`), **`--tools`** allowlist, and
   **`--system-prompt-file`** for unattended use.
 - **`issue <N>`** — a BYO-key self-bootstrap loop: read a GitHub issue, let the
   agent edit the code (read/list/edit/write, no shell), run `cargo test`, and
@@ -153,8 +173,6 @@ tag-driven pipeline that ships **6 target binaries** per release.
 
 | Capability | What it adds | Target |
 |---|---|---|
-| **Permission v2** | `allow` / `ask` / `deny` rules (command + path patterns), persisted config, permission modes (`default` / `acceptEdits` / `plan` / `yolo`), path-risk escalation (`~/.ssh`, `.env`, `*.pem`) | v0.4.0 |
-| **Hooks** | `PreToolUse` / `PostToolUse` lifecycle hooks — guardrails enforced by exit code, not prompt requests | v0.4.0 |
 | **Auto-compact + tool-output pruning** | Threshold-triggered compaction with a reactive `prompt_too_long` fallback; non-destructive pruning of stale tool output; prefix-preserving so the cache survives | v0.5.0 |
 | **Sandbox** | New `orcarein-sandbox` crate — Linux Landlock + seccomp (workspace-write + no-network by default), macOS Seatbelt, honest Windows degradation | v0.6.0 |
 | **MCP over HTTP** | Streamable HTTP transport, `.mcp.json` project config, deferred tool schemas (idle MCP tools don't bloat the prefix); Playwright-MCP web browsing as the acceptance target | v0.7.0 |
@@ -234,23 +252,82 @@ orcarein session list|resume|delete  # manage saved sessions
 | `[MODEL]` | Provider-specific model id (overrides config + provider default) |
 | `--provider <name>` | `deepseek` (default) or `openai` |
 | `--tools <csv>` | Whitelist of tools, e.g. `read_file,search` |
-| `--no-permission` | Skip permission prompts — **non-tty stdin only** (a safety guard) |
+| `--permission-mode <mode>` | Session authorization posture: `default`, `acceptEdits`, `plan`, `yolo` (see [Permission modes](#permission-modes)) |
+| `--no-permission` | **Deprecated** — alias for `--permission-mode yolo`. Skip permission prompts, **non-tty stdin only** (a safety guard) |
 | `--system-prompt-file <path>` | Read the system prompt from a file |
 
-**Slash commands** (in the REPL): `/help`, `/clear`, `/model`, `/tools`,
-`/skills`, `/compact`, `/usage`, `/save`, `/show`, `/history`, `/init`,
-`/sessions`, `/resume`, `/new`, `/orca`, `/exit`.
+**Slash commands** (in the REPL): `/help`, `/clear`, `/model`, `/mode`,
+`/tools`, `/skills`, `/compact`, `/usage`, `/save`, `/show`, `/history`,
+`/init`, `/sessions`, `/resume`, `/new`, `/orca`, `/exit`.
 
 Environment: `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`, `ORCAREIN_PROVIDER`,
 `RUST_LOG` (e.g. `RUST_LOG=orcarein=debug` for diagnostics).
+
+## Permission modes
+
+A permission mode is a session-wide authorization posture, set once
+(`--permission-mode` at startup, or from `[permissions] mode` in
+`config.toml`) and switchable at runtime with `/mode <name>` in the REPL. It
+decides two things at once: which tools the model is even offered, and which
+tool calls run without asking.
+
+| Mode | Tools the model sees | Confirmation behavior |
+|---|---|---|
+| `default` | All | Safe tools run; risky tools ask (today's behavior, unchanged) |
+| `acceptEdits` | All | Same as `default`, but `edit` / `write_file` run silently — `bash` still asks |
+| `plan` | Read-only whitelist only (`read_file`, `list_dir`, `search`, `skill`, `task`) | Whitelisted tools run without asking; write tools aren't in the tool list at all, so the model investigates and proposes a plan instead of attempting an edit |
+| `yolo` | All | Nothing asks. An explicit `deny` rule still blocks the call — but **there is no rollback net** (checkpoints/rollback are a later milestone) |
+
+Notes:
+
+- `plan` mode's read-only guarantee is enforced twice: the write tools are
+  removed from what the model can even call, *and* the permission gate denies
+  them outright if the model tries anyway (so a hallucinated tool call still
+  fails closed). Sub-agents spawned via `task` inherit the same restriction —
+  `plan` mode is not a jailbreak surface.
+- Switching modes changes both the tool list and the system prompt in the
+  same turn, so that turn is a guaranteed prefix-cache miss. Subsequent turns
+  cache normally.
+- `--no-permission` keeps its original guard (refused on an interactive
+  terminal); `--permission-mode yolo` is allowed interactively but ships off
+  by default, prints a warning banner, and stays visible in the status
+  line/prompt for as long as it's active.
+
+## Hooks
+
+Hooks are user-configured command guardrails — and also a truth-feedback
+channel back into the conversation. `PreToolUse` runs before the permission
+gate and can only tighten (block) a call, never loosen one; `PostToolUse`
+runs after a successful call and can append extra context to the tool
+result. Both are exit-code driven (`0` = proceed, `2` = block for
+`PreToolUse`) and configured only in your own `config.toml` — a cloned repo
+can never smuggle one in.
+
+A hook doesn't have to be a guardrail. Wired to `PostToolUse`, it can feed the
+compiler's own verdict back to the model immediately after an edit, instead
+of waiting for the model to think to run `cargo check` itself:
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "edit|write_file"
+command = "cargo check --message-format=short 2>&1 | head -40"
+```
+
+After the model edits a file, the next tool result carries the `cargo check`
+output — a syntax error surfaces immediately, before the model claims the
+edit succeeded.
+
+Hooks apply uniformly across the REPL, `run`, `issue`, and `/init`, and are
+**not** limited by the active permission mode — a hook you configured is your
+decision, not the model's, so it runs even in `plan` mode.
 
 ## Configuration
 
 Resolved precedence: **CLI flag > environment variable > `config.toml` > built-in default.**
 
 - `config.toml` — non-secret preferences (`provider`, `model`, `tools`,
-  `system_prompt`, `[retry]`, `[[mcp_servers]]`). Manage with
-  `orcarein config set provider openai`.
+  `system_prompt`, `[retry]`, `[permissions]` (rules + mode), `[hooks]`,
+  `[[mcp_servers]]`). Manage with `orcarein config set provider openai`.
 - `secrets.toml` — API keys, written `0600` on Unix. Keys are also read from the
   environment (env takes precedence). **Never** pass a key as a CLI flag.
 
@@ -269,7 +346,14 @@ prompt is currently the *only* safety layer, and it is deliberately thin:
   that tool runs unprompted for the rest of the session.
 - `--no-permission` disables the prompt entirely. It is refused on an
   interactive terminal and only works with piped (non-tty) stdin — use it only
-  in scripts you trust.
+  in scripts you trust. `--permission-mode yolo` is the interactive
+  equivalent — **it has no rollback net**; there is no checkpoint/undo
+  mechanism yet (see the [roadmap](#roadmap)), so a bad edit or a destructive
+  shell command is not recoverable through OrcaRein itself.
+- Headless `run` and `issue` apply the same rule engine as the interactive
+  prompt: reading a sensitive path (`.env`, `*.pem`, SSH keys) is blocked by
+  default even though it's a "safe" read, unless you write an explicit
+  `allow` rule for it. This is deliberate, not a bug.
 
 Run OrcaRein on code under version control or backed up.
 

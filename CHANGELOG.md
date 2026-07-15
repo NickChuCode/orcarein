@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The engineering-track P0 batch: provider resilience, a real permission
+system, and command hooks. Together these close the gap the [engineering
+plan](notes/specs/2026-07-07-orcarein-engineering-gap-analysis.md) called
+out against mainstream harnesses.
+
+### Added
+
+- **Permission rule engine** — persisted `allow` / `ask` / `deny` rules in
+  `config.toml` (`[permissions]`), matched by tool name plus an optional
+  bash-command or file-path glob pattern. `deny` always wins over `allow`;
+  a built-in set of sensitive-path defaults (`.env`, `*.pem`, SSH keys,
+  `~/.aws/credentials`) escalates even a safe read to a confirmation unless
+  overridden with an explicit `allow` rule.
+- **Permission modes** — `default` / `acceptEdits` / `plan` / `yolo`, a
+  session-wide authorization posture on top of the rule engine. Set with
+  `--permission-mode` at startup or `[permissions] mode` in config; switch
+  live with `/mode` in the REPL. `plan` mode hides write tools from the
+  model entirely (not just refused at the gate); `yolo` auto-allows
+  everything the rule engine would otherwise ask about. Sub-agents spawned
+  via `task` inherit the parent's active mode, rule set, and hooks.
+- **Provider retry with backoff** — transient failures (429 / 5xx / network
+  errors) are retried with exponential backoff and jitter before the stream
+  starts; configurable via `[retry] max_retries`.
+- **Hooks (`PreToolUse` / `PostToolUse`)** — user-configured command hooks
+  around tool calls, decided by exit code (`0` = proceed, `2` = block on
+  `PreToolUse`). `PreToolUse` runs before the permission gate and can only
+  tighten a decision, never loosen one. Wired into the REPL, `run`, `issue`,
+  and `/init` uniformly. Doubles as a truth-feedback channel — see the
+  `cargo check` recipe in the README.
+
+### Fixed
+
+- `orcarein issue <N>` now honors the user's `[permissions]` rules instead
+  of silently ignoring them — a `deny` rule written in `config.toml`
+  previously had no effect in `issue` mode.
+
+### Known limitations (read before enabling)
+
+- **`yolo` has no rollback net.** There is no checkpoint/undo mechanism yet
+  (planned for a later milestone) — a destructive edit or shell command made
+  under `yolo` cannot be recovered through OrcaRein itself. `yolo` ships off
+  by default and always shows a warning banner while active.
+- **Headless `run` / `issue` now block reads of `.env` and other
+  sensitive paths by default**, even though they're nominally "safe" reads.
+  This is intentional; write an explicit `allow` rule in `[permissions]` if
+  your workflow needs it.
+- **`plan` mode has no `bash`.** It's the one tool whose read/write nature
+  can't be determined statically, so it's excluded from the read-only
+  whitelist entirely — `plan` mode cannot run `git log` or `cargo tree` for
+  you.
+- **Sub-agents (the `task` tool) now inherit the parent's `deny` rules and
+  hooks.** This closes a real gap (previously a sub-agent ran under an
+  unrestricted default ruleset, which was a `plan`-mode jailbreak), but it
+  is a behavior change: a `deny bash` rule that had no effect on sub-agents
+  before now blocks them too.
+
 ## [0.3.0] - 2026-06-29
 
 The bulk of the v0.2 development line, which landed on `main` after the early

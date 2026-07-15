@@ -52,6 +52,10 @@
 
 - **逐工具权限确认** —— 高风险工具执行前询问（`y` / `n` / `A`lways / `N`ever）。**默认拒绝**：空输入、EOF 或任何意外输入都拒绝该调用。
 - 允许 / 拒绝的决定在**本次会话内缓存**；对某工具回答一次"always"，本次运行内它就不再询问。
+- **权限规则引擎** —— 在 `config.toml` 里持久化 `allow` / `ask` / `deny` 规则，按工具名 + 可选的 bash 命令 / 文件路径 glob 匹配。`deny` 永远赢；一组内置的敏感路径默认规则（`.env`、`*.pem`、SSH key、`~/.aws/credentials`）会把哪怕是"安全"的读操作也升级为需要确认，除非你显式写一条 `allow`。
+- **权限档位**（`--permission-mode` / `/mode`）—— 叠加在规则引擎之上的、覆盖整个会话的授权姿态：`default`、`acceptEdits`、`plan`（只读——写工具**从模型的工具表里直接消失**，而不只是被拒绝）、`yolo`。详见下文[权限档位](#权限档位)。
+- **Hooks** —— `PreToolUse` / `PostToolUse` 命令 hook，由退出码强制执行而非 prompt 请求，还能把编译器的报错直接回注进对话。详见下文[Hooks](#hooks)。
+- **子 agent 继承父的授权姿态** —— `task` 委派出的子 agent 运行在与父 agent 相同的权限规则、相同的权限档位、相同的 hooks 之下（所以 `plan` 档的只读保证、以及任何 `deny` 规则，对子 agent 的工具调用同样成立）。
 
 ### Provider 与模型
 
@@ -83,7 +87,7 @@
 ### Headless 与脚本
 
 - **`run`** —— 非交互执行单个任务（prompt 作为参数或从 stdin 读）；答案走 stdout，诊断走 stderr。
-- **`--no-permission`**（仅非 tty stdin）、**`--tools`** 白名单、**`--system-prompt-file`**，供无人值守使用。
+- **`--permission-mode <mode>`** 设置本次会话的授权姿态（`--no-permission`，仅非 tty stdin，仍作为 `--permission-mode yolo` 的已弃用别名可用）、**`--tools`** 白名单、**`--system-prompt-file`**，供无人值守使用。
 - **`issue <N>`** —— BYO-key 自举闭环：读取一个 GitHub issue，让 agent 改代码（read/list/edit/write，无 shell），跑 `cargo test`，把 diff 给你看。它绝不 commit、push 或开 PR——那是你的决定。
 - **`doctor`** —— 离线健康检查，开聊前告诉你 OrcaRein 是否配置就绪。
 
@@ -99,8 +103,6 @@
 
 | 能力 | 增加什么 | 目标版本 |
 |---|---|---|
-| **权限 v2** | `allow` / `ask` / `deny` 规则（命令 + 路径模式）、持久化配置、权限档位（`default` / `acceptEdits` / `plan` / `yolo`）、路径风险升级（`~/.ssh`、`.env`、`*.pem`） | v0.4.0 |
-| **Hooks** | `PreToolUse` / `PostToolUse` 生命周期 hook —— 由退出码强制执行的护栏，而非 prompt 请求 | v0.4.0 |
 | **自动压缩 + 工具输出修剪** | 阈值触发压缩 + `prompt_too_long` 反应式兜底；非破坏性修剪陈旧工具输出；保护前缀让缓存存活 | v0.5.0 |
 | **沙箱** | 新 `orcarein-sandbox` crate —— Linux Landlock + seccomp（默认 workspace-write + 断网）、macOS Seatbelt、Windows 诚实降级 | v0.6.0 |
 | **MCP over HTTP** | Streamable HTTP 传输、`.mcp.json` 项目配置、deferred 工具 schema（空闲 MCP 工具不膨胀前缀）；以 Playwright-MCP 看网页为验收标杆 | v0.7.0 |
@@ -178,18 +180,52 @@ orcarein session list|resume|delete  # 管理已存会话
 | `[MODEL]` | provider 专属模型 id（覆盖 config + provider 默认值） |
 | `--provider <name>` | `deepseek`（默认）或 `openai` |
 | `--tools <csv>` | 工具白名单，如 `read_file,search` |
-| `--no-permission` | 跳过权限确认 —— **仅限非 tty stdin**（安全护栏） |
+| `--permission-mode <mode>` | 会话授权姿态：`default`、`acceptEdits`、`plan`、`yolo`（见[权限档位](#权限档位)） |
+| `--no-permission` | **已弃用** —— `--permission-mode yolo` 的别名。跳过权限确认，**仅限非 tty stdin**（安全护栏） |
 | `--system-prompt-file <path>` | 从文件读取 system prompt |
 
-**斜杠命令**（REPL 内）：`/help`、`/clear`、`/model`、`/tools`、`/skills`、`/compact`、`/usage`、`/save`、`/show`、`/history`、`/init`、`/sessions`、`/resume`、`/new`、`/exit`。
+**斜杠命令**（REPL 内）：`/help`、`/clear`、`/model`、`/mode`、`/tools`、`/skills`、`/compact`、`/usage`、`/save`、`/show`、`/history`、`/init`、`/sessions`、`/resume`、`/new`、`/exit`。
 
 环境变量：`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`、`ORCAREIN_PROVIDER`、`RUST_LOG`（如 `RUST_LOG=orcarein=debug` 看诊断日志）。
+
+## 权限档位
+
+权限档位是覆盖整个会话的授权姿态：启动时设置一次（`--permission-mode`，或 `config.toml` 里的 `[permissions] mode`），也能在 REPL 里用 `/mode <档位>` 运行时切换。它同时决定两件事：模型能看见哪些工具、哪些工具调用不问就跑。
+
+| 档位 | 模型看得见的工具 | 确认行为 |
+|---|---|---|
+| `default` | 全部 | Safe 工具直接跑；Risky 工具会问（今天的行为，不变） |
+| `acceptEdits` | 全部 | 同 `default`，但 `edit` / `write_file` 静默运行——`bash` 仍然会问 |
+| `plan` | 只有只读白名单（`read_file`、`list_dir`、`search`、`skill`、`task`） | 白名单内工具直接放行；写类工具**根本不在工具表里**，模型只能调查然后给出计划，而不是尝试编辑 |
+| `yolo` | 全部 | 什么都不问。用户显式写的 `deny` 规则仍然生效——但**没有回滚网**（检查点/回滚是更后面的里程碑） |
+
+补充说明：
+
+- `plan` 档的只读保证有**两层**执行：写工具既从模型能调用的工具表里被移除，权限门也会在模型硬调用时直接拒绝（即便模型产生幻觉调用，也会失败关闭）。通过 `task` 派生的子 agent 继承同样的限制——`plan` 档不是越狱面。
+- 切档会在同一轮里同时改变工具表和 system prompt，那一轮必然是一次前缀缓存 miss；之后的轮次照常命中缓存。
+- `--no-permission` 保留原有护栏（交互式终端下被拒绝）；`--permission-mode yolo` 允许交互式使用，但默认关闭、会打印警示横幅，且只要处于该档位就常驻显示在状态行/提示符里。
+
+## Hooks
+
+Hooks 是用户自己配置的命令护栏——同时也是一条把真值反馈回对话的通道。`PreToolUse` 在权限门之前运行，只能收紧（拦截）一次调用，绝不能放松；`PostToolUse` 在调用成功之后运行，能把额外的上下文追加进工具结果。两者都由退出码驱动（`0` = 放行，`2` = `PreToolUse` 拦截），且**只能**在你自己的 `config.toml` 里配置——clone 来的仓库永远无法夹带一个。
+
+Hook 不一定要是护栏。挂在 `PostToolUse` 上，它能在模型编辑完文件后**立刻**把编译器自己的判决喂回去，而不用等模型自己想起来跑 `cargo check`：
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "edit|write_file"
+command = "cargo check --message-format=short 2>&1 | head -40"
+```
+
+模型编辑文件之后，下一次工具结果里就带着 `cargo check` 的输出——语法错误立刻现形，早于模型宣称"编辑成功"。
+
+Hooks 在 REPL、`run`、`issue`、`/init` 四处统一生效，且**不受**当前权限档位限制——你配的 hook 是你自己的决定，不是模型的权限，所以即便在 `plan` 档下它也照常运行。
 
 ## 配置
 
 解析优先级：**CLI 参数 > 环境变量 > `config.toml` > 内置默认。**
 
-- `config.toml` —— 非密偏好（`provider`、`model`、`tools`、`system_prompt`、`[retry]`、`[[mcp_servers]]`）。用 `orcarein config set provider openai` 管理。
+- `config.toml` —— 非密偏好（`provider`、`model`、`tools`、`system_prompt`、`[retry]`、`[permissions]`（规则 + 档位）、`[hooks]`、`[[mcp_servers]]`）。用 `orcarein config set provider openai` 管理。
 - `secrets.toml` —— API key，Unix 下以 `0600` 写入。key 也会从环境变量读取（环境优先）。**绝不**把 key 作为 CLI 参数传入。
 
 路径按平台而定（Linux 走 XDG，Windows 走 `%APPDATA%`）；运行 `orcarein doctor` 可看到确切位置。
@@ -200,7 +236,8 @@ orcarein session list|resume|delete  # 管理已存会话
 
 - `bash`、`write_file`、`edit` 以**你的用户完整权限**运行。一旦你允许调用，模型就可能删除/覆盖文件，或执行任意命令。
 - 确认是**默认拒绝**，但你一旦对某工具回答"always"，本次会话内它就不再询问、直接执行。
-- `--no-permission` 会完全关闭确认。它在交互式终端下会被拒绝，只在管道（非 tty）stdin 下生效——只在你信任的脚本里使用。
+- `--no-permission` 会完全关闭确认。它在交互式终端下会被拒绝，只在管道（非 tty）stdin 下生效——只在你信任的脚本里使用。`--permission-mode yolo` 是它的交互式对应物——**没有回滚网**：目前还没有检查点/撤销机制（见[路线图](#路线图)），一次糟糕的编辑或破坏性的 shell 命令，OrcaRein 自己无法帮你恢复。
+- Headless 的 `run` 与 `issue` 套用和交互模式相同的规则引擎：读一个敏感路径（`.env`、`*.pem`、SSH key）默认会被拦下——即便这在工具分类里是"安全"的读操作——除非你显式为它写一条 `allow` 规则。这是有意为之，不是 bug。
 
 请在有版本控制或有备份的代码上运行 OrcaRein。
 
