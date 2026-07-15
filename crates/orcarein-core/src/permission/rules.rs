@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::PermissionMode;
 use crate::tool::RiskLevel;
 
 /// The gate outcome for one tool call.
@@ -53,9 +54,11 @@ pub struct PermissionRequest {
 
 /// A two-tier ruleset: user rules (config) are evaluated before the built-in
 /// sensitive-path defaults, so an explicit user `allow` beats a default `ask`.
+#[derive(Clone, Debug)]
 pub struct Ruleset {
     user_rules: Vec<PermissionRule>,
     default_rules: Vec<PermissionRule>,
+    mode: PermissionMode,
 }
 
 impl Ruleset {
@@ -64,6 +67,7 @@ impl Ruleset {
         Ruleset {
             user_rules: Vec::new(),
             default_rules: sensitive_defaults(),
+            mode: PermissionMode::default(),
         }
     }
 
@@ -72,39 +76,95 @@ impl Ruleset {
         Ruleset {
             user_rules,
             default_rules: sensitive_defaults(),
+            mode: PermissionMode::default(),
         }
     }
 
-    /// Resolve the action for `req`. Pure. Four steps (spec §3.2):
-    /// 1. deny across both tiers → Deny.
-    /// 2. user rules: ask then allow → first match.
-    /// 3. default rules: ask → Ask.
-    /// 4. base_risk fallback (Safe→Allow, Risky→Ask).
+    /// Sets the session permission mode (default: `Default`).
+    pub fn with_mode(mut self, mode: PermissionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+}
+
+/// Which ladder step produced an `Ask`/`Allow`. Lets `AcceptEdits` lift ONLY
+/// base-risk asks (so it never eats a sensitive-path or explicit-user ask).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    DenyRule,
+    UserRule,
+    SensitiveDefault,
+    BaseRisk,
+}
+
+impl Ruleset {
+    /// Resolve the action for `req`. Pure. Five steps (spec 2026-07-13 §3.2).
     pub fn evaluate(&self, req: &PermissionRequest, base_risk: RiskLevel) -> Action {
-        // 1. deny wins, from any tier.
+        let (action, origin) = self.evaluate_with_origin(req, base_risk);
+
+        // acceptEdits: auto-allow edit/write_file ONLY when the ask came from
+        // the base-risk fallback (never from a sensitive default or user rule).
+        let action = if self.mode == PermissionMode::AcceptEdits
+            && action == Action::Ask
+            && origin == Origin::BaseRisk
+            && matches!(req.tool.as_str(), "edit" | "write_file")
+        {
+            Action::Allow
+        } else {
+            action
+        };
+
+        // yolo: every remaining Ask becomes Allow (deny still stands).
+        if self.mode == PermissionMode::Yolo && action == Action::Ask {
+            Action::Allow
+        } else {
+            action
+        }
+    }
+
+    fn evaluate_with_origin(
+        &self,
+        req: &PermissionRequest,
+        base_risk: RiskLevel,
+    ) -> (Action, Origin) {
+        // ⓪ mode ceiling: a tool the mode hides can never run, even with an
+        // explicit user `allow`. Sits ABOVE every rule.
+        if !self.mode.allows_tool(&req.tool) {
+            return (Action::Deny, Origin::DenyRule);
+        }
+        // ① deny wins, from any tier.
         for r in self.user_rules.iter().chain(self.default_rules.iter()) {
             if r.action == RuleAction::Deny && rule_matches(r, req) {
-                return Action::Deny;
+                return (Action::Deny, Origin::DenyRule);
             }
         }
-        // 2. user rules: ask before allow (explicit user allow wins here).
+        // ② user rules: ask before allow (explicit user allow wins here).
         for want in [RuleAction::Ask, RuleAction::Allow] {
             for r in &self.user_rules {
                 if r.action == want && rule_matches(r, req) {
-                    return to_action(want);
+                    return (to_action(want), Origin::UserRule);
                 }
             }
         }
-        // 3. sensitive defaults (ask-only).
+        // ③ sensitive defaults (ask-only).
         for r in &self.default_rules {
             if r.action == RuleAction::Ask && rule_matches(r, req) {
-                return Action::Ask;
+                return (Action::Ask, Origin::SensitiveDefault);
             }
         }
-        // 4. base risk.
+        // ④ base risk. Plan allows its whitelist outright (list_dir/search are
+        // Risky-by-design but read-only — asking on every explore would make
+        // plan MORE interrupt-heavy than default, and headless deny_all would
+        // reject them entirely).
         match base_risk {
-            RiskLevel::Risky => Action::Ask,
-            RiskLevel::Safe => Action::Allow,
+            RiskLevel::Safe => (Action::Allow, Origin::BaseRisk),
+            RiskLevel::Risky => {
+                if self.mode == PermissionMode::Plan {
+                    (Action::Allow, Origin::BaseRisk)
+                } else {
+                    (Action::Ask, Origin::BaseRisk)
+                }
+            }
         }
     }
 }
@@ -448,5 +508,129 @@ mod tests {
         assert!(r.bash_command.is_none());
         let r = extract("mcp__x__y", &json!({"path": "trap"}));
         assert!(r.paths.is_empty());
+    }
+
+    // --- mode-aware ladder ---
+    #[test]
+    fn plan_mode_denies_write_tools_even_with_user_allow() {
+        // The ceiling beats an explicit user allow. THIS is the key test.
+        let rs = Ruleset::from_config(vec![PermissionRule {
+            tool: "bash".into(),
+            command: None,
+            path: None,
+            action: RuleAction::Allow,
+        }])
+        .with_mode(PermissionMode::Plan);
+        let req = PermissionRequest {
+            tool: "bash".into(),
+            bash_command: Some("ls".into()),
+            paths: vec![],
+        };
+        assert_eq!(rs.evaluate(&req, RiskLevel::Risky), Action::Deny);
+    }
+
+    #[test]
+    fn plan_mode_allows_readonly_risky_tools() {
+        // search/list_dir are Risky-by-design but read-only; plan must NOT ask.
+        let rs = Ruleset::with_defaults().with_mode(PermissionMode::Plan);
+        let req = PermissionRequest {
+            tool: "search".into(),
+            bash_command: None,
+            paths: vec!["src/".into()],
+        };
+        assert_eq!(rs.evaluate(&req, RiskLevel::Risky), Action::Allow);
+    }
+
+    #[test]
+    fn plan_mode_still_asks_on_sensitive_path() {
+        let rs = Ruleset::with_defaults().with_mode(PermissionMode::Plan);
+        let req = PermissionRequest {
+            tool: "search".into(),
+            bash_command: None,
+            paths: vec![".env".into()],
+        };
+        assert_eq!(rs.evaluate(&req, RiskLevel::Risky), Action::Ask);
+    }
+
+    #[test]
+    fn accept_edits_allows_ordinary_edit_but_not_sensitive() {
+        let rs = Ruleset::with_defaults().with_mode(PermissionMode::AcceptEdits);
+        let ordinary = PermissionRequest {
+            tool: "edit".into(),
+            bash_command: None,
+            paths: vec!["src/main.rs".into()],
+        };
+        assert_eq!(rs.evaluate(&ordinary, RiskLevel::Risky), Action::Allow);
+
+        let sensitive = PermissionRequest {
+            tool: "edit".into(),
+            bash_command: None,
+            paths: vec![".env".into()],
+        };
+        assert_eq!(rs.evaluate(&sensitive, RiskLevel::Risky), Action::Ask);
+    }
+
+    #[test]
+    fn accept_edits_respects_explicit_user_ask() {
+        let rs = Ruleset::from_config(vec![PermissionRule {
+            tool: "edit".into(),
+            command: None,
+            path: None,
+            action: RuleAction::Ask,
+        }])
+        .with_mode(PermissionMode::AcceptEdits);
+        let req = PermissionRequest {
+            tool: "edit".into(),
+            bash_command: None,
+            paths: vec!["src/main.rs".into()],
+        };
+        assert_eq!(rs.evaluate(&req, RiskLevel::Risky), Action::Ask);
+    }
+
+    #[test]
+    fn accept_edits_still_asks_for_bash() {
+        let rs = Ruleset::with_defaults().with_mode(PermissionMode::AcceptEdits);
+        let req = PermissionRequest {
+            tool: "bash".into(),
+            bash_command: Some("ls".into()),
+            paths: vec![],
+        };
+        assert_eq!(rs.evaluate(&req, RiskLevel::Risky), Action::Ask);
+    }
+
+    #[test]
+    fn yolo_allows_asks_but_deny_rules_still_fire() {
+        let rs = Ruleset::from_config(vec![PermissionRule {
+            tool: "bash".into(),
+            command: Some("rm *".into()),
+            path: None,
+            action: RuleAction::Deny,
+        }])
+        .with_mode(PermissionMode::Yolo);
+        let ok = PermissionRequest {
+            tool: "bash".into(),
+            bash_command: Some("ls".into()),
+            paths: vec![],
+        };
+        assert_eq!(rs.evaluate(&ok, RiskLevel::Risky), Action::Allow);
+        let bad = PermissionRequest {
+            tool: "bash".into(),
+            bash_command: Some("rm -rf x".into()),
+            paths: vec![],
+        };
+        assert_eq!(rs.evaluate(&bad, RiskLevel::Risky), Action::Deny);
+    }
+
+    #[test]
+    fn default_mode_is_unchanged() {
+        // Regression: default mode == today's ladder.
+        let rs = Ruleset::with_defaults(); // mode defaults to Default
+        let risky = PermissionRequest {
+            tool: "bash".into(),
+            bash_command: Some("ls".into()),
+            paths: vec![],
+        };
+        assert_eq!(rs.evaluate(&risky, RiskLevel::Risky), Action::Ask);
+        assert_eq!(rs.evaluate(&risky, RiskLevel::Safe), Action::Allow);
     }
 }
