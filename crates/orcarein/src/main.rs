@@ -94,6 +94,10 @@ struct Cli {
     #[arg(long)]
     no_permission: bool,
 
+    /// Session permission mode: default, acceptEdits, plan, yolo.
+    #[arg(long, global = true, value_parser = parse_permission_mode)]
+    permission_mode: Option<PermissionMode>,
+
     /// Comma-separated tool whitelist (e.g. `read_file,list_dir`).
     #[arg(long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
@@ -109,6 +113,13 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+/// clap `value_parser` for `--permission-mode`. `core` can't derive
+/// `clap::ValueEnum` on `PermissionMode` (it doesn't depend on clap), so the
+/// bin side parses through the `FromStr` impl T1 already provides.
+fn parse_permission_mode(s: &str) -> Result<PermissionMode, String> {
+    s.parse()
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -229,6 +240,12 @@ struct Resolved {
     /// `[[hooks.PreToolUse]]`/`[[hooks.PostToolUse]]`. Empty when the user has
     /// no `[hooks]` section.
     hooks: HookSet,
+    /// Effective session permission mode: `--permission-mode` >
+    /// `--no-permission` (yolo) > `[permissions] mode` > default.
+    // Not read via `run`/`issue` yet (their `Resolved { .. }` destructures
+    // don't name it) — a follow-up cut wires it into a runtime `SharedMode`.
+    #[allow(dead_code)]
+    perm_mode: PermissionMode,
 }
 
 /// Everything the CLI/env/config chain yields that does **not** need an API key.
@@ -245,6 +262,7 @@ struct Settings {
     permission_rules: Vec<PermissionRule>,
     hooks: HookSet,
     retry: RetryPolicy,
+    perm_mode: PermissionMode,
 }
 
 /// The single source of truth for "is this a provider we support".
@@ -578,6 +596,22 @@ fn resolve_settings(cli: &Cli) -> Result<Settings> {
         .map(HookSet::from_config)
         .unwrap_or_default();
 
+    // Precedence: --permission-mode > --no-permission (=yolo, deprecated) >
+    // [permissions] mode > default. `--no-permission` stays functional but
+    // warns, steering users toward the mode flag it's now a special case of.
+    if cli.no_permission {
+        eprintln!("orcarein: warning: --no-permission is deprecated; use --permission-mode yolo");
+    }
+    let perm_mode = cli
+        .permission_mode
+        .or(if cli.no_permission {
+            Some(PermissionMode::Yolo)
+        } else {
+            None
+        })
+        .or(config.permissions.as_ref().and_then(|p| p.mode))
+        .unwrap_or_default();
+
     Ok(Settings {
         provider,
         model,
@@ -586,6 +620,7 @@ fn resolve_settings(cli: &Cli) -> Result<Settings> {
         permission_rules,
         hooks,
         retry,
+        perm_mode,
     })
 }
 
@@ -603,6 +638,7 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         tools_allowlist: s.tools_allowlist,
         permission_rules: s.permission_rules,
         hooks: s.hooks,
+        perm_mode: s.perm_mode,
     })
 }
 
@@ -1538,6 +1574,10 @@ async fn main() -> Result<()> {
         permission_rules,
         hooks,
         retry,
+        // Not yet consumed here — a follow-up cut wires this into a runtime
+        // `SharedMode` for the gate/header. Keep it bound (not `..`) so the
+        // compiler forces every future `Settings` field through this site.
+        perm_mode: _perm_mode,
     } = resolve_settings(&cli)?;
 
     // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
@@ -3591,6 +3631,18 @@ mod tests {
         assert!(cli.command.is_none());
         assert!(!cli.no_permission);
         assert!(!cli.no_economy);
+    }
+
+    #[test]
+    fn permission_mode_flag_parses() {
+        let cli = Cli::try_parse_from(["orcarein", "--permission-mode", "plan"]).unwrap();
+        assert_eq!(cli.permission_mode, Some(PermissionMode::Plan));
+    }
+
+    #[test]
+    fn permission_mode_flag_defaults_none() {
+        let cli = Cli::try_parse_from(["orcarein"]).unwrap();
+        assert_eq!(cli.permission_mode, None);
     }
 
     #[test]
