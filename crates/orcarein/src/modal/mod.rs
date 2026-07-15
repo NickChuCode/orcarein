@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod clipboard;
 pub mod command;
 pub mod mention;
+pub mod mode_picker;
 pub mod model_picker;
 pub mod render;
 
@@ -126,6 +127,7 @@ pub fn modal_readline(
     const MENTION_CAP: usize = 2000;
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let mut picker = crate::modal::model_picker::ModelPickerState::default();
+    let mut mode_picker = crate::modal::mode_picker::ModePickerState::default();
     let mut mention = MentionState::default();
 
     // The inline viewport height currently baked into `terminal`. `None` until
@@ -135,12 +137,14 @@ pub fn modal_readline(
 
     let outcome = loop {
         // 1. Desired inline height: body lines + popup rows + 1 status row, clamped.
-        // Whichever popup is active (mention or /model picker) contributes rows.
+        // Whichever popup is active (mention, /model, or /mode) contributes rows.
         let body_lines = buf.lines.len() as u16;
         let popup_count = if mention.active {
             mention.filtered.len()
         } else if picker.active {
             picker.filtered.len()
+        } else if mode_picker.active {
+            mode_picker.filtered.len()
         } else {
             0
         };
@@ -227,13 +231,20 @@ pub fn modal_readline(
 
             // Popup band (below the body): the active popup's filtered candidates,
             // the selected row highlighted. Tolerates a band shorter than the list
-            // (short terminals) by scrolling the selection into view. Mention and
-            // the /model picker share this render; only one is active at a time.
+            // (short terminals) by scrolling the selection into view. Mention, the
+            // /model picker, and the /mode picker share this render; only one is
+            // active at a time.
             if popup_h > 0 {
                 let (pcands, pfilt, psel): (&[String], &[usize], usize) = if mention.active {
                     (&mention.candidates, &mention.filtered, mention.selected)
-                } else {
+                } else if picker.active {
                     (&picker.candidates, &picker.filtered, picker.selected)
+                } else {
+                    (
+                        &mode_picker.candidates,
+                        &mode_picker.filtered,
+                        mode_picker.selected,
+                    )
                 };
                 let avail = chunks[1].height as usize;
                 let sel_bg = if rgb {
@@ -494,6 +505,55 @@ pub fn modal_readline(
             }
         }
 
+        // 5d. /mode picker intercept (mutually exclusive with mention + /model).
+        // Same nav and accept as the /model picker; an empty match + Enter
+        // force-submits the line (e.g. `/mode zzz`) so it reaches the command's
+        // "unknown mode" rejection rather than getting stuck in an empty popup.
+        if mode_picker.active {
+            match action {
+                KeyAction::Up => {
+                    mode_picker.selected = mode_picker.selected.saturating_sub(1);
+                    continue;
+                }
+                KeyAction::Down => {
+                    if mode_picker.selected + 1 < mode_picker.filtered.len() {
+                        mode_picker.selected += 1;
+                    }
+                    continue;
+                }
+                KeyAction::Enter | KeyAction::Tab if !mode_picker.filtered.is_empty() => {
+                    if let Some((at, end_excl, ins)) = mode_picker.accept() {
+                        if end_excl > at.col {
+                            let r = at.row;
+                            buf.delete_range(
+                                at,
+                                Cursor {
+                                    row: r,
+                                    col: end_excl - 1,
+                                },
+                            );
+                        }
+                        for c in ins.chars() {
+                            buf.insert_char(c);
+                        }
+                    }
+                    mode_picker.active = false;
+                    mode_picker.filtered.clear();
+                    mode_picker.selected = 0;
+                    continue;
+                }
+                KeyAction::Enter => break ReadOutcome::Submitted(buf.text()),
+                KeyAction::Tab => continue, // empty match: swallow, no-op
+                KeyAction::Esc => {
+                    mode_picker.active = false;
+                    mode_picker.filtered.clear();
+                    mode_picker.selected = 0;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         // 6. Apply to the buffer and handle the resulting effect.
         let effect = apply(&mut buf, &mut parser, action, history);
         match effect {
@@ -546,6 +606,27 @@ pub fn modal_readline(
             picker.active = false;
             picker.filtered.clear();
             picker.selected = 0;
+        }
+
+        // 6d. Refresh the /mode picker (Insert only, and only when neither of the
+        // other popups is active — all three are mutually exclusive). Candidates
+        // are fixed (the four modes), so only `filtered` is recomputed.
+        if buf.mode == Mode::Insert && !mention.active && !picker.active {
+            let now = mode_picker.update_from_buffer(&buf);
+            if now {
+                mode_picker.filtered =
+                    crate::modal::mention::filter(&mode_picker.query, &mode_picker.candidates);
+                if mode_picker.selected >= mode_picker.filtered.len() {
+                    mode_picker.selected = mode_picker.filtered.len().saturating_sub(1);
+                }
+            } else {
+                mode_picker.filtered.clear();
+                mode_picker.selected = 0;
+            }
+        } else if mode_picker.active {
+            mode_picker.active = false;
+            mode_picker.filtered.clear();
+            mode_picker.selected = 0;
         }
     };
 
