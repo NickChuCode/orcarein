@@ -25,6 +25,12 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Test-only escape hatch: these types are only used by the mock-provider
+// helpers below, so the import must be gated too — else a default build
+// (feature off) fails `-D warnings` with `unused_imports`.
+#[cfg(feature = "mock-provider")]
+use orcarein_core::{FunctionCall, StreamEvent, ToolCall};
+
 mod color;
 mod header;
 #[cfg(feature = "hardware")]
@@ -274,6 +280,8 @@ struct Settings {
 fn validate_provider(name: &str) -> Result<()> {
     match name {
         "deepseek" | "openai" => Ok(()),
+        #[cfg(feature = "mock-provider")]
+        "mock" => Ok(()),
         other => bail!("unknown provider: '{other}' (expected: deepseek | openai)"),
     }
 }
@@ -324,6 +332,10 @@ fn build_provider(
     retry: RetryPolicy,
 ) -> Result<Arc<dyn Provider>> {
     validate_provider(name)?;
+    #[cfg(feature = "mock-provider")]
+    if name == "mock" {
+        return build_mock_provider();
+    }
     let var = env_key_var(name).expect("provider validated above");
     let key = api_key.with_context(|| {
         format!(
@@ -336,6 +348,75 @@ fn build_provider(
         "openai" => Ok(Arc::new(OpenAIProvider::new(key).with_retry(retry))),
         _ => unreachable!("provider validated above"),
     }
+}
+
+#[cfg(feature = "mock-provider")]
+#[derive(serde::Deserialize)]
+struct MockTool {
+    name: String,
+    /// JSON-encoded arguments string, matching the tool's schema.
+    args: String,
+}
+
+#[cfg(feature = "mock-provider")]
+#[derive(serde::Deserialize)]
+struct MockStep {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tools: Vec<MockTool>,
+}
+
+/// Parse a mock script (JSON array of steps) into MockProvider response
+/// batches. Each step = one `chat_stream` batch that may carry Content and/or
+/// ToolCalls. Tool-call ids auto-increment (`call_1`, `call_2`, …) across the
+/// whole script. See spec 2026-07-15 §3 Part A.
+#[cfg(feature = "mock-provider")]
+fn parse_mock_script(json: &str) -> anyhow::Result<Vec<Vec<StreamEvent>>> {
+    let steps: Vec<MockStep> = serde_json::from_str(json)?;
+    let mut id = 0u32;
+    let mut batches = Vec::with_capacity(steps.len());
+    for step in steps {
+        let mut events = Vec::new();
+        if let Some(t) = step.text {
+            events.push(StreamEvent::Content(t));
+        }
+        if !step.tools.is_empty() {
+            let calls = step
+                .tools
+                .into_iter()
+                .map(|t| {
+                    id += 1;
+                    ToolCall {
+                        id: format!("call_{id}"),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: t.name,
+                            arguments: t.args,
+                        },
+                    }
+                })
+                .collect();
+            events.push(StreamEvent::ToolCalls(calls));
+        }
+        batches.push(events);
+    }
+    Ok(batches)
+}
+
+/// Build a scripted MockProvider from `ORCAREIN_MOCK_SCRIPT` (if set). No key,
+/// no network. Only compiled under `mock-provider`.
+#[cfg(feature = "mock-provider")]
+fn build_mock_provider() -> anyhow::Result<std::sync::Arc<dyn orcarein_core::Provider>> {
+    let mock = orcarein_core::MockProvider::new();
+    if let Some(path) = std::env::var_os("ORCAREIN_MOCK_SCRIPT") {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read ORCAREIN_MOCK_SCRIPT {path:?}"))?;
+        for batch in parse_mock_script(&text)? {
+            mock.push_response(batch);
+        }
+    }
+    Ok(std::sync::Arc::new(mock))
 }
 
 /// Treats a blank string as absent, so `--provider ""` or `ORCAREIN_PROVIDER=`
@@ -1677,7 +1758,20 @@ async fn main() -> Result<()> {
             std::io::stdout().is_terminal(),
         )
     };
-    let first_run = first_run_decision(stored.as_deref(), tty);
+    let first_run = {
+        #[cfg(feature = "mock-provider")]
+        {
+            if provider_name == "mock" {
+                FirstRun::Proceed
+            } else {
+                first_run_decision(stored.as_deref(), tty)
+            }
+        }
+        #[cfg(not(feature = "mock-provider"))]
+        {
+            first_run_decision(stored.as_deref(), tty)
+        }
+    };
     if first_run == FirstRun::Bail {
         // No key and nobody to ask: build_provider(_, None, _) always errors
         // here and owns the message/exit code, unchanged by this cut — it's
@@ -4365,5 +4459,57 @@ mod tests {
                 SecretAction::Push('@')
             );
         }
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn mock_script_text_and_tools_batch() {
+        // One step with BOTH text and a tool = ONE batch (Content + ToolCalls).
+        let json = r#"[{"text":"hi","tools":[{"name":"bash","args":"{\"command\":\"ls\"}"}]},{"text":"done"}]"#;
+        let batches = parse_mock_script(json).unwrap();
+        assert_eq!(batches.len(), 2);
+        // batch 0: Content("hi") then ToolCalls([bash])
+        assert!(matches!(&batches[0][0], StreamEvent::Content(c) if c == "hi"));
+        match &batches[0][1] {
+            StreamEvent::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "bash");
+                assert_eq!(calls[0].id, "call_1");
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+        // batch 1: Content("done") only
+        assert_eq!(batches[1].len(), 1);
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn mock_script_ids_increment_across_batches() {
+        let json = r#"[{"tools":[{"name":"a","args":"{}"}]},{"tools":[{"name":"b","args":"{}"}]}]"#;
+        let b = parse_mock_script(json).unwrap();
+        let id0 = match &b[0][0] {
+            StreamEvent::ToolCalls(c) => c[0].id.clone(),
+            _ => unreachable!(),
+        };
+        let id1 = match &b[1][0] {
+            StreamEvent::ToolCalls(c) => c[0].id.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!((id0.as_str(), id1.as_str()), ("call_1", "call_2"));
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn mock_script_rejects_bad_json_and_accepts_empty() {
+        assert!(parse_mock_script("not json").is_err());
+        assert_eq!(parse_mock_script("[]").unwrap().len(), 0);
+    }
+
+    // §0.3.1 isolation: the DEFAULT build (no mock-provider) must reject
+    // `--provider mock`. This test only compiles/runs in the default config.
+    #[cfg(not(feature = "mock-provider"))]
+    #[test]
+    fn default_build_rejects_mock_provider() {
+        assert!(validate_provider("mock").is_err());
     }
 }
