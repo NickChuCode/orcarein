@@ -1605,11 +1605,21 @@ async fn main() -> Result<()> {
         permission_rules,
         hooks,
         retry,
-        // Not yet consumed here — a follow-up cut wires this into a runtime
-        // `SharedMode` for the gate/header. Keep it bound (not `..`) so the
-        // compiler forces every future `Settings` field through this site.
-        perm_mode: _perm_mode,
+        // Runtime permission posture — wired into a `SharedMode` right below so
+        // `/mode`, the per-turn agent rebuild, and the header (T8) can all
+        // read/write the live mode.
+        perm_mode,
     } = resolve_settings(&cli)?;
+
+    // Shared, mutable session posture: the REPL loop (writer, via `/mode`) and
+    // the subagent factory (reader) each hold a clone of the same atomic cell.
+    // Must exist before the header block below (T8 reads it in the status
+    // line) and before the fresh-session prompt assembly a few lines down.
+    let perm_mode = SharedMode::new(perm_mode);
+    // Raw config rules, kept around so a fresh `Ruleset` (with the current
+    // mode folded in via `.with_mode`) can be built once per turn and once per
+    // spawned subagent — a `Ruleset` itself isn't rebuilt from a stale copy.
+    let base_rules = permission_rules;
 
     // Keep the base persona prompt (before AGENTS.md injection) so `/new` can
     // build a fresh session that re-reads the current project memory.
@@ -1641,9 +1651,12 @@ async fn main() -> Result<()> {
             // session keeps its frozen prompt (consistent with config.system_prompt),
             // so a changed AGENTS.md takes effect on the next new session.
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let prompt = append_skills_index(
-                fresh_session_prompt(system_prompt, &cwd),
-                skills_index.as_deref(),
+            let prompt = apply_mode_block(
+                append_skills_index(
+                    fresh_session_prompt(system_prompt, &cwd),
+                    skills_index.as_deref(),
+                ),
+                perm_mode.get(),
             );
             (Session::new(&prompt), created.to_string(), created)
         }
@@ -1772,51 +1785,44 @@ async fn main() -> Result<()> {
     };
 
     // Register the `task` subagent tool. Its children mirror the REPL's own
-    // permission posture: interactive (with a subagent-tagged prompt) unless
-    // `--no-permission`, in which case the child runs unprompted too. Clone the
-    // provider Arc into the tool *before* `Agent::new` borrows `&*provider`.
+    // permission posture — interactive (with a subagent-tagged prompt), the
+    // REPL's live mode, and the REPL's configured rules. Yolo is handled
+    // purely by the ruleset now (no `no_permission` branch): an
+    // `InteractivePolicy` is never even consulted unless the gate returns
+    // `Ask`, and yolo's ruleset never returns `Ask`. Clone the provider Arc
+    // into the tool *before* `Agent::new` borrows `&*provider`.
     {
-        let no_permission = cli.no_permission;
         let policy_factory: Arc<dyn Fn() -> Box<dyn PermissionPolicy> + Send + Sync> =
-            Arc::new(move || {
-                if no_permission {
-                    Box::new(AllowlistPolicy::allow_all())
-                } else {
-                    Box::new(InteractivePolicy::new(fancy, mode).with_subagent_prefix())
-                }
-            });
+            Arc::new(move || Box::new(InteractivePolicy::new(fancy, mode).with_subagent_prefix()));
+        let rules_for_child = base_rules.clone();
+        let ruleset_factory: Arc<dyn Fn() -> Ruleset + Send + Sync> =
+            Arc::new(move || Ruleset::from_config(rules_for_child.clone()));
         register_subagent(
             &mut registry,
             Arc::clone(&provider),
             tools_allowlist.clone(),
             model.clone(),
             policy_factory,
-            // Default placeholders — the REPL's own `perm_mode`/ruleset are
-            // wired to the child in a later cut.
-            Arc::new(Ruleset::with_defaults),
-            SharedMode::new(PermissionMode::Default),
+            ruleset_factory,
+            perm_mode.clone(),
             hooks.clone(),
         );
     }
     if !skills.is_empty() {
         registry.register(Box::new(SkillTool::new(skills.clone())));
     }
-    let tool_defs = registry.definitions();
 
     #[cfg(feature = "tui")]
     whale::swim_once(mode, cols).await;
 
-    // The agent loop now lives in `orcarein-core`; the REPL is a thin frontend
-    // that supplies an interactive permission policy and a printing event sink.
-    let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
-        .with_cache_mode(cache_mode(&cli))
-        .with_ruleset(Ruleset::from_config(permission_rules))
-        .with_hooks(hooks.clone());
-    let mut policy: Box<dyn PermissionPolicy> = if cli.no_permission {
-        Box::new(AllowlistPolicy::allow_all())
-    } else {
-        Box::new(InteractivePolicy::new(fancy, mode))
-    };
+    // Sticky permission memory (`AllowAlways`/`DenyAlways`) lives inside this
+    // policy's `PermissionStore`. Built ONCE, here, outside the loop below —
+    // rebuilding it per turn would wipe that memory every turn, and the gate
+    // only consults `policy` on an `Ask` (yolo's ruleset never asks, so this
+    // same `InteractivePolicy` is simply never consulted while yolo is
+    // active). Only `agent` is rebuilt per turn: its tool defs and ruleset
+    // depend on the mutable permission mode, this policy does not.
+    let mut policy: Box<dyn PermissionPolicy> = Box::new(InteractivePolicy::new(fancy, mode));
 
     // The prompt-token count of the most recent turn ≈ current context fill;
     // surfaced in the per-turn meter and `/usage`. 0 until the first turn.
@@ -2035,6 +2041,17 @@ async fn main() -> Result<()> {
             }
         });
         session.push_user(expanded);
+
+        // Rebuild the agent every turn: its tool defs (mode-filtered) and
+        // ruleset (mode-folded) both depend on `perm_mode`, which `/mode` can
+        // change between turns. `policy` is NOT rebuilt here — its sticky
+        // `PermissionStore` lives outside the loop (see the comment there).
+        let m = perm_mode.get();
+        let turn_tool_defs = m.filter_defs(registry.definitions());
+        let agent = Agent::new(provider.as_ref(), &registry, &turn_tool_defs)
+            .with_cache_mode(cache_mode(&cli))
+            .with_ruleset(Ruleset::from_config(base_rules.clone()).with_mode(m))
+            .with_hooks(hooks.clone());
 
         let mut sink = ReplSink::new(fancy, mode);
         match agent
