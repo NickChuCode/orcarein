@@ -2,6 +2,13 @@
 //! scripted provider and assert on captured output. No PTY — reliable on all
 //! platforms, runs in the main --all-features matrix. Gated on mock-provider so
 //! it vanishes from the default build.
+//!
+//! Hermeticity note: `run_once` calls `Config::load()`, so these spawn a child
+//! that reads the ambient `config.toml`. On CI runners (no config) that is
+//! hermetic by absence and deterministic. On a dev box a permissive
+//! `[permissions]` rule could in principle flip a deny assertion (and an
+//! `[mcp_servers]` block would spawn those servers). A test-only config-dir
+//! override is a deferred follow-up — see `notes/book/src/v02-41-e2e-qa-harness.md`.
 #![cfg(feature = "mock-provider")]
 
 use std::io::Write;
