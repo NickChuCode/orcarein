@@ -87,6 +87,10 @@ fn yolo_allows_bash_headless() {
         !out.contains("permission denied"),
         "yolo must not deny bash:\n{out}"
     );
+    assert!(
+        out.contains("[tool ok]"),
+        "yolo must actually run bash:\n{out}"
+    );
 }
 
 #[test]
