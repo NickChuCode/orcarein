@@ -75,6 +75,8 @@ enum CommandAction {
     NewSession,
     /// `/orca` — play the swimming-whale animation once (cosmetic).
     Swim,
+    /// `/mode <name>` — switch the runtime permission mode.
+    SwitchMode(PermissionMode),
 }
 
 /// OrcaRein — an open-source CLI agent harness for DeepSeek V4 and
@@ -1888,6 +1890,12 @@ async fn main() -> Result<()> {
         }
 
         if let Some(stripped) = input.strip_prefix('/') {
+            let current_mode = perm_mode.get();
+            let visible_tools: Vec<&str> = registry
+                .names()
+                .into_iter()
+                .filter(|n| current_mode.allows_tool(n))
+                .collect();
             match handle_command(
                 stripped,
                 &mut session,
@@ -1896,9 +1904,10 @@ async fn main() -> Result<()> {
                 created_at_ms,
                 &model,
                 last_prompt_tokens,
-                &registry.names(),
+                &visible_tools,
                 &skills,
                 mode,
+                current_mode,
             ) {
                 CommandAction::Continue => continue,
                 CommandAction::Quit => break,
@@ -1949,11 +1958,18 @@ async fn main() -> Result<()> {
                         .collect();
                     match resolve_id_prefix(&needle, &ids) {
                         IdMatch::One(id) => match store.load(&id) {
-                            Ok(loaded) => {
+                            Ok(mut loaded) => {
                                 let created = store
                                     .created_at(&id)
                                     .unwrap_or_else(|_| SessionStore::now_ms());
                                 let turns = loaded.turn_count();
+                                // Reapply the live mode block: the loaded session's
+                                // frozen prompt may carry a stale (or no) block from
+                                // whenever it was last saved.
+                                loaded.set_system_prompt(apply_mode_block(
+                                    loaded.messages()[0].content.clone(),
+                                    perm_mode.get(),
+                                ));
                                 session = loaded;
                                 session_id = id.clone();
                                 created_at_ms = created;
@@ -1980,9 +1996,12 @@ async fn main() -> Result<()> {
                     let _ = store.save(&session_id, created_at_ms, &session);
                     let created = SessionStore::now_ms();
                     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-                    let prompt = append_skills_index(
-                        fresh_session_prompt(base_system.clone(), &cwd),
-                        skills_index.as_deref(),
+                    let prompt = apply_mode_block(
+                        append_skills_index(
+                            fresh_session_prompt(base_system.clone(), &cwd),
+                            skills_index.as_deref(),
+                        ),
+                        perm_mode.get(),
                     );
                     session = Session::new(&prompt);
                     session_id = created.to_string();
@@ -1999,6 +2018,23 @@ async fn main() -> Result<()> {
                     whale::swim_once(mode, overlay::term_cols()).await;
                     #[cfg(not(feature = "tui"))]
                     println!("此构建未编译 tui，鲸鱼游不动。");
+                    continue;
+                }
+                CommandAction::SwitchMode(m) => {
+                    perm_mode.set(m);
+                    let cur = session.messages()[0].content.clone();
+                    session.set_system_prompt(apply_mode_block(cur, m));
+                    if m == PermissionMode::Yolo {
+                        println!(
+                            "{}",
+                            color::paint(
+                                mode,
+                                color::Token::Warning,
+                                "⚠ YOLO：所有工具无需确认。当前无回滚网（检查点在 P4）。"
+                            )
+                        );
+                    }
+                    println!("已切换到档位：{m}");
                     continue;
                 }
             }
@@ -2870,6 +2906,7 @@ fn render_help(mode: color::ColorMode) -> String {
         [("/sessions", "列出会话"), ("/resume", "切换会话")],
         [("/new", "新建会话"), ("/skills", "列出可用 skill")],
         [("/exit", "退出会话"), ("/orca", "召唤鲸鱼")],
+        [("/mode", "切换权限档位"), ("", "")],
     ];
     const LCMD: usize = 11; // left command field width
     const LBLOCK: usize = 34; // left block width (leading 2 + cmd + 说明 + fill)
@@ -2915,7 +2952,8 @@ fn render_help(mode: color::ColorMode) -> String {
 /// Handles a slash command (the leading `/` already stripped). Takes the
 /// session store + active id so `/save` can persist on demand, the model
 /// and last turn's prompt-token count so `/usage` can show context fill + cost,
-/// and the registered tool names for `/tools`.
+/// the (already mode-filtered) registered tool names for `/tools`, and the
+/// current permission mode so a bare `/mode` can display it.
 #[allow(clippy::too_many_arguments)]
 fn handle_command(
     cmd: &str,
@@ -2928,6 +2966,7 @@ fn handle_command(
     tool_names: &[&str],
     skills: &[orcarein_core::Skill],
     mode: color::ColorMode,
+    current_mode: PermissionMode,
 ) -> CommandAction {
     // Split into a verb and an optional argument so `/show <path>` works while
     // bare verbs (`/clear`) still match.
@@ -2939,6 +2978,14 @@ fn handle_command(
         "exit" | "quit" => CommandAction::Quit,
         "clear" => {
             session.clear();
+            // `clear()` re-seats `messages[0]` from `Session::system`, which may
+            // itself carry a stale mode block from an earlier `/mode` switch
+            // (`set_system_prompt` rewrites both copies). Reapply is idempotent
+            // either way — strip-then-append never accumulates a second block.
+            session.set_system_prompt(apply_mode_block(
+                session.messages()[0].content.clone(),
+                current_mode,
+            ));
             println!("(会话已清空，system prompt 保留)");
             CommandAction::Continue
         }
@@ -2989,6 +3036,24 @@ fn handle_command(
         }
         "init" => CommandAction::RunInit,
         "compact" => CommandAction::RunCompact,
+        "mode" => {
+            if arg.is_empty() {
+                println!("当前档位：{current_mode}");
+                println!("  default      逐次确认（默认）");
+                println!("  acceptEdits  文件编辑不问，其余照常");
+                println!("  plan         只读：写工具不可用，产出计划");
+                println!("  yolo         全部放行，无确认（⚠ 无回滚网）");
+                CommandAction::Continue
+            } else {
+                match arg.parse::<PermissionMode>() {
+                    Ok(m) => CommandAction::SwitchMode(m),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        CommandAction::Continue
+                    }
+                }
+            }
+        }
         "model" => {
             if arg.is_empty() {
                 println!("当前 model：{model}");
