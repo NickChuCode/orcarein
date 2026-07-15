@@ -76,6 +76,11 @@ pub enum ReadOutcome {
 /// displays/uses the returned string. Before returning we clear the inline
 /// viewport (ratatui's `Terminal` drop restores the cursor but does NOT wipe the
 /// drawn frame), so the editor's last frame never collides with REPL output.
+///
+/// `mode_label` is the active permission mode's display name (`"plan"`,
+/// `"yolo"`, ...) when it differs from the default, or `None` in the default
+/// mode — shown in the right-aligned status-row readout alongside the model
+/// and context-fill labels, so a non-default mode stays visible while typing.
 #[cfg(feature = "tui")]
 pub fn modal_readline(
     prompt: &str,
@@ -83,6 +88,7 @@ pub fn modal_readline(
     ctx: Option<(String, color::Token)>,
     model_name: Option<&str>,
     models: &[String],
+    mode_label: Option<&str>,
 ) -> std::io::Result<ReadOutcome> {
     use ratatui::backend::CrosstermBackend;
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -262,10 +268,15 @@ pub fn modal_readline(
             // the whole bar instead, telling the mode apart by the badge text.
             let show_hint = term_width >= crate::header::NARROW;
             let w = crate::header::disp_width;
-            // Right-aligned readout: `model · ctx X%` (either piece optional). The
-            // model is the compact label (accent), ctx keeps its threshold color.
+            // Right-aligned readout: `mode · model · ctx X%` (each piece
+            // optional). mode (when non-default) leads in Warning so a plan/
+            // yolo session stays visible while typing; model is the compact
+            // label (accent); ctx keeps its threshold color.
             let sep = " · ";
             let mut right: Vec<(String, color::Token)> = Vec::new();
+            if let Some(lbl) = mode_label {
+                right.push((lbl.to_string(), color::Token::Warning));
+            }
             if let Some(m) = model_name {
                 right.push((m.to_string(), color::Token::Accent));
             }

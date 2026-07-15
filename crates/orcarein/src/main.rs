@@ -1834,6 +1834,19 @@ async fn main() -> Result<()> {
     let mut history: modal::History = Vec::new();
 
     loop {
+        // Runtime mode indicator for the prompt/status row. `None` in the
+        // default mode keeps the ordinary "> " prompt unchanged; recomputed
+        // every iteration so a `/mode` switch (which `continue`s) shows up on
+        // the very next read.
+        let mode_label: Option<String> = {
+            let m = perm_mode.get();
+            (m != PermissionMode::Default).then(|| m.to_string())
+        };
+        let readline_prompt = match &mode_label {
+            Some(l) => format!("{l}> "),
+            None => "> ".to_string(),
+        };
+
         let line = {
             #[cfg(feature = "tui")]
             {
@@ -1858,6 +1871,7 @@ async fn main() -> Result<()> {
                         ctx_label,
                         Some(short_model(&model)),
                         &model_choices,
+                        mode_label.as_deref(),
                     ) {
                         Ok(modal::ReadOutcome::Submitted(s)) => s,
                         Ok(modal::ReadOutcome::Cancelled) => continue,
@@ -1865,7 +1879,7 @@ async fn main() -> Result<()> {
                         Err(e) => return Err(e).context("modal editor failed"),
                     }
                 } else {
-                    match editor.readline("> ") {
+                    match editor.readline(&readline_prompt) {
                         Ok(line) => line,
                         Err(ReadlineError::Interrupted) => continue,
                         Err(ReadlineError::Eof) => break,
@@ -1875,7 +1889,7 @@ async fn main() -> Result<()> {
             }
             #[cfg(not(feature = "tui"))]
             {
-                match editor.readline("> ") {
+                match editor.readline(&readline_prompt) {
                     Ok(line) => line,
                     Err(ReadlineError::Interrupted) => continue,
                     Err(ReadlineError::Eof) => break,
