@@ -12,10 +12,11 @@
 #![cfg(feature = "mock-provider")]
 
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 
-/// Run `orcarein --provider mock <extra_args> run <prompt>` with `script_json`
-/// as the mock script. Returns combined stdout+stderr.
+/// Like `run_mock` but runs the child in `cwd` (so a tool that touches the
+/// filesystem resolves relative paths there). `run_mock` passes the current dir.
 ///
 /// `--provider` and `--no-permission` are top-level `Cli` flags without
 /// `global = true`, so clap only accepts them *before* the `run` subcommand
@@ -23,25 +24,33 @@ use std::process::Command;
 /// with "unexpected argument '--provider' found"). `--permission-mode` is
 /// `global = true` and would parse on either side, but `extra_args` goes
 /// before `run` too so one flag order covers every scenario.
-fn run_mock(script_json: &str, prompt: &str, extra_args: &[&str]) -> String {
+fn run_mock_in(script_json: &str, prompt: &str, extra_args: &[&str], cwd: Option<&Path>) -> String {
     let mut script = tempfile::NamedTempFile::new().expect("temp script");
     script.write_all(script_json.as_bytes()).unwrap();
     script.flush().unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_orcarein"))
-        .arg("--provider")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_orcarein"));
+    cmd.arg("--provider")
         .arg("mock")
         .args(extra_args)
         .arg("run")
         .arg(prompt)
         .env("ORCAREIN_MOCK_SCRIPT", script.path())
         .env("ORCAREIN_PROVIDER", "mock")
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("spawn orcarein");
+        .env("NO_COLOR", "1");
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    let out = cmd.output().expect("spawn orcarein");
     let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     s
+}
+
+/// Run `orcarein --provider mock <extra_args> run <prompt>` with `script_json`
+/// as the mock script, in the current dir. Returns combined stdout+stderr.
+fn run_mock(script_json: &str, prompt: &str, extra_args: &[&str]) -> String {
+    run_mock_in(script_json, prompt, extra_args, None)
 }
 
 #[test]
@@ -106,5 +115,43 @@ fn no_permission_prints_deprecation() {
     assert!(
         out.contains("deprecated"),
         "expected deprecation warning:\n{out}"
+    );
+}
+
+#[test]
+fn accept_edits_allows_edit() {
+    // acceptEdits lets an ordinary (non-sensitive) edit through without a prompt.
+    // The edit then really runs, so the target must exist — stage x.txt="a" in a
+    // temp cwd; a successful edit prints "[tool ok]" (a real positive assertion).
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("x.txt"), "a").unwrap();
+    let script = r#"[{"tools":[{"name":"edit","args":"{\"path\":\"x.txt\",\"old_str\":\"a\",\"new_str\":\"b\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(
+        script,
+        "change x",
+        &["--permission-mode", "acceptEdits"],
+        Some(dir.path()),
+    );
+    assert!(
+        !out.contains("permission denied"),
+        "acceptEdits must not deny edit:\n{out}"
+    );
+    assert!(
+        out.contains("[tool ok]"),
+        "acceptEdits must actually run edit:\n{out}"
+    );
+}
+
+#[test]
+fn sensitive_path_denied_headless() {
+    // Reading .env hits the built-in sensitive-path default (Ask); under the
+    // headless deny_all policy that becomes a denial. No real file needed — the
+    // gate reads the path from the tool args.
+    let script =
+        r#"[{"tools":[{"name":"read_file","args":"{\"path\":\".env\"}"}]},{"text":"done"}]"#;
+    let out = run_mock(script, "read env", &[]);
+    assert!(
+        out.contains("permission denied"),
+        "sensitive .env read must be denied:\n{out}"
     );
 }
