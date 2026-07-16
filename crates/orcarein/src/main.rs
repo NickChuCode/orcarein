@@ -2377,7 +2377,12 @@ fn persist_bash_rule(config_path: &std::path::Path, args: &str) {
 
 /// Renders [`AgentEvent`]s the way the REPL always has: reasoning/content to
 /// stdout under `[思考]`/`[回复]` headers, tool activity to stderr.
-struct ReplSink {
+struct ReplSink<
+    O: std::io::Write + Send = std::io::Stdout,
+    E: std::io::Write + Send = std::io::Stderr,
+> {
+    out: O,
+    err: E,
     started_reasoning: bool,
     started_content: bool,
     /// Whether to draw the colored `▌` chrome (a capable tty); falls back to the
@@ -2388,9 +2393,28 @@ struct ReplSink {
     mode: color::ColorMode,
 }
 
-impl ReplSink {
+impl ReplSink<std::io::Stdout, std::io::Stderr> {
     fn new(fancy: bool, mode: color::ColorMode) -> Self {
         ReplSink {
+            out: std::io::stdout(),
+            err: std::io::stderr(),
+            started_reasoning: false,
+            started_content: false,
+            fancy,
+            mode,
+        }
+    }
+}
+
+impl<O: std::io::Write + Send, E: std::io::Write + Send> ReplSink<O, E> {
+    /// Test-only constructor that captures both streams into arbitrary writers
+    /// (e.g. `Vec<u8>`), so the sink's rendering + stdout/stderr routing can be
+    /// asserted without a terminal.
+    #[cfg(test)]
+    fn with_writers(out: O, err: E, fancy: bool, mode: color::ColorMode) -> Self {
+        ReplSink {
+            out,
+            err,
             started_reasoning: false,
             started_content: false,
             fancy,
@@ -2398,28 +2422,33 @@ impl ReplSink {
         }
     }
 
-    fn head_reasoning(&self) {
+    fn head_reasoning(&mut self) {
         if self.fancy {
-            println!("{}", color::paint(self.mode, color::Token::Dim, "▌ 思考"));
+            let _ = writeln!(
+                self.out,
+                "{}",
+                color::paint(self.mode, color::Token::Dim, "▌ 思考")
+            );
         } else {
-            println!("[思考]");
+            let _ = writeln!(self.out, "[思考]");
         }
     }
 
-    fn head_content(&self) {
+    fn head_content(&mut self) {
         if self.fancy {
-            println!(
+            let _ = writeln!(
+                self.out,
                 "{}{}",
                 color::paint(self.mode, color::Token::Brand, "▌ "),
                 color::paint(self.mode, color::Token::OrcaWhite, "回复"),
             );
         } else {
-            println!("[回复]");
+            let _ = writeln!(self.out, "[回复]");
         }
     }
 }
 
-impl EventSink for ReplSink {
+impl<O: std::io::Write + Send, E: std::io::Write + Send> EventSink for ReplSink<O, E> {
     fn emit(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Reasoning(text) => {
@@ -2429,61 +2458,80 @@ impl EventSink for ReplSink {
                 }
                 // The "thinking" body is secondary — dimmed on a capable tty.
                 if self.fancy {
-                    print!("{}", color::paint(self.mode, color::Token::Dim, &text));
+                    let _ = write!(
+                        self.out,
+                        "{}",
+                        color::paint(self.mode, color::Token::Dim, &text)
+                    );
                 } else {
-                    print!("{text}");
+                    let _ = write!(self.out, "{text}");
                 }
-                let _ = std::io::stdout().flush();
+                let _ = self.out.flush(); // I2: streaming命门，保留
             }
             AgentEvent::Content(text) => {
                 if !self.started_content {
                     if self.started_reasoning {
-                        println!("\n");
+                        let _ = writeln!(self.out, "\n");
                     }
                     self.head_content();
                     self.started_content = true;
                 }
                 // The answer body stays the terminal default foreground.
-                print!("{text}");
-                let _ = std::io::stdout().flush();
+                let _ = write!(self.out, "{text}");
+                let _ = self.out.flush(); // I2: streaming命门，保留
             }
             AgentEvent::ToolStarted {
                 name, arguments, ..
             } => {
                 if self.started_content || self.started_reasoning {
-                    println!();
+                    let _ = writeln!(self.out);
                 }
                 if self.fancy {
-                    eprintln!(
+                    let _ = writeln!(
+                        self.err,
                         "{}{}{}",
                         color::paint(self.mode, color::Token::Accent, "  → "),
                         color::paint(self.mode, color::Token::Fg, &name),
                         color::paint(self.mode, color::Token::Dim, &format!("({arguments})")),
                     );
                 } else {
-                    eprintln!("[tool: {name}({arguments})]");
+                    let _ = writeln!(self.err, "[tool: {name}({arguments})]");
                 }
             }
             AgentEvent::ToolFinished {
                 result, is_error, ..
             } => {
                 match (self.fancy, is_error) {
-                    (true, true) => eprintln!(
-                        "{}{}",
-                        color::paint(self.mode, color::Token::Dim, "  └ "),
-                        color::paint(self.mode, color::Token::Error, &format!("error · {result}")),
-                    ),
-                    (true, false) => eprintln!(
-                        "{}{}",
-                        color::paint(self.mode, color::Token::Dim, "  └ "),
-                        color::paint(
-                            self.mode,
-                            color::Token::Success,
-                            &format!("ok · {} bytes", result.len()),
-                        ),
-                    ),
-                    (false, true) => eprintln!("[tool error] {result}"),
-                    (false, false) => eprintln!("[result] {} bytes", result.len()),
+                    (true, true) => {
+                        let _ = writeln!(
+                            self.err,
+                            "{}{}",
+                            color::paint(self.mode, color::Token::Dim, "  └ "),
+                            color::paint(
+                                self.mode,
+                                color::Token::Error,
+                                &format!("error · {result}")
+                            ),
+                        );
+                    }
+                    (true, false) => {
+                        let _ = writeln!(
+                            self.err,
+                            "{}{}",
+                            color::paint(self.mode, color::Token::Dim, "  └ "),
+                            color::paint(
+                                self.mode,
+                                color::Token::Success,
+                                &format!("ok · {} bytes", result.len()),
+                            ),
+                        );
+                    }
+                    (false, true) => {
+                        let _ = writeln!(self.err, "[tool error] {result}");
+                    }
+                    (false, false) => {
+                        let _ = writeln!(self.err, "[result] {} bytes", result.len());
+                    }
                 }
                 // The next model response is a fresh segment.
                 self.started_reasoning = false;
@@ -2493,9 +2541,13 @@ impl EventSink for ReplSink {
             AgentEvent::IterationLimit => {
                 let msg = format!("[超过 tool call 上限 {MAX_TOOL_ITERATIONS} 次，中断]");
                 if self.fancy {
-                    eprintln!("{}", color::paint(self.mode, color::Token::Error, &msg));
+                    let _ = writeln!(
+                        self.err,
+                        "{}",
+                        color::paint(self.mode, color::Token::Error, &msg)
+                    );
                 } else {
-                    eprintln!("{msg}");
+                    let _ = writeln!(self.err, "{msg}");
                 }
             }
         }
@@ -3506,6 +3558,94 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use orcarein_core::Message;
+
+    #[test]
+    fn replsink_plain_routes_body_and_headers_to_stdout() {
+        let mut s = ReplSink::with_writers(
+            Vec::<u8>::new(),
+            Vec::<u8>::new(),
+            false,
+            color::ColorMode::None,
+        );
+        s.emit(AgentEvent::Reasoning("想".into()));
+        s.emit(AgentEvent::Content("答".into()));
+        s.emit(AgentEvent::ToolStarted {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        s.emit(AgentEvent::ToolFinished {
+            id: "c1".into(),
+            name: "bash".into(),
+            result: "ok".into(),
+            is_error: false,
+        });
+        let out = String::from_utf8(s.out).unwrap();
+        let err = String::from_utf8(s.err).unwrap();
+        // 头 + 正文在 stdout：
+        assert!(
+            out.contains("[思考]") && out.contains("[回复]"),
+            "stdout headers:\n{out}"
+        );
+        assert!(
+            out.contains("想") && out.contains("答"),
+            "stdout body:\n{out}"
+        );
+        // M2 双向路由：工具行不在 stdout、头不在 stderr：
+        assert!(
+            !out.contains("[tool"),
+            "tool chrome leaked to stdout:\n{out}"
+        );
+        assert!(
+            err.contains("[tool: bash") && !err.contains("[思考]"),
+            "stderr:\n{err}"
+        );
+    }
+
+    #[test]
+    fn replsink_plain_tool_error_goes_to_stderr() {
+        let mut s = ReplSink::with_writers(
+            Vec::<u8>::new(),
+            Vec::<u8>::new(),
+            false,
+            color::ColorMode::None,
+        );
+        s.emit(AgentEvent::ToolFinished {
+            id: "c1".into(),
+            name: "edit".into(),
+            result: "boom".into(),
+            is_error: true,
+        });
+        let err = String::from_utf8(s.err).unwrap();
+        assert!(err.contains("[tool error] boom"), "stderr:\n{err}");
+    }
+
+    #[test]
+    fn replsink_fancy_emits_chrome() {
+        let mut s = ReplSink::with_writers(
+            Vec::<u8>::new(),
+            Vec::<u8>::new(),
+            true,
+            color::ColorMode::None,
+        );
+        s.emit(AgentEvent::Content("hi".into()));
+        s.emit(AgentEvent::ToolStarted {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        let out = String::from_utf8(s.out).unwrap();
+        let err = String::from_utf8(s.err).unwrap();
+        // NO_COLOR (ColorMode::None) 下 paint 是恒等，但 chrome 字符仍在：
+        assert!(
+            out.contains("▌") && out.contains("回复"),
+            "fancy stdout:\n{out}"
+        );
+        assert!(
+            err.contains("→") && err.contains("bash"),
+            "fancy stderr:\n{err}"
+        );
+    }
 
     #[test]
     fn build_provider_without_a_key_names_login_and_the_env_var() {
