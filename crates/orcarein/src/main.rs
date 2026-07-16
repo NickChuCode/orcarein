@@ -68,6 +68,7 @@ const KNOWN_TOOLS: &[&str] = &[
 ];
 
 /// Outcome of handling a slash command — whether the loop continues or quits.
+#[derive(Debug)]
 enum CommandAction {
     Continue,
     Quit,
@@ -3558,6 +3559,129 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use orcarein_core::Message;
+
+    #[test]
+    fn handle_command_decisions_return_the_right_action() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::with_dir(dir.path().to_path_buf());
+        let tools: &[&str] = &[];
+        let skills: &[orcarein_core::Skill] = &[];
+        let mut sess = Session::new("sys");
+
+        // /mode plan -> SwitchMode(Plan)
+        let act = handle_command(
+            "mode plan",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(act, CommandAction::SwitchMode(PermissionMode::Plan)),
+            "got {act:?}"
+        );
+
+        // /model flash -> SwitchModel(_)
+        let act = handle_command(
+            "model flash",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(matches!(act, CommandAction::SwitchModel(_)), "got {act:?}");
+
+        // /resume abc -> SwitchSession(_)
+        let act = handle_command(
+            "resume abc",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(act, CommandAction::SwitchSession(_)),
+            "got {act:?}"
+        );
+
+        // /new -> NewSession
+        let act = handle_command(
+            "new",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(matches!(act, CommandAction::NewSession), "got {act:?}");
+
+        // /quit -> Quit
+        let act = handle_command(
+            "quit",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(matches!(act, CommandAction::Quit), "got {act:?}");
+    }
+
+    #[test]
+    fn handle_command_clear_empties_the_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::with_dir(dir.path().to_path_buf());
+        let tools: &[&str] = &[];
+        let skills: &[orcarein_core::Skill] = &[];
+
+        let mut sess = Session::new("sys");
+        sess.push_user("hi"); // 建立正向基线（C2）
+        assert!(sess.turn_count() > 0, "precondition: session has turns");
+
+        let act = handle_command(
+            "clear",
+            &mut sess,
+            &store,
+            "id",
+            0,
+            "deepseek-v4-flash",
+            0,
+            tools,
+            skills,
+            color::ColorMode::None,
+            PermissionMode::Default,
+        );
+        assert!(matches!(act, CommandAction::Continue), "got {act:?}");
+        assert_eq!(sess.turn_count(), 0, "clear must empty the session");
+    }
 
     #[test]
     fn replsink_plain_routes_body_and_headers_to_stdout() {
