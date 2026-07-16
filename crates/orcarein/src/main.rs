@@ -2307,7 +2307,7 @@ impl PermissionPolicy for InteractivePolicy {
             self.store.remember(&scope, d);
         }
         // Persist ONLY a bash always-allow, as a targeted command rule.
-        if d == Decision::AllowAlways && tool == "bash" {
+        if should_persist_bash(d, tool) {
             if let Some(path) = self.config_path.clone() {
                 persist_bash_rule(&path, args);
             }
@@ -2327,6 +2327,12 @@ fn scope_key(tool: &str, args: &str) -> String {
         }
     }
     tool.to_string()
+}
+
+/// Only a bash always-allow is persisted to config (as a targeted command rule);
+/// every other allow-always stays session-only. Pure so it is unit-testable.
+fn should_persist_bash(d: Decision, tool: &str) -> bool {
+    d == Decision::AllowAlways && tool == "bash"
 }
 
 /// Append a targeted `Bash(<command>)` allow rule to the user's config.toml.
@@ -2688,31 +2694,45 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
     }
 }
 
-/// Synchronously prompts the user. Any input we cannot parse — empty
-/// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default). On a capable
-/// tty it draws the colored `▌ 权限确认` chrome; otherwise a plain one-liner.
-fn prompt_permission(
+/// Parse the user's one-line reply to a permission prompt. Pure so it is unit-
+/// testable without a terminal. First non-whitespace char decides; anything
+/// unrecognized (incl. empty / EOF) is the safe default `DenyOnce`.
+fn parse_permission_reply(line: &str) -> Decision {
+    match line.trim().chars().next() {
+        Some('y') | Some('Y') => Decision::AllowOnce,
+        Some('a') | Some('A') => Decision::AllowAlways,
+        Some('N') => Decision::DenyAlways,
+        _ => Decision::DenyOnce,
+    }
+}
+
+/// Render the permission prompt to `w`. Split out so a test can capture the exact
+/// bytes — including the deliberately newline-free trailing prompt line — without
+/// a terminal. The caller flushes `w` and reads the reply.
+fn render_permission_prompt(
+    w: &mut impl std::io::Write,
     name: &str,
     args: &str,
     fancy: bool,
     mode: color::ColorMode,
     subagent: bool,
-) -> Decision {
+) -> std::io::Result<()> {
     use color::Token;
     // Subagent prompts are visibly tagged so they are not mistaken for the
     // parent agent's own request.
     let who = if subagent { "subagent 请求：" } else { "" };
     if fancy {
         let p = |t: Token, s: &str| color::paint(mode, t, s);
-        eprintln!();
-        eprintln!(
+        writeln!(w)?;
+        writeln!(
+            w,
             "{}{}",
             p(Token::Warning, "▌ 权限确认"),
             p(Token::Dim, &format!("  {who}{name} 请求授权"))
-        );
-        eprintln!();
-        eprintln!("   {}", p(Token::Fg, &format!("{name}({args})")));
-        eprintln!();
+        )?;
+        writeln!(w)?;
+        writeln!(w, "   {}", p(Token::Fg, &format!("{name}({args})")))?;
+        writeln!(w)?;
         // Option keys colored by risk; the default (deny-once) is reverse-marked.
         let opts = format!(
             "{}  {} {}   {} {}   {} {}   {} {}   {}",
@@ -2727,24 +2747,39 @@ fn prompt_permission(
             p(Token::Dim, "永不"),
             p(Token::Warning, "←默认"),
         );
-        eprint!("   {opts} ");
+        // No trailing newline: the cursor must stay on the prompt line.
+        write!(w, "   {opts} ")?;
     } else {
-        eprintln!();
-        eprintln!("{who}OrcaRein wants to run: {name}({args})");
-        eprint!("Allow? [y=once N=never a=always n=once]: ");
+        writeln!(w)?;
+        writeln!(w, "{who}OrcaRein wants to run: {name}({args})")?;
+        // No trailing newline.
+        write!(w, "Allow? [y=once N=never a=always n=once]: ")?;
     }
-    let _ = std::io::stderr().flush();
+    Ok(())
+}
 
+/// Synchronously prompts the user. Any input we cannot parse — empty
+/// line, EOF, IO error — collapses to `DenyOnce` (deny-by-default). On a capable
+/// tty it draws the colored `▌ 权限确认` chrome; otherwise a plain one-liner.
+fn prompt_permission(
+    name: &str,
+    args: &str,
+    fancy: bool,
+    mode: color::ColorMode,
+    subagent: bool,
+) -> Decision {
+    // Best-effort render to stderr; a write error only means a degraded prompt,
+    // not a decision, so it is ignored (the stdin read below still governs).
+    let mut err = std::io::stderr();
+    let _ = render_permission_prompt(&mut err, name, args, fancy, mode, subagent);
+    let _ = err.flush();
+
+    // Preserved guard: a read error → DenyOnce (do not fall through to parse).
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
         return Decision::DenyOnce;
     }
-    match line.trim().chars().next() {
-        Some('y') | Some('Y') => Decision::AllowOnce,
-        Some('a') | Some('A') => Decision::AllowAlways,
-        Some('N') => Decision::DenyAlways,
-        _ => Decision::DenyOnce,
-    }
+    parse_permission_reply(&line)
 }
 
 /// Build the `/history` pager doc: each message becomes a colored role bar plus
@@ -4293,6 +4328,84 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, corrupt, "corrupt config must be left untouched");
         assert!(!after.contains("[permissions]"));
+    }
+
+    #[test]
+    fn parse_permission_reply_maps_first_char() {
+        assert_eq!(parse_permission_reply("y"), Decision::AllowOnce);
+        assert_eq!(parse_permission_reply("Y\n"), Decision::AllowOnce);
+        assert_eq!(parse_permission_reply("a"), Decision::AllowAlways);
+        assert_eq!(parse_permission_reply("A"), Decision::AllowAlways);
+        assert_eq!(parse_permission_reply("N"), Decision::DenyAlways);
+        assert_eq!(parse_permission_reply("n"), Decision::DenyOnce);
+        assert_eq!(parse_permission_reply(""), Decision::DenyOnce); // EOF/空
+        assert_eq!(parse_permission_reply("  \n"), Decision::DenyOnce); // 纯空白
+        assert_eq!(parse_permission_reply("xyz"), Decision::DenyOnce); // 乱码
+    }
+
+    #[test]
+    fn render_permission_prompt_plain_has_no_trailing_newline() {
+        let mut buf: Vec<u8> = Vec::new();
+        render_permission_prompt(
+            &mut buf,
+            "bash",
+            r#"{"command":"ls"}"#,
+            false,
+            color::ColorMode::None,
+            false,
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains(r#"OrcaRein wants to run: bash({"command":"ls"})"#),
+            "got:\n{s}"
+        );
+        assert!(s.contains("Allow?"));
+        assert!(
+            s.ends_with(": "),
+            "prompt line must not end in newline; got tail: {:?}",
+            &s[s.len().saturating_sub(4)..]
+        );
+        assert!(!s.ends_with('\n')); // C1 不变量
+    }
+
+    #[test]
+    fn render_permission_prompt_marks_subagent() {
+        let mut buf: Vec<u8> = Vec::new();
+        render_permission_prompt(&mut buf, "edit", "{}", false, color::ColorMode::None, true)
+            .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("subagent 请求"), "got:\n{s}");
+    }
+
+    #[test]
+    fn render_permission_prompt_fancy_shows_option_keys() {
+        let mut buf: Vec<u8> = Vec::new();
+        render_permission_prompt(&mut buf, "bash", "{}", true, color::ColorMode::None, false)
+            .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("[y]") && s.contains("[a]") && s.contains("[n]") && s.contains("[N]"),
+            "got:\n{s}"
+        );
+        assert!(!s.ends_with('\n')); // C1:fancy 尾行也无换行
+    }
+
+    #[test]
+    fn scope_key_keys_bash_per_command() {
+        assert_eq!(
+            scope_key("bash", r#"{"command":"git status"}"#),
+            "bash\u{0}git status"
+        );
+        assert_eq!(scope_key("edit", "{}"), "edit");
+    }
+
+    #[test]
+    fn should_persist_bash_only_for_bash_allow_always() {
+        assert!(should_persist_bash(Decision::AllowAlways, "bash"));
+        assert!(!should_persist_bash(Decision::AllowAlways, "edit"));
+        assert!(!should_persist_bash(Decision::AllowOnce, "bash"));
+        assert!(!should_persist_bash(Decision::DenyAlways, "bash"));
     }
 
     #[test]
