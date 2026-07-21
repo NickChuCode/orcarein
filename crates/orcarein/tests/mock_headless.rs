@@ -255,3 +255,92 @@ fn plan_search_env_denied() {
         "plan must still deny sensitive search:\n{out}"
     );
 }
+
+#[test]
+fn explicit_allow_beats_sensitive() {
+    // A user allow rule for .env wins over the sensitive-path default → the read
+    // is allowed even headless. Stage .env so it succeeds → [tool ok].
+    let cfg = r#"
+[[permissions.rules]]
+tool = "*"
+path = ".env"
+action = "allow"
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".env"), "SECRET=x").unwrap();
+    let script =
+        r#"[{"tools":[{"name":"read_file","args":"{\"path\":\".env\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(script, "read env", &[], Some(dir.path()), Some(cfg));
+    assert!(
+        !out.contains("permission denied"),
+        "explicit allow must beat sensitive default:\n{out}"
+    );
+    assert!(out.contains("[tool ok]"), "allowed read must run:\n{out}");
+}
+
+#[test]
+fn explicit_deny_survives_yolo() {
+    // yolo only lifts Ask, never Deny. A config deny on bash stands even in yolo.
+    let cfg = r#"
+[[permissions.rules]]
+tool = "bash"
+action = "deny"
+"#;
+    let script =
+        r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo hi\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(
+        script,
+        "run it",
+        &["--permission-mode", "yolo"],
+        None,
+        Some(cfg),
+    );
+    assert!(
+        out.contains("permission denied"),
+        "config deny must survive yolo:\n{out}"
+    );
+}
+
+#[test]
+fn command_glob_allow_and_deny() {
+    // Command-scoped bash rules: allow `echo *`, deny the more specific
+    // `echo secret*`. echo hi runs; echo secret is denied.
+    let cfg = r#"
+[[permissions.rules]]
+tool = "bash"
+command = "echo *"
+action = "allow"
+
+[[permissions.rules]]
+tool = "bash"
+command = "echo secret*"
+action = "deny"
+"#;
+    let allowed = run_mock_in(
+        r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo hi\"}"}]},{"text":"done"}]"#,
+        "echo hi",
+        &[],
+        None,
+        Some(cfg),
+    );
+    assert!(
+        allowed.contains("[tool ok]"),
+        "echo hi (allow rule) must run:\n{allowed}"
+    );
+    assert!(
+        !allowed.contains("permission denied"),
+        "echo hi must not be denied:\n{allowed}"
+    );
+
+    let denied = run_mock_in(
+        r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo secret\"}"}]},{"text":"done"}]"#,
+        "echo secret",
+        &[],
+        None,
+        Some(cfg),
+    );
+    assert!(
+        denied.contains("permission denied"),
+        "echo secret (deny rule) must be denied:\n{denied}"
+    );
+}
