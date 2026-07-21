@@ -3,12 +3,10 @@
 //! platforms, runs in the main --all-features matrix. Gated on mock-provider so
 //! it vanishes from the default build.
 //!
-//! Hermeticity note: `run_once` calls `Config::load()`, so these spawn a child
-//! that reads the ambient `config.toml`. On CI runners (no config) that is
-//! hermetic by absence and deterministic. On a dev box a permissive
-//! `[permissions]` rule could in principle flip a deny assertion (and an
-//! `[mcp_servers]` block would spawn those servers). A test-only config-dir
-//! override is a deferred follow-up — see `notes/book/src/v02-41-e2e-qa-harness.md`.
+//! Hermetic: `run_mock_in` points the child's ORCAREIN_CONFIG_DIR at a fresh
+//! empty tempdir, so it reads neither the dev's config.toml (no [permissions]
+//! rule can flip a deny) nor secrets.toml (no real key = no billing). Config-
+//! rule scenarios inject a test config.toml via the same dir.
 #![cfg(feature = "mock-provider")]
 
 use std::io::Write;
@@ -24,10 +22,24 @@ use std::process::Command;
 /// with "unexpected argument '--provider' found"). `--permission-mode` is
 /// `global = true` and would parse on either side, but `extra_args` goes
 /// before `run` too so one flag order covers every scenario.
-fn run_mock_in(script_json: &str, prompt: &str, extra_args: &[&str], cwd: Option<&Path>) -> String {
+fn run_mock_in(
+    script_json: &str,
+    prompt: &str,
+    extra_args: &[&str],
+    cwd: Option<&Path>,
+    config_toml: Option<&str>,
+) -> String {
     let mut script = tempfile::NamedTempFile::new().expect("temp script");
     script.write_all(script_json.as_bytes()).unwrap();
     script.flush().unwrap();
+
+    // Hermetic config dir: always a fresh empty tempdir → the child reads no
+    // dev config.toml / secrets.toml (no dev [permissions] can flip a deny; no
+    // real API key = no billing). Optionally seed a test config.toml.
+    let cfg_dir = tempfile::tempdir().expect("temp config dir");
+    if let Some(toml) = config_toml {
+        std::fs::write(cfg_dir.path().join("config.toml"), toml).expect("write test config");
+    }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_orcarein"));
     cmd.arg("--provider")
@@ -37,6 +49,7 @@ fn run_mock_in(script_json: &str, prompt: &str, extra_args: &[&str], cwd: Option
         .arg(prompt)
         .env("ORCAREIN_MOCK_SCRIPT", script.path())
         .env("ORCAREIN_PROVIDER", "mock")
+        .env("ORCAREIN_CONFIG_DIR", cfg_dir.path())
         .env("NO_COLOR", "1");
     if let Some(d) = cwd {
         cmd.current_dir(d);
@@ -50,7 +63,7 @@ fn run_mock_in(script_json: &str, prompt: &str, extra_args: &[&str], cwd: Option
 /// Run `orcarein --provider mock <extra_args> run <prompt>` with `script_json`
 /// as the mock script, in the current dir. Returns combined stdout+stderr.
 fn run_mock(script_json: &str, prompt: &str, extra_args: &[&str]) -> String {
-    run_mock_in(script_json, prompt, extra_args, None)
+    run_mock_in(script_json, prompt, extra_args, None, None)
 }
 
 #[test]
@@ -131,6 +144,7 @@ fn accept_edits_allows_edit() {
         "change x",
         &["--permission-mode", "acceptEdits"],
         Some(dir.path()),
+        None,
     );
     assert!(
         !out.contains("permission denied"),
