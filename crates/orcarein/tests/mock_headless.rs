@@ -169,3 +169,89 @@ fn sensitive_path_denied_headless() {
         "sensitive .env read must be denied:\n{out}"
     );
 }
+
+#[test]
+fn accept_edits_denies_bash() {
+    // acceptEdits only lifts edit/write_file; bash still Asks → deny_all denies.
+    let script =
+        r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo hi\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(
+        script,
+        "run it",
+        &["--permission-mode", "acceptEdits"],
+        None,
+        None,
+    );
+    assert!(
+        out.contains("permission denied"),
+        "acceptEdits must still deny bash:\n{out}"
+    );
+}
+
+#[test]
+fn accept_edits_denies_sensitive_edit() {
+    // acceptEdits does NOT eat the sensitive-path default: editing .env still Asks → deny.
+    // (denied at the gate before execute, so the edit args are never validated.)
+    let script = r#"[{"tools":[{"name":"edit","args":"{\"path\":\".env\",\"old_str\":\"a\",\"new_str\":\"b\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(
+        script,
+        "edit env",
+        &["--permission-mode", "acceptEdits"],
+        None,
+        None,
+    );
+    assert!(
+        out.contains("permission denied"),
+        "acceptEdits must still deny sensitive edit:\n{out}"
+    );
+}
+
+#[test]
+fn yolo_allows_sensitive_read() {
+    // yolo lifts every Ask incl. the sensitive default. Stage .env so the read
+    // succeeds → [tool ok] (real positive, not just "not denied").
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".env"), "SECRET=x").unwrap();
+    let script =
+        r#"[{"tools":[{"name":"read_file","args":"{\"path\":\".env\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(
+        script,
+        "read env",
+        &["--permission-mode", "yolo"],
+        Some(dir.path()),
+        None,
+    );
+    assert!(
+        !out.contains("permission denied"),
+        "yolo must not deny sensitive read:\n{out}"
+    );
+    assert!(
+        out.contains("[tool ok]"),
+        "yolo must actually read .env:\n{out}"
+    );
+}
+
+#[test]
+fn sensitive_ssh_path_denied() {
+    // A read of a key-shaped path (id_rsa) hits the sensitive default → deny_all
+    // denies headless. Path comes from args; no real file needed.
+    let script =
+        r#"[{"tools":[{"name":"read_file","args":"{\"path\":\"id_rsa\"}"}]},{"text":"done"}]"#;
+    let out = run_mock(script, "read key", &[]);
+    assert!(
+        out.contains("permission denied"),
+        "reading id_rsa must be denied:\n{out}"
+    );
+}
+
+#[test]
+fn plan_search_env_denied() {
+    // plan whitelists search (read-only) but the sensitive default (step ③)
+    // fires before the plan whitelist (step ④): searching .env still denies.
+    let script = r#"[{"tools":[{"name":"search","args":"{\"pattern\":\"x\",\"path\":\".env\"}"}]},{"text":"done"}]"#;
+    let out = run_mock(script, "search env", &["--permission-mode", "plan"]);
+    assert!(
+        out.contains("permission denied"),
+        "plan must still deny sensitive search:\n{out}"
+    );
+}
