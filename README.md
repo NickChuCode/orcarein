@@ -261,7 +261,10 @@ orcarein session list|resume|delete  # manage saved sessions
 `/init`, `/sessions`, `/resume`, `/new`, `/orca`, `/exit`.
 
 Environment: `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`, `ORCAREIN_PROVIDER`,
-`RUST_LOG` (e.g. `RUST_LOG=orcarein=debug` for diagnostics).
+`RUST_LOG` (e.g. `RUST_LOG=orcarein=debug` for diagnostics),
+`ORCAREIN_CONFIG_DIR` (override the directory holding `config.toml` and
+`secrets.toml` — useful for a hermetic/CI run or juggling multiple configs;
+a blank value falls back to the platform default).
 
 ## Permission modes
 
