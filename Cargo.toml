@@ -8,7 +8,10 @@ members = ["crates/orcarein-core", "crates/orcarein", "crates/orcarein-hardware"
 # tag — vim modal editor, semantic color system + unified header, pager Markdown
 # + syntax highlighting, @-mention completion, MCP client, project memory,
 # /compact, and runtime model switching with a live /v1/models picker.
-version = "0.3.0"
+# v0.4.0: the engineering-track P0 batch — provider retry with backoff, the
+# permission rule engine + four permission modes (default/acceptEdits/plan/yolo),
+# command hooks (PreToolUse/PostToolUse), and subagents (the `task` tool).
+version = "0.4.0"
 authors = ["Yixinzhu@126.com"]
 edition = "2021"
 license = "MIT OR Apache-2.0"

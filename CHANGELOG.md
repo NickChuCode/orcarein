@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
 The engineering-track P0 batch: provider resilience, a real permission
 system, and command hooks. Together these close the gap the [engineering
 plan](notes/specs/2026-07-07-orcarein-engineering-gap-analysis.md) called
