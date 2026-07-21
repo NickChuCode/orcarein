@@ -131,11 +131,30 @@ fn project_dirs() -> Option<directories::ProjectDirs> {
     directories::ProjectDirs::from("", "", "orcarein")
 }
 
+/// The config directory. `ORCAREIN_CONFIG_DIR` (if set to a non-empty value)
+/// wins — it redirects BOTH `config.toml` and `secrets.toml`, used for hermetic
+/// tests and multi-config setups. Otherwise the per-platform directory from
+/// `directories`.
+fn config_dir() -> Option<PathBuf> {
+    config_dir_from(std::env::var_os("ORCAREIN_CONFIG_DIR"))
+}
+
+/// Pure core of [`config_dir`] with the env value injected, so it is unit-
+/// testable without mutating process env. A **blank** override is treated as
+/// unset (mirrors `effective_key`'s blank-is-unset handling) — otherwise
+/// `ORCAREIN_CONFIG_DIR=""` would resolve to a relative `config.toml` in cwd.
+fn config_dir_from(override_dir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    match override_dir {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => project_dirs().map(|d| d.config_dir().to_path_buf()),
+    }
+}
+
 impl Config {
     /// The default config path (`<config_dir>/config.toml`), if the platform
     /// exposes a config directory.
     pub fn config_path() -> Option<PathBuf> {
-        project_dirs().map(|d| d.config_dir().join("config.toml"))
+        config_dir().map(|d| d.join("config.toml"))
     }
 
     /// Loads from the default path. A missing file is **not** an error — it
@@ -261,7 +280,7 @@ pub struct SecretStore {
 impl SecretStore {
     /// The default secrets path (`<config_dir>/secrets.toml`).
     pub fn secrets_path() -> Option<PathBuf> {
-        project_dirs().map(|d| d.config_dir().join("secrets.toml"))
+        config_dir().map(|d| d.join("secrets.toml"))
     }
 
     /// Loads from the default path. A missing file yields an empty store.
@@ -340,6 +359,29 @@ impl SecretStore {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn config_dir_from_uses_explicit_override() {
+        let p = config_dir_from(Some(std::ffi::OsString::from("/tmp/orcarein-x")));
+        assert_eq!(p, Some(std::path::PathBuf::from("/tmp/orcarein-x")));
+    }
+
+    #[test]
+    fn config_dir_from_blank_falls_through_to_platform() {
+        // Empty override must NOT become a relative "config.toml" in cwd.
+        assert_eq!(
+            config_dir_from(Some(std::ffi::OsString::new())),
+            config_dir_from(None)
+        );
+    }
+
+    #[test]
+    fn config_dir_from_none_matches_platform_dir() {
+        assert_eq!(
+            config_dir_from(None),
+            project_dirs().map(|d| d.config_dir().to_path_buf())
+        );
+    }
 
     #[test]
     fn default_is_empty() {
