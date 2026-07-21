@@ -633,6 +633,21 @@ fn cap_chars(s: &str, max_bytes: usize) -> String {
     s[..end].to_string()
 }
 
+/// The model to use when neither `--model` nor `config.model` names one.
+/// Mirrors [`validate_provider`]: the feature-gated `mock` test provider has no
+/// config file and no core `default_model_for` arm (core is mock-agnostic), so
+/// it gets a self-contained placeholder — otherwise `--provider mock` panics
+/// whenever no ambient config supplies a model (hermetic tests, CI).
+fn resolve_default_model(provider: &str) -> String {
+    #[cfg(feature = "mock-provider")]
+    if provider == "mock" {
+        return "mock".to_string();
+    }
+    orcarein_core::default_model_for(provider)
+        .expect("provider validated above")
+        .to_owned()
+}
+
 /// Resolves everything that does not need an API key, from the precedence chain
 /// CLI flag > env var > `config.toml` > built-in default.
 fn resolve_settings(cli: &Cli) -> Result<Settings> {
@@ -650,11 +665,7 @@ fn resolve_settings(cli: &Cli) -> Result<Settings> {
 
     let model = non_blank(cli.model.clone())
         .or_else(|| non_blank(config.model.clone()))
-        .unwrap_or_else(|| {
-            orcarein_core::default_model_for(&provider)
-                .expect("provider validated above")
-                .to_owned()
-        });
+        .unwrap_or_else(|| resolve_default_model(&provider));
 
     let tools_allowlist = cli.tools.clone().or_else(|| config.tools_allowlist.clone());
 
@@ -3802,6 +3813,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown provider"), "{err}");
+    }
+
+    #[test]
+    fn resolve_default_model_uses_provider_default() {
+        assert_eq!(
+            resolve_default_model("deepseek"),
+            orcarein_core::default_model_for("deepseek").unwrap()
+        );
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn resolve_default_model_mock_is_self_contained() {
+        // mock has no config + no core arm; must resolve without panicking.
+        assert_eq!(resolve_default_model("mock"), "mock");
     }
 
     #[test]
