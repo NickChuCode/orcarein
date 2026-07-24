@@ -254,6 +254,8 @@ struct Resolved {
     /// REPL (wrapped in a runtime `SharedMode`) and by headless `run`
     /// (`run_once`, one-shot); `issue` never applies a mode.
     perm_mode: PermissionMode,
+    /// The `[verify]` verification-gate config from `config.toml`, if any.
+    verify: Option<orcarein_core::VerifyConfig>,
 }
 
 /// Everything the CLI/env/config chain yields that does **not** need an API key.
@@ -271,6 +273,7 @@ struct Settings {
     hooks: HookSet,
     retry: RetryPolicy,
     perm_mode: PermissionMode,
+    verify: Option<orcarein_core::VerifyConfig>,
 }
 
 /// The single source of truth for "is this a provider we support".
@@ -690,6 +693,8 @@ fn resolve_settings(cli: &Cli) -> Result<Settings> {
         .map(HookSet::from_config)
         .unwrap_or_default();
 
+    let verify = config.verify.clone();
+
     // Precedence: --permission-mode > --no-permission (=yolo, deprecated) >
     // [permissions] mode > default. `--no-permission` stays functional but
     // warns, steering users toward the mode flag it's now a special case of.
@@ -715,6 +720,7 @@ fn resolve_settings(cli: &Cli) -> Result<Settings> {
         hooks,
         retry,
         perm_mode,
+        verify,
     })
 }
 
@@ -733,6 +739,7 @@ fn resolve(cli: &Cli) -> Result<Resolved> {
         permission_rules: s.permission_rules,
         hooks: s.hooks,
         perm_mode: s.perm_mode,
+        verify: s.verify,
     })
 }
 
@@ -1703,6 +1710,7 @@ async fn main() -> Result<()> {
         // `/mode`, the per-turn agent rebuild, and the header (T8) can all
         // read/write the live mode.
         perm_mode,
+        verify,
     } = resolve_settings(&cli)?;
 
     // Shared, mutable session posture: the REPL loop (writer, via `/mode`) and
@@ -2219,7 +2227,8 @@ async fn main() -> Result<()> {
         let agent = Agent::new(provider.as_ref(), &registry, &turn_tool_defs)
             .with_cache_mode(cache_mode(&cli))
             .with_ruleset(Ruleset::from_config(base_rules.clone()).with_mode(m))
-            .with_hooks(hooks.clone());
+            .with_hooks(hooks.clone())
+            .with_verify(verify.clone());
 
         let mut sink = ReplSink::new(fancy, mode);
         match agent
@@ -2624,6 +2633,11 @@ impl EventSink for MachineSink {
                 }
             }
             AgentEvent::IterationLimit => eprintln!("[warning: stopped at tool-iteration limit]"),
+            AgentEvent::VerifyStarted { command } => eprintln!("[verify] {command}"),
+            AgentEvent::VerifyPassed => eprintln!("[verify ok]"),
+            AgentEvent::VerifyFailed { summary } => {
+                eprintln!("[verify failed] {}", summary.lines().next().unwrap_or(""))
+            }
             // Reasoning / Content / Usage are diagnostics here: the final
             // answer comes from `TurnOutcome.content`, so stdout stays clean.
             _ => {}
@@ -2688,6 +2702,7 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
         permission_rules,
         hooks,
         perm_mode,
+        verify,
         ..
     } = resolved;
 
@@ -2744,7 +2759,8 @@ async fn run_once(cli: &Cli, prompt_arg: Option<String>, allow: Option<Vec<Strin
     let agent = Agent::new(provider.as_ref(), &registry, &tool_defs)
         .with_cache_mode(cache_mode(cli))
         .with_ruleset(Ruleset::from_config(permission_rules).with_mode(perm_mode))
-        .with_hooks(hooks);
+        .with_hooks(hooks)
+        .with_verify(verify);
     if cli.no_economy {
         eprintln!("orcarein: economy OFF (benchmark — prefix cache defeated)");
     }
@@ -3394,6 +3410,14 @@ impl EventSink for IssueSink {
                 }
             }
             AgentEvent::IterationLimit => eprintln!("orcarein: [iteration limit]"),
+            AgentEvent::VerifyStarted { command } => eprintln!("orcarein: [verify] {command}"),
+            AgentEvent::VerifyPassed => eprintln!("orcarein: [verify ok]"),
+            AgentEvent::VerifyFailed { summary } => {
+                eprintln!(
+                    "orcarein: [verify failed] {}",
+                    summary.lines().next().unwrap_or("")
+                )
+            }
             _ => {}
         }
     }
@@ -3472,6 +3496,7 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         model,
         hooks,
         permission_rules,
+        verify,
         ..
     } = resolve(cli)?;
 
@@ -3528,7 +3553,8 @@ async fn run_issue_inner(cli: &Cli, number: u64) -> Result<i32> {
         .with_cache_mode(cache_mode(cli))
         .with_max_iterations(ISSUE_MAX_ITERATIONS)
         .with_ruleset(Ruleset::from_config(permission_rules))
-        .with_hooks(hooks);
+        .with_hooks(hooks)
+        .with_verify(verify);
 
     // 6. Let the agent work the issue. The Risky tools it may use are gated to
     //    exactly the edit set; read_file is Safe and always allowed.

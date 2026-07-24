@@ -344,3 +344,36 @@ action = "deny"
         "echo secret (deny rule) must be denied:\n{denied}"
     );
 }
+
+#[test]
+fn verify_gate_fires_and_is_visible_headless() {
+    // touched_fs via a yolo-allowed bash, verify="exit 1", max_attempts=1.
+    // The gate must fire once, feed the failure back, and MachineSink must
+    // RENDER the verify events (proves C2: not swallowed by `_ => {}`).
+    let script = r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo hi\"}"}]},{"text":"done"},{"text":"done"}]"#;
+    let config = "[verify]\ncommand = \"exit 1\"\nmax_attempts = 1\n";
+    let out = run_mock_in(
+        script,
+        "do it",
+        &["--permission-mode", "yolo"],
+        None,
+        Some(config),
+    );
+    assert!(
+        out.contains("[verify"),
+        "MachineSink must render verify events (C2):\n{out}"
+    );
+    assert!(
+        out.contains("[verify failed]"),
+        "verify failure must be visible:\n{out}"
+    );
+}
+
+#[test]
+fn no_verify_config_headless_is_clean() {
+    // Zero-regression: no [verify] → no verify output at all.
+    let script =
+        r#"[{"tools":[{"name":"bash","args":"{\"command\":\"echo hi\"}"}]},{"text":"done"}]"#;
+    let out = run_mock_in(script, "do it", &["--permission-mode", "yolo"], None, None);
+    assert!(!out.contains("[verify"), "no gate without config:\n{out}");
+}
