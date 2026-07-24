@@ -27,7 +27,8 @@ pub use agent::{
     TurnOutcome, MAX_TOOL_ITERATIONS,
 };
 pub use config::{
-    env_key_var, Config, ConfigError, PermissionConfig, RetryConfig, SecretStore, CONFIG_KEYS,
+    env_key_var, Config, ConfigError, PermissionConfig, RetryConfig, SecretStore, VerifyConfig,
+    CONFIG_KEYS,
 };
 pub use cost::{CostEstimate, Prices};
 pub use doctor::{Check, CheckStatus, Tally};

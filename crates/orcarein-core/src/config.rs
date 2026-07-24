@@ -88,6 +88,9 @@ pub struct Config {
     /// User-configured tool hooks (PreToolUse / PostToolUse). None = no hooks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HooksConfig>,
+    /// The `[verify]` verification gate. None = gate off (today's behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyConfig>,
 }
 
 /// One MCP server the client should launch and expose tools from.
@@ -113,6 +116,40 @@ pub struct RetryConfig {
     /// Max retries for transient provider HTTP failures. None → default (3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+}
+
+/// The `[verify]` section: the verification-gate command + its guards.
+/// TOML-only (like `[retry]`/`[hooks]`) — deliberately NOT in `CONFIG_KEYS`,
+/// so `config get/set` never touches it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    /// Shell command whose exit code defines "done" (e.g. "cargo test").
+    /// `None` (or the whole table absent) → the gate is a no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Per-run timeout; default 300s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Max gate firings per turn before hard-stop; default 3, floor 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+impl VerifyConfig {
+    /// The configured command. Callers gate on `command.is_some()` before the
+    /// gate fires, so this is only reached when it is `Some`.
+    pub fn command(&self) -> &str {
+        self.command.as_deref().unwrap_or("")
+    }
+    /// Per-run timeout in seconds (default 300).
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(300)
+    }
+    /// Max gate firings per turn (default 3, floored at 1 so the gate always
+    /// runs at least once when a command is configured).
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts.unwrap_or(3).max(1)
+    }
 }
 
 /// The `[permissions]` section: a list of allow/ask/deny rules.
@@ -622,5 +659,52 @@ TOKEN = "x"
         let empty = Config::default();
         assert!(empty.hooks.is_none());
         assert!(!toml::to_string(&empty).unwrap().contains("hooks"));
+    }
+
+    #[test]
+    fn verify_config_deserializes_and_accessors_apply_defaults() {
+        // Only command provided, timeout/attempts use defaults via accessors.
+        let c: Config = toml::from_str("[verify]\ncommand = \"cargo test\"\n").unwrap();
+        let v = c.verify.clone().expect("verify table present");
+        assert_eq!(v.command.as_deref(), Some("cargo test"));
+        assert_eq!(v.command(), "cargo test");
+        assert_eq!(v.timeout_secs(), 300); // default
+        assert_eq!(v.max_attempts(), 3); // default
+    }
+
+    #[test]
+    fn verify_config_round_trips_and_absent_is_none() {
+        // Absent → None (gate is off).
+        let empty: Config = toml::from_str("provider = \"deepseek\"\n").unwrap();
+        assert!(empty.verify.is_none());
+
+        // Full fields round-trip.
+        let c = Config {
+            verify: Some(VerifyConfig {
+                command: Some("just check".into()),
+                timeout_secs: Some(60),
+                max_attempts: Some(2),
+            }),
+            ..Default::default()
+        };
+        let s = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn verify_is_not_a_flat_config_key() {
+        // [verify] is TOML-only, not in the flat-key mechanism.
+        assert!(!CONFIG_KEYS.contains(&"verify"));
+    }
+
+    #[test]
+    fn verify_max_attempts_clamps_to_at_least_one() {
+        let v = VerifyConfig {
+            command: Some("x".into()),
+            timeout_secs: None,
+            max_attempts: Some(0),
+        };
+        assert_eq!(v.max_attempts(), 1); // clamp ≥1, else gate never runs
     }
 }
