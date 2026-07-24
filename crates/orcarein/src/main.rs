@@ -2562,6 +2562,43 @@ impl<O: std::io::Write + Send, E: std::io::Write + Send> EventSink for ReplSink<
                     let _ = writeln!(self.err, "{msg}");
                 }
             }
+            AgentEvent::VerifyStarted { command } => {
+                let msg = format!("verify · {command}");
+                if self.fancy {
+                    let _ = writeln!(
+                        self.err,
+                        "{}{}",
+                        color::paint(self.mode, color::Token::Accent, "  ⟳ "),
+                        color::paint(self.mode, color::Token::Dim, &msg),
+                    );
+                } else {
+                    let _ = writeln!(self.err, "[verify] {command}");
+                }
+            }
+            AgentEvent::VerifyPassed => {
+                if self.fancy {
+                    let _ = writeln!(
+                        self.err,
+                        "{}",
+                        color::paint(self.mode, color::Token::Success, "  ✓ verify passed"),
+                    );
+                } else {
+                    let _ = writeln!(self.err, "[verify ok]");
+                }
+            }
+            AgentEvent::VerifyFailed { summary } => {
+                let head = summary.lines().next().unwrap_or("").to_string();
+                if self.fancy {
+                    let _ = writeln!(
+                        self.err,
+                        "{}{}",
+                        color::paint(self.mode, color::Token::Error, "  ✗ verify failed · "),
+                        color::paint(self.mode, color::Token::Dim, &head),
+                    );
+                } else {
+                    let _ = writeln!(self.err, "[verify failed] {head}");
+                }
+            }
         }
     }
 }

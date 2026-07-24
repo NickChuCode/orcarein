@@ -16,14 +16,15 @@
 //! fed back to the model as the tool result so it can react. Only a
 //! provider/transport failure aborts the turn ([`AgentError`]).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 
 use futures_util::StreamExt;
 
 use crate::tool::ToolError;
 use crate::{
     Action, ChatOptions, Decision, HookOutcome, HookSet, Message, Provider, RiskLevel, Ruleset,
-    Session, StreamEvent, TokenUsage, ToolCall, ToolDefinition, ToolRegistry,
+    Session, StreamEvent, TokenUsage, ToolCall, ToolDefinition, ToolRegistry, VerifyConfig,
 };
 
 /// Upper bound on tool-call iterations within one user turn. Prevents an
@@ -63,6 +64,13 @@ pub enum AgentEvent {
     Usage(TokenUsage),
     /// The turn stopped because it hit [`MAX_TOOL_ITERATIONS`].
     IterationLimit,
+    /// The verification gate is about to run its command.
+    VerifyStarted { command: String },
+    /// The verification command exited 0 — the turn may complete.
+    VerifyPassed,
+    /// The verification command failed; `summary` is the (capped) output fed
+    /// back to the model.
+    VerifyFailed { summary: String },
 }
 
 /// Where a frontend receives [`AgentEvent`]s as the turn runs.
@@ -153,6 +161,120 @@ pub struct TurnOutcome {
     /// True if the turn stopped because it hit [`MAX_TOOL_ITERATIONS`] rather
     /// than the model finishing on its own.
     pub hit_iteration_limit: bool,
+    /// The final verification-gate state at completion, if a `[verify]` command
+    /// was configured and fired this turn. None = gate off or never triggered.
+    pub verify: Option<VerifyOutcome>,
+}
+
+/// The result of one verification-gate run. `passed` mirrors the command's
+/// exit status; `summary` is the (capped) output fed back to the model on
+/// failure. Default is a *failed* empty outcome — a fail-closed baseline.
+///
+/// NOTE: this is `orcarein-core`'s type. The `orcarein` bin has an UNRELATED
+/// `enum VerifyOutcome` (login key check) — never import this one there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifyOutcome {
+    pub passed: bool,
+    pub summary: String,
+}
+
+/// Harness-held ground truth about the turn in flight. These pieces exist
+/// today only as transcript text; TurnState captures them structurally so the
+/// harness — not the model — can decide when the turn is "done".
+#[derive(Debug, Default, Clone)]
+pub struct TurnState {
+    /// Files written/edited this turn (best-effort, from write_file/edit args).
+    pub files_changed: BTreeSet<PathBuf>,
+    /// Whether the turn may have mutated the filesystem — set by write_file/edit
+    /// AND by any successful `bash` (which can write via `>`/`sed -i`/...). This,
+    /// not `files_changed`, is the gate's trigger.
+    pub touched_fs: bool,
+    /// Result of the most recent verification-gate run, if any.
+    pub last_verify: Option<VerifyOutcome>,
+    /// Consecutive tool calls that returned an `ERROR:`-prefixed result.
+    pub consecutive_tool_failures: usize,
+    /// How many times the gate has fired this turn (loop guard).
+    pub verify_attempts: usize,
+}
+
+impl TurnState {
+    /// Fold one dispatched tool call's outcome into the ground truth. Pure and
+    /// synchronous so it is unit-testable without a provider/policy/sink.
+    /// `arguments` is the raw JSON the model sent (known-good when `!is_error`).
+    fn record_tool(&mut self, name: &str, is_error: bool, arguments: &str) {
+        if is_error {
+            self.consecutive_tool_failures += 1;
+            return;
+        }
+        self.consecutive_tool_failures = 0;
+        match name {
+            "write_file" | "edit" => {
+                self.touched_fs = true;
+                if let Some(path) = serde_json::from_str::<serde_json::Value>(arguments)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(PathBuf::from))
+                {
+                    self.files_changed.insert(path);
+                }
+            }
+            // bash can write files (`>`, `sed -i`, `cargo fmt`) — coarse flag,
+            // no path recorded.
+            "bash" => self.touched_fs = true,
+            _ => {}
+        }
+    }
+}
+
+/// Cap verify output the way bash does (32 KiB/stream) so a noisy suite can't
+/// overflow the model context when fed back.
+const VERIFY_OUTPUT_CAP: usize = 32 * 1024;
+
+/// Runs the configured verify command and classifies the result. Never returns
+/// an error: a spawn failure or timeout is a *failed* verification (fail
+/// closed), so a broken command blocks completion rather than silently passing.
+async fn run_verify(v: &VerifyConfig) -> VerifyOutcome {
+    // Shell selection copied verbatim from bash.rs:62-66 (bash -c, NOT sh -c).
+    let (program, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("bash", "-c")
+    };
+    run_shell(program, flag, v.command(), v.timeout_secs()).await
+}
+
+/// The spawn+classify core, split out from `run_verify` so the spawn-failure
+/// path is unit-testable with a bogus `program` (a nonexistent command run
+/// *through* bash exits 127 — a normal failed output, not a spawn error).
+async fn run_shell(program: &str, flag: &str, command: &str, timeout_secs: u64) -> VerifyOutcome {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.arg(flag).arg(command).stdin(Stdio::null());
+
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
+        // Timeout.
+        Err(_) => VerifyOutcome {
+            passed: false,
+            summary: format!("verify timed out after {timeout_secs}s"),
+        },
+        // Spawn failure (program itself missing / not executable). Fail closed.
+        Ok(Err(e)) => VerifyOutcome {
+            passed: false,
+            summary: format!("failed to run verify command: {e}"),
+        },
+        // Ran to completion — exit status defines pass/fail.
+        Ok(Ok(output)) => {
+            let stdout =
+                crate::text::cap(&String::from_utf8_lossy(&output.stdout), VERIFY_OUTPUT_CAP);
+            let stderr =
+                crate::text::cap(&String::from_utf8_lossy(&output.stderr), VERIFY_OUTPUT_CAP);
+            VerifyOutcome {
+                passed: output.status.success(),
+                summary: format!("stdout:\n{stdout}\nstderr:\n{stderr}"),
+            }
+        }
+    }
 }
 
 /// Errors that abort an agent turn.
@@ -215,6 +337,7 @@ pub struct Agent<'a> {
     max_iterations: usize,
     ruleset: Ruleset,
     hooks: HookSet,
+    verify: Option<VerifyConfig>,
 }
 
 impl<'a> Agent<'a> {
@@ -235,6 +358,7 @@ impl<'a> Agent<'a> {
             max_iterations: MAX_TOOL_ITERATIONS,
             ruleset: Ruleset::with_defaults(),
             hooks: HookSet::empty(),
+            verify: None,
         }
     }
 
@@ -268,6 +392,13 @@ impl<'a> Agent<'a> {
         self
     }
 
+    /// Sets the verification gate (default: none). The binary passes the user's
+    /// `[verify]` config for REPL / run / issue; init and sub-agents keep None.
+    pub fn with_verify(mut self, verify: Option<VerifyConfig>) -> Self {
+        self.verify = verify;
+        self
+    }
+
     /// Runs one user turn to completion: streams a completion, executes any
     /// tool calls (gating each tool through its permission ruleset; an `Ask`
     /// result consults `policy`), feeds the results back, and repeats until
@@ -287,6 +418,7 @@ impl<'a> Agent<'a> {
         let mut turn_usage = TokenUsage::default();
         let mut final_content = String::new();
         let mut iteration = 0usize;
+        let mut turn_state = TurnState::default();
 
         loop {
             if iteration >= self.max_iterations {
@@ -296,6 +428,7 @@ impl<'a> Agent<'a> {
                     content: final_content,
                     usage: turn_usage,
                     hit_iteration_limit: true,
+                    verify: turn_state.last_verify.clone(),
                 });
             }
 
@@ -348,12 +481,40 @@ impl<'a> Agent<'a> {
             session.push_assistant(assistant_msg);
 
             if tool_calls.is_empty() {
+                if let Some(v) = self.verify.as_ref().filter(|v| v.command.is_some()) {
+                    let should_verify = turn_state.touched_fs
+                        && turn_state.verify_attempts < v.max_attempts() as usize;
+                    if should_verify {
+                        sink.emit(AgentEvent::VerifyStarted {
+                            command: v.command().to_string(),
+                        });
+                        let outcome = run_verify(v).await;
+                        turn_state.verify_attempts += 1;
+                        turn_state.last_verify = Some(outcome.clone());
+                        if !outcome.passed {
+                            sink.emit(AgentEvent::VerifyFailed {
+                                summary: outcome.summary.clone(),
+                            });
+                            session.push_user(format!(
+                                "Verification failed (`{}`):\n{}\nFix the failures and continue.",
+                                v.command(),
+                                outcome.summary
+                            ));
+                            // verify gate does NOT consume an iteration (I4): the
+                            // model's fix round walks the normal dispatch loop and
+                            // pays iteration there; verify_attempts/max_attempts is
+                            // the independent governor.
+                            continue;
+                        }
+                        sink.emit(AgentEvent::VerifyPassed);
+                    }
+                }
                 final_content = content;
                 break;
             }
 
             for call in &tool_calls {
-                let result = self.dispatch(policy, call, sink).await;
+                let result = self.dispatch(policy, call, sink, &mut turn_state).await;
                 session.push_assistant(Message::tool(&call.id, result));
             }
 
@@ -365,6 +526,7 @@ impl<'a> Agent<'a> {
             content: final_content,
             usage: turn_usage,
             hit_iteration_limit: false,
+            verify: turn_state.last_verify,
         })
     }
 
@@ -376,6 +538,7 @@ impl<'a> Agent<'a> {
         policy: &mut dyn PermissionPolicy,
         call: &ToolCall,
         sink: &mut dyn EventSink,
+        turn_state: &mut TurnState,
     ) -> String {
         sink.emit(AgentEvent::ToolStarted {
             id: call.id.clone(),
@@ -385,6 +548,8 @@ impl<'a> Agent<'a> {
 
         let result = self.run_tool(policy, call).await;
         let is_error = result.starts_with(ERROR_PREFIX);
+
+        turn_state.record_tool(&call.function.name, is_error, &call.function.arguments);
 
         sink.emit(AgentEvent::ToolFinished {
             id: call.id.clone(),
@@ -548,6 +713,315 @@ mod tests {
 
     fn collecting_sink(buf: &mut Vec<AgentEvent>) -> impl FnMut(AgentEvent) + '_ {
         move |ev| buf.push(ev)
+    }
+
+    #[test]
+    fn turn_state_records_writes_bash_and_errors() {
+        let mut ts = TurnState::default();
+        ts.record_tool("write_file", false, r#"{"path":"a.txt","content":"x"}"#);
+        assert!(ts.touched_fs);
+        assert!(ts
+            .files_changed
+            .contains(&std::path::PathBuf::from("a.txt")));
+
+        ts.record_tool(
+            "edit",
+            false,
+            r#"{"path":"b.rs","old_str":"x","new_str":"y"}"#,
+        );
+        assert!(ts.files_changed.contains(&std::path::PathBuf::from("b.rs")));
+
+        // bash: coarse touched_fs, no path.
+        let mut bash_ts = TurnState::default();
+        bash_ts.record_tool("bash", false, r#"{"command":"echo hi"}"#);
+        assert!(bash_ts.touched_fs);
+        assert!(bash_ts.files_changed.is_empty());
+
+        // errors accumulate; a later success clears the counter.
+        let mut err_ts = TurnState::default();
+        err_ts.record_tool("search", true, "{}");
+        err_ts.record_tool("search", true, "{}");
+        assert_eq!(err_ts.consecutive_tool_failures, 2);
+        assert!(!err_ts.touched_fs);
+        err_ts.record_tool("search", false, "{}");
+        assert_eq!(err_ts.consecutive_tool_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn run_verify_passes_and_fails_by_exit_code() {
+        let pass = VerifyConfig {
+            command: Some("exit 0".into()),
+            timeout_secs: None,
+            max_attempts: None,
+        };
+        assert!(run_verify(&pass).await.passed);
+
+        let fail = VerifyConfig {
+            command: Some("exit 1".into()),
+            timeout_secs: None,
+            max_attempts: None,
+        };
+        assert!(!run_verify(&fail).await.passed);
+    }
+
+    #[tokio::test]
+    async fn run_shell_fails_closed_on_spawn_error() {
+        // Bogus program → spawn error → fail closed with the M1 summary.
+        let out = run_shell("orcarein_no_such_program_xyz", "-c", "true", 5).await;
+        assert!(!out.passed);
+        assert!(
+            out.summary.contains("failed to run verify command"),
+            "summary: {}",
+            out.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn run_shell_times_out() {
+        // Sleep longer than the timeout → timeout branch (portable: `exit 0`
+        // returns immediately, so use a sleep that both shells understand only
+        // on unix; on Windows use `ping` as a delay).
+        let (prog, flag, cmd) = if cfg!(windows) {
+            ("cmd", "/C", "ping -n 3 127.0.0.1")
+        } else {
+            ("bash", "-c", "sleep 2")
+        };
+        let out = run_shell(prog, flag, cmd, 1).await; // 1s timeout < command
+        assert!(!out.passed);
+        assert!(
+            out.summary.contains("timed out"),
+            "summary: {}",
+            out.summary
+        );
+    }
+
+    /// A `Safe` tool named `write_file` for gate tests — echoes, never touches
+    /// disk, but its NAME drives TurnState.touched_fs like the real one.
+    struct FakeWrite;
+    #[async_trait]
+    impl Tool for FakeWrite {
+        fn name(&self) -> &str {
+            "write_file"
+        }
+        fn description(&self) -> &str {
+            "fake write"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Safe
+        }
+        async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(args.to_string()))
+        }
+    }
+
+    /// A `Safe` tool named `bash` for the I2 gate test.
+    struct FakeBash;
+    #[async_trait]
+    impl Tool for FakeBash {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "fake bash"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Safe
+        }
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new("ran"))
+        }
+    }
+
+    fn verify_cfg(command: &str, max_attempts: u32) -> VerifyConfig {
+        VerifyConfig {
+            command: Some(command.to_string()),
+            timeout_secs: None,
+            max_attempts: Some(max_attempts),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_verify_config_is_todays_behavior() {
+        let provider = MockProvider::new();
+        provider.push_text("all done");
+        let registry = ToolRegistry::new();
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs); // no with_verify
+
+        let mut session = Session::new("sys");
+        session.push_user("hi");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        assert_eq!(outcome.content, "all done");
+        assert!(outcome.verify.is_none());
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::VerifyStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn gate_blocks_completion_when_verify_fails() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "write_file", r#"{"path":"f.txt","content":"x"}"#);
+        provider.push_text("done"); // model says done → gate fires, fails
+        provider.push_text("done"); // after push_user + continue, says done again
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeWrite));
+        let defs = registry.definitions();
+        let agent =
+            Agent::new(&provider, &registry, &defs).with_verify(Some(verify_cfg("exit 1", 1))); // max_attempts=1
+
+        let mut session = Session::new("sys");
+        session.push_user("write it");
+        let mut policy = AllowlistPolicy::deny_all(); // FakeWrite is Safe
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        // Fired once, failed, fed the failure back, then hard-stopped.
+        assert_eq!(outcome.verify.as_ref().map(|v| v.passed), Some(false));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::VerifyFailed { .. })));
+        assert!(session
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("Verification failed")));
+    }
+
+    #[tokio::test]
+    async fn gate_allows_completion_when_verify_passes() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "write_file", r#"{"path":"f.txt","content":"x"}"#);
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeWrite));
+        let defs = registry.definitions();
+        let agent =
+            Agent::new(&provider, &registry, &defs).with_verify(Some(verify_cfg("exit 0", 3)));
+
+        let mut session = Session::new("sys");
+        session.push_user("write it");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        assert_eq!(outcome.content, "done");
+        assert_eq!(outcome.verify.as_ref().map(|v| v.passed), Some(true));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::VerifyPassed)));
+    }
+
+    #[tokio::test]
+    async fn verify_skipped_when_no_touch() {
+        let provider = MockProvider::new();
+        provider.push_text("just chatting, no edits");
+        let registry = ToolRegistry::new();
+        let defs = registry.definitions();
+        let agent =
+            Agent::new(&provider, &registry, &defs).with_verify(Some(verify_cfg("exit 1", 3))); // would fail IF it ran
+
+        let mut session = Session::new("sys");
+        session.push_user("hello");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        // touched_fs == false → verify never ran → completed cleanly.
+        assert_eq!(outcome.content, "just chatting, no edits");
+        assert!(outcome.verify.is_none());
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::VerifyStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn verify_fires_after_bash() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "bash", r#"{"command":"echo hi"}"#);
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeBash));
+        let defs = registry.definitions();
+        let agent =
+            Agent::new(&provider, &registry, &defs).with_verify(Some(verify_cfg("exit 0", 3)));
+
+        let mut session = Session::new("sys");
+        session.push_user("run it");
+        let mut policy = AllowlistPolicy::deny_all(); // FakeBash is Safe
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let _ = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        // Successful bash set touched_fs → gate ran.
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::VerifyStarted { .. })));
+    }
+
+    #[tokio::test]
+    async fn attempts_cap_hard_stops() {
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "write_file", r#"{"path":"f.txt","content":"x"}"#);
+        // 3 "done"s: two get verified-and-failed, the third breaks at the cap.
+        provider.push_text("done");
+        provider.push_text("done");
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeWrite));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs)
+            .with_verify(Some(verify_cfg("exit 1", 2))) // max_attempts=2
+            .with_max_iterations(25); // I4: keep max_attempts (not iteration) binding
+
+        let mut session = Session::new("sys");
+        session.push_user("write it");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        // Exactly max_attempts (2) gate firings, then hard-stop with failure.
+        let fires = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::VerifyStarted { .. }))
+            .count();
+        assert_eq!(fires, 2);
+        assert_eq!(outcome.verify.as_ref().map(|v| v.passed), Some(false));
     }
 
     #[tokio::test]
