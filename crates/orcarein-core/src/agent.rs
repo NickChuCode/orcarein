@@ -251,6 +251,11 @@ async fn run_shell(program: &str, flag: &str, command: &str, timeout_secs: u64) 
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.arg(flag).arg(command).stdin(Stdio::null());
+    // Without this, a timeout drops the `output()` future but leaves the
+    // child running (tokio defaults to kill_on_drop(false)); an orphaned
+    // `cargo test` would hold the `target/` build lock across gate retries.
+    // No-op on normal completion — the child has already exited by then.
+    cmd.kill_on_drop(true);
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
         // Timeout.
@@ -1022,6 +1027,46 @@ mod tests {
             .count();
         assert_eq!(fires, 2);
         assert_eq!(outcome.verify.as_ref().map(|v| v.passed), Some(false));
+    }
+
+    #[tokio::test]
+    async fn verify_retries_do_not_consume_iteration() {
+        // I4 proof: max_iterations is tight enough (2) that if a verify-fail
+        // retry wrongly incremented `iteration`, the loop-top guard would trip
+        // after the first gate firing and we'd see only 1 fire + a hard iteration
+        // stop instead of the full 3 gate firings this test expects.
+        let provider = MockProvider::new();
+        provider.push_tool_call("c1", "write_file", r#"{"path":"f.txt","content":"x"}"#);
+        // Four "done"s: three get verified-and-failed (max_attempts=3), the
+        // fourth sees verify_attempts(3) < max_attempts(3) == false and breaks.
+        provider.push_text("done");
+        provider.push_text("done");
+        provider.push_text("done");
+        provider.push_text("done");
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeWrite));
+        let defs = registry.definitions();
+        let agent = Agent::new(&provider, &registry, &defs)
+            .with_verify(Some(verify_cfg("exit 1", 3))) // max_attempts=3
+            .with_max_iterations(2); // tight: would trip if verify wrongly consumed iteration
+
+        let mut session = Session::new("sys");
+        session.push_user("write it");
+        let mut policy = AllowlistPolicy::deny_all();
+        let mut events = Vec::new();
+        let mut sink = collecting_sink(&mut events);
+        let outcome = agent
+            .run_turn(&mut session, "m", &mut policy, &mut sink)
+            .await
+            .unwrap();
+        drop(sink);
+
+        let fires = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::VerifyStarted { .. }))
+            .count();
+        assert_eq!(fires, 3);
+        assert!(!outcome.hit_iteration_limit);
     }
 
     #[tokio::test]
