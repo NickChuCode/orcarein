@@ -324,13 +324,44 @@ Hooks apply uniformly across the REPL, `run`, `issue`, and `/init`, and are
 **not** limited by the active permission mode — a hook you configured is your
 decision, not the model's, so it runs even in `plan` mode.
 
+## Verification gate
+
+`[verify]` is an opt-in convergence check: instead of trusting the model's own
+"I'm done" signal, the harness runs a command you configure and only lets the
+turn complete once it exits `0`.
+
+```toml
+[verify]
+command = "cargo test"   # exit 0 = the turn may complete; nonzero = keep fixing
+timeout_secs = 300       # optional (default 300)
+max_attempts = 3         # optional (default 3): gate firings before hard-stop
+```
+
+- **Opt-in.** No `[verify]` table (the default) is today's behavior unchanged —
+  the turn ends the moment the model stops calling tools.
+- **Fires only after a turn that touched the filesystem.** The gate runs when
+  the model has called `write_file`, `edit`, or `bash` at least once and is
+  about to finish with no further tool calls; a pure Q&A turn never triggers
+  it, no matter what `command` is configured.
+- **Runs in the process's current working directory**, via the same shell
+  selection the `bash` tool uses (`bash -c` on Unix, `cmd /C` on Windows).
+- **A failure is fed back, not silently swallowed.** A nonzero exit appends
+  the command's (32 KiB-capped) stdout/stderr as a new message telling the
+  model verification failed and to keep fixing, then the turn loops back —
+  without consuming one of the tool-call iterations, which is a separate
+  cap.
+- **Hard-stops** after `max_attempts` consecutive gate failures, or sooner if
+  the turn hits the tool-iteration cap first.
+- Wired into the REPL, `run`, and `issue`; **not** applied to `/init` or to
+  sub-agents spawned via the `task` tool.
+
 ## Configuration
 
 Resolved precedence: **CLI flag > environment variable > `config.toml` > built-in default.**
 
 - `config.toml` — non-secret preferences (`provider`, `model`, `tools`,
   `system_prompt`, `[retry]`, `[permissions]` (rules + mode), `[hooks]`,
-  `[[mcp_servers]]`). Manage with `orcarein config set provider openai`.
+  `[verify]`, `[[mcp_servers]]`). Manage with `orcarein config set provider openai`.
 - `secrets.toml` — API keys, written `0600` on Unix. Keys are also read from the
   environment (env takes precedence). **Never** pass a key as a CLI flag.
 

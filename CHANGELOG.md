@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[verify]` verification gate (opt-in)** — after a turn that touched the
+  filesystem, runs a configured command (e.g. `cargo test`); a nonzero exit
+  is fed back to the model instead of letting the turn end, with a
+  configurable `max_attempts` hard-stop.
+
 ## [0.4.0] - 2026-07-21
 
 The engineering-track P0 batch: provider resilience, a real permission
